@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
+import { fitBody, initBody } from './body.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -91,160 +93,61 @@ scanRing.visible = false;
 scene.add(scanRing);
 
 let avatar = null, ghost = null, scanning = false;
-
-// Proportions as fractions of height, used for anything a scan hasn't measured.
-const DEF = {
-  male: { neck_w: .07, shoulders_w: .265, chest_w: .183, waist_w: .166, hips_w: .194, arm_w: .057, thigh_w: .097, calf_w: .069 },
-  female: { neck_w: .062, shoulders_w: .245, chest_w: .178, waist_w: .153, hips_w: .215, arm_w: .055, thigh_w: .104, calf_w: .07 },
-  levels: { lv_neck: .855, lv_shoulder: .818, lv_chest: .72, lv_waist: .6, lv_hips: .5, lv_hip: .52, lv_knee: .285, lv_ankle: .045, upperarm: .186, forearm: .146 },
-};
-const DEPTH = { neck: 1, chest: .72, waist: .78, hips: .75 };
-function fullDims(dims, H, sex) {
-  const d = {};
-  for (const [k, v] of Object.entries({ ...DEF[sex === 'female' ? 'female' : 'male'], ...DEF.levels })) d[k] = v * H;
-  for (const p of ['arm', 'thigh', 'calf']) for (const s of ['l', 'r']) d[`${p}_${s}_w`] = d[`${p}_w`];
-  Object.assign(d, dims);
-  for (const [p, r] of Object.entries(DEPTH)) d[`${p}_d`] = dims?.[`${p}_d`] ?? d[`${p}_w`] * r;
-  d.H = H;
-  return d;
-}
-
-// Smooth loft through elliptical-ish rings [{y, w, d}] (bottom→top); superellipse makes the torso less tube-like.
-function loft(rings, power = 2.5) {
-  const curve = new THREE.CatmullRomCurve3(rings.map((r) => new THREE.Vector3(r.w, r.y, r.d)), false, 'centripetal');
-  const N = 64, SEG = 40, e = 2 / power, pos = [], index = [];
-  for (let i = 0; i <= N; i++) {
-    const c = curve.getPoint(i / N);
-    for (let j = 0; j <= SEG; j++) {
-      const t = (j / SEG) * Math.PI * 2, ct = Math.cos(t), st = Math.sin(t);
-      pos.push(Math.sign(ct) * Math.abs(ct) ** e * c.x / 2, c.y, Math.sign(st) * Math.abs(st) ** e * c.z / 2);
-    }
-  }
-  for (let i = 0; i < N; i++) for (let j = 0; j < SEG; j++) {
-    const a = i * (SEG + 1) + j, b = a + SEG + 1;
-    index.push(a, b, a + 1, b, b + 1, a + 1);
-  }
+const BODY = initBody(...await Promise.all([fetch('/static/body.json').then((r) => r.json()),
+  fetch('/static/body.bin').then((r) => r.arrayBuffer())]));
+function geometry(pos, index, color) {
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setIndex(index);
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  if (color) g.setAttribute('color', new THREE.BufferAttribute(color, 3));
+  g.setIndex(new THREE.BufferAttribute(index, 1));
   g.computeVertexNormals();
   return g;
 }
-// Limb from a radius profile [[r, y]] with y ascending from 0.
-function lathe(profile) {
-  const pts = new THREE.SplineCurve(profile.map(([r, y]) => new THREE.Vector2(r, y))).getPoints(56);
-  return new THREE.LatheGeometry([new THREE.Vector2(0, profile[0][1]), ...pts, new THREE.Vector2(0, profile.at(-1)[1])], 32);
-}
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.45;
 
-const COLORS = { base: new THREE.Color('#9db7d6'), good: new THREE.Color('#4cff9a'), bad: new THREE.Color('#ff6b6b'), sel: new THREE.Color('#3ef0ff') };
-function partColor(p) {
-  if (p === selectedPart) return COLORS.sel;
-  const ch = S?.insights.parts[p]?.change, t = S && tone(p, ch);
-  const c = COLORS.base.clone();
-  if (t) c.lerp(COLORS[t], 0.55);
-  if (p === hovered) c.lerp(new THREE.Color('#ffffff'), 0.35);
+const COLORS = { cloth: new THREE.Color('#262b36'), good: new THREE.Color('#4cff9a'), bad: new THREE.Color('#ff6b6b'), sel: new THREE.Color('#3ef0ff'), white: new THREE.Color('#ffffff') };
+function partColor(p, cloth) {
+  const c = cloth ? COLORS.cloth.clone() : new THREE.Color(S?.profile?.skin || '#c99478');
+  if (p === selectedPart) return c.lerp(COLORS.sel, 0.55);
+  const t = S && p !== 'overall' && tone(p, S.insights.parts[p]?.change);
+  if (t) c.lerp(COLORS[t], 0.45);
+  if (p === hovered) c.lerp(COLORS.white, 0.3);
   return c;
 }
 
 function buildAvatar(dims, sex, isGhost) {
-  const H = S.profile?.height_cm ?? 175, d = fullDims(dims, H, sex);
-  if (isGhost) for (const k in d) if (/_[wd]$/.test(k)) d[k] -= 1.2; // hide sub-6 mm differences (and z-fighting)
+  // Ghost = first scan as a translucent shell that loses depth ties, so it only shows where the body has shrunk.
+  // Shrinking it 6 mm per side hides noise-level differences (and z-fighting).
+  const d = isGhost ? Object.fromEntries(Object.entries(dims || {}).map(([k, v]) => [k, /_[wd]$/.test(k) ? v - 1.2 : v])) : dims;
+  const fit = fitBody(d, S.profile?.height_cm ?? 175, sex);
+  const body = geometry(fit.pos, BODY.index, isGhost ? null : new Float32Array(fit.pos.length));
+  body.userData = { parts: fit.parts, cloth: fit.cloth };
   const group = new THREE.Group();
-  // Ghost = first scan as a translucent shell that loses depth ties, so it only shows where the body has shrunk since.
-  const mat = isGhost
-    ? new THREE.MeshBasicMaterial({ color: '#3ef0ff', transparent: true, opacity: 0.22, depthWrite: false,
-      polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 8 })
-    : new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0.12 });
-  const add = (geo, partAt, place) => {
-    const mesh = new THREE.Mesh(geo, mat);
-    if (!isGhost) {
-      const y = geo.attributes.position;
-      geo.userData.parts = Array.from({ length: y.count }, (_, i) => partAt(y.getY(i)));
-      geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(y.count * 3), 3));
-      mesh.castShadow = true;
-    }
-    mesh.userData.partAt = partAt;
-    place?.(mesh);
-    group.add(mesh);
-    return mesh;
-  };
-  const along = (from, to) => (mesh) => { // put a +Y-built limb from point `from` toward `to`
-    mesh.position.copy(from);
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), to.clone().sub(from).normalize());
-  };
-
-  // torso + neck
-  const shY = d.lv_shoulder, neckY = Math.max(d.lv_neck, shY + .045 * H);
-  const rings = [
-    { y: d.lv_hips - .07 * H, w: d.hips_w * .7, d: d.hips_d * .6 },
-    { y: d.lv_hips - .04 * H, w: d.hips_w * .96, d: d.hips_d * .9 },
-    { y: d.lv_hips, w: d.hips_w, d: d.hips_d },
-    { y: d.lv_waist, w: d.waist_w, d: d.waist_d },
-    { y: d.lv_chest, w: d.chest_w, d: d.chest_d },
-    { y: shY - .03 * H, w: Math.max(d.chest_w, d.shoulders_w * .8), d: d.chest_d * .92 },
-    { y: shY + .012 * H, w: d.shoulders_w * .72, d: d.chest_d * .6 },
-    { y: shY + .028 * H, w: d.neck_w * 1.45, d: d.neck_d * 1.1 },
-    { y: neckY, w: d.neck_w, d: d.neck_d },
-    { y: neckY + .035 * H, w: d.neck_w * .95, d: d.neck_d * .95 },
-  ].sort((a, b) => a.y - b.y);
-  const torsoCuts = [['hips', (d.lv_hips + d.lv_waist) / 2], ['waist', (d.lv_waist + d.lv_chest) / 2],
-    ['chest', shY - .035 * H], ['shoulders', shY + .022 * H], ['neck', Infinity]];
-  const torso = add(loft(rings, 2.2), (y) => torsoCuts.find(([, top]) => y < top)[0]);
-  torso.userData.breathe = true;
-
-  // head
-  const hw = .085 * H, hh = .118 * H, hd = .108 * H, headGeo = new THREE.SphereGeometry(1, 40, 28), hp = headGeo.attributes.position;
-  for (let i = 0; i < hp.count; i++) { // taper the lower half into a jaw
-    const k = 1 - .3 * Math.max(0, -hp.getY(i)) ** 1.6;
-    hp.setXYZ(i, hp.getX(i) * k * hw / 2, hp.getY(i) * hh / 2, hp.getZ(i) * (1 - .12 * Math.max(0, -hp.getY(i))) * hd / 2);
-  }
-  headGeo.computeVertexNormals();
-  add(headGeo, () => 'overall', (m) => m.position.set(0, H - hh / 2, .012 * H));
-  if (!isGhost) for (const s of [-1, 1]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(.0055 * H, 12, 8), new THREE.MeshBasicMaterial({ color: '#0a1a2a' }));
-    eye.position.set(s * hw * .19, H - hh * .44, .012 * H + hd * .47);
-    group.add(eye);
-  }
-
-  for (const [s, x] of [['l', 1], ['r', -1]]) { // the avatar faces +z, so its left side is +x
-    // legs: ankle → hip joint, slight A stance
-    const rT = d[`thigh_${s}_w`] / 2, rC = d[`calf_${s}_w`] / 2;
-    const hipX = Math.max(rT * .98, d.hips_w / 2 - rT * 1.05);
-    const hip = new THREE.Vector3(x * hipX, d.lv_hip, 0), ankle = new THREE.Vector3(x * hipX * 1.12, d.lv_ankle, 0);
-    const L = hip.distanceTo(ankle), tk = (d.lv_knee - d.lv_ankle) / (d.lv_hip - d.lv_ankle) * L;
-    add(lathe([[rC * .5, 0], [rC * .6, tk * .25], [rC, tk * .68], [rC * .88, tk * .9], [rC * .92, tk],
-      [rT * .82, tk + (L - tk) * .3], [rT, tk + (L - tk) * .6], [rT * 1.03, L], [rT * .9, L + .03 * H]]),
-    (y) => (y < tk ? `calf_${s}` : `thigh_${s}`), along(ankle, hip));
-    add(new THREE.SphereGeometry(1, 20, 14), () => `calf_${s}`, (m) => {
-      m.scale.set(rC * .85, .022 * H, .075 * H);
-      m.position.set(ankle.x, .022 * H, .035 * H);
-    });
-    // arms: wrist → shoulder joint, ~28° A-pose
-    const rA = d[`arm_${s}_w`] / 2, Lu = d.upperarm, Lf = d.forearm, La = Lu + Lf, a = THREE.MathUtils.degToRad(28);
-    const sh = new THREE.Vector3(x * (d.shoulders_w / 2 - rA), shY, 0);
-    const wrist = sh.clone().add(new THREE.Vector3(x * Math.sin(a) * La, -Math.cos(a) * La, 0));
-    add(lathe([[rA * .42, 0], [rA * .55, Lf * .3], [rA * .72, Lf * .7], [rA * .62, Lf], [rA * .9, Lf + Lu * .35],
-      [rA, Lf + Lu * .5], [rA * 1.08, Lf + Lu * .82], [rA * .95, La], [rA * .55, La + rA * .7]]),
-    () => `arm_${s}`, along(wrist, sh));
-    const dir = wrist.clone().sub(sh).normalize();
-    add(new THREE.SphereGeometry(1, 16, 12), () => `arm_${s}`, (m) => {
-      m.scale.set(rA * .42, .05 * H, rA * .28);
-      m.position.copy(wrist).addScaledVector(dir, .045 * H);
-      m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-    });
+  if (isGhost) {
+    group.add(new THREE.Mesh(body, new THREE.MeshBasicMaterial({ color: '#3ef0ff', transparent: true, opacity: 0.22,
+      depthWrite: false, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 8 })));
+  } else {
+    const eyes = geometry(fit.eyePos, BODY.eyeIndex, fit.eyeColors);
+    const skin = new THREE.Mesh(body, new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.58, sheen: 0.35,
+      sheenRoughness: 0.7, sheenColor: '#ffcfb8', clearcoat: 0.06, clearcoatRoughness: 0.5 }));
+    skin.castShadow = true;
+    group.add(skin, new THREE.Mesh(eyes, new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.08, clearcoat: 1 })));
   }
   group.scale.setScalar(0.01); // cm → m
   return group;
 }
 
 function paint() {
-  avatar?.traverse((o) => {
-    const parts = o.geometry?.userData.parts;
-    if (!parts) return;
-    const col = o.geometry.attributes.color, cache = {};
-    parts.forEach((p, i) => { const c = (cache[p] ??= partColor(p)); col.setXYZ(i, c.r, c.g, c.b); });
-    col.needsUpdate = true;
-  });
+  const g = avatar?.children[0].geometry, col = g?.attributes.color;
+  if (!col) return;
+  const { parts, cloth } = g.userData, cache = {};
+  for (let i = 0; i < parts.length; i++) {
+    const [a, b] = (cache[parts[i]] ??= [partColor(parts[i], false), partColor(parts[i], true)]), k = cloth[i];
+    col.setXYZ(i, a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k, a.b + (b.b - a.b) * k);
+  }
+  col.needsUpdate = true;
 }
 
 function rebuildAvatar(force = false) {
@@ -270,8 +173,6 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 renderer.setAnimationLoop((t) => {
-  const s = Math.sin(t / 650);
-  avatar?.children.forEach((m) => m.userData.breathe && m.scale.set(1 + s * .008, 1, 1 + s * .014));
   const H = (S?.profile?.height_cm ?? 175) / 100;
   scanRing.visible = scanning;
   if (scanning) scanRing.position.y = H * (0.5 + 0.48 * Math.sin(t / 700));
@@ -286,8 +187,8 @@ function pick(e) {
   if (!avatar) return null;
   ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(ndc, camera);
-  const hit = ray.intersectObjects(avatar.children.filter((o) => o.userData.partAt), false)[0];
-  return hit ? hit.object.userData.partAt(hit.object.worldToLocal(hit.point.clone()).y) : null;
+  const hit = ray.intersectObjects(avatar.children, false)[0];
+  return hit ? hit.object.geometry.userData.parts?.[hit.face.a] ?? 'overall' : null;
 }
 const canvas = renderer.domElement;
 let downAt = null;
@@ -365,7 +266,7 @@ function partPanel(k) {
       <p class="muted">Body fat uses the US Navy circumference formula (height, neck, waist${S.profile?.sex === 'female' ? ', hips' : ''}). Expect ±3–4 points; tape-calibrating neck and waist helps most. Mass values need a weigh-in within 7 days of the scan.</p>`;
   }
   const p = S.insights.parts[k] || {}, cal = S.profile?.calib?.[k], dims = (live?.dims ?? S.scans[idx]?.dims) || {};
-  const torso = DEPTH[k] && dims[`${k}_w`] ? `<p class="muted">Measured width ${fmt('neck', dims[`${k}_w`])}, depth ${fmt('neck', dims[`${k}_d`])} ${S.scans[idx]?.side && !live ? '(side view)' : '(estimated — turn sideways during a scan to measure it)'}.</p>` : '';
+  const torso = ['neck', 'chest', 'waist', 'hips'].includes(k) && dims[`${k}_w`] ? `<p class="muted">Measured width ${fmt('neck', dims[`${k}_w`])}, depth ${fmt('neck', dims[`${k}_d`])} ${S.scans[idx]?.side && !live ? '(side view)' : '(estimated — turn sideways during a scan to measure it)'}.</p>` : '';
   return `${metricBlock(k)}${torso}
     <h4>Training → result · last 28 days</h4>
     <p>${p.workouts ? `<b>${p.workouts}</b> workouts targeted this area (load ${p.load}).` : 'No logged workouts targeted this area.'}
@@ -440,6 +341,7 @@ function profilePanel() {
       <label>Units<select name="units"><option value="imperial" ${imp ? 'selected' : ''}>Imperial (in, lb)</option><option value="metric" ${imp ? '' : 'selected'}>Metric (cm, kg)</option></select></label>
       <label><span>Height (<span id="hu">${imp ? 'in' : 'cm'}</span>)</span><input name="height" type="number" step="any" value="${h}" required></label>
       <label>Body-fat formula<select name="sex"><option value="male">Male</option><option value="female" ${p.sex === 'female' ? 'selected' : ''}>Female</option></select></label>
+      <label>Skin tone<input type="color" name="skin" value="${esc(p.skin ?? '#c99478')}"></label>
       <label>Camera URL<input name="camera_url" value="${esc(p.camera_url ?? '')}" placeholder="http://&lt;pi-tailscale-ip&gt;:8000/stream.mjpg"></label>
       <label>Camera rotation<select name="rotate">${[0, 90, 180, 270].map((r) => `<option value="${r}" ${(p.rotate ?? 0) === r ? 'selected' : ''}>${r ? r + '° clockwise' : 'None'}</option>`).join('')}</select></label>
       <button>Save</button></form>

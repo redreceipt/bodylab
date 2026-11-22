@@ -3,6 +3,7 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import sqlite3
 import statistics
@@ -32,7 +33,7 @@ PORT = int(os.environ.get('PORT', '8765'))
 SYNC_PORT = 8443  # `tailscale serve --bg --https=8443 8765` exposes /api/sync to your tailnet
 COOLDOWN_S = float(os.environ.get('COOLDOWN_MIN', '10')) * 60
 FRONT_FRAMES, SIDE_FRAMES, LIVE_FRAMES = 40, 20, 12
-DB_PATH = ROOT / 'data' / 'bodylab.db'
+DB_PATH = Path(os.environ.get('BODYLAB_DB') or ROOT / 'data' / 'bodylab.db')
 DAILY = {'weight': (20, 400), 'kcal': (0, 15000), 'protein': (0, 1000), 'sleep': (0, 24), 'active': (0, 20000)}
 
 
@@ -270,6 +271,10 @@ def post_profile(b):
         if url and urlparse(url).scheme not in ('http', 'https', 'rtsp'):
             raise ValueError('Camera URL must start with http://, https:// or rtsp://')
         prof['camera_url'] = url
+    if 'skin' in b:
+        if not re.fullmatch(r'#[0-9a-fA-F]{6}', str(b['skin'])):
+            raise ValueError('Skin tone must be a #rrggbb colour')
+        prof['skin'] = b['skin']
     if 'rotate' in b:
         prof['rotate'] = int(b['rotate']) if int(b['rotate']) in ROTATE else 0
     set_profile(prof)
