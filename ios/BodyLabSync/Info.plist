@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>BodyLab Sync</string>
+	<string>BodyLab</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -36,8 +36,13 @@
 	<key>NSHealthShareUsageDescription</key>
 	<string>BodyLab reads weight, nutrition, sleep, activity and workouts to show how they change your body.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>BodyLab saves the food, weight, workouts and waist measurements you log so every app sees them.</string>
+	<string>BodyLab saves the food, weight and workouts you log so every app sees them.</string>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+		<key>UIImageName</key>
+		<string>LaunchMark</string>
+	</dict>
 </dict>
 </plist>

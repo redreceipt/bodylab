@@ -33,7 +33,11 @@ const HEALTH = {
   resp: ['Respiratory rate', '/min', 1], sleep: ['Sleep', 'h', 1], sleep_deep: ['Deep sleep', 'h', 1], sleep_rem: ['REM sleep', 'h', 1],
   balance: ['Energy balance', 'kcal', 0],
 };
-Object.assign(HEALTH, { underbust: ['Underbust', 'cm', 1], tape_bust: ['Bust (tape)', 'cm', 1], tape_underbust: ['Underbust (tape)', 'cm', 1] });
+Object.assign(HEALTH, { underbust: ['Underbust', 'cm', 1] });
+// Developer reference measurements: ground truth for tuning the camera, never used for your numbers.
+const REFS = [['ref_neck', 'Neck', 'cm'], ['ref_chest', 'Chest / bust', 'cm'], ['ref_underbust', 'Underbust', 'cm'], ['ref_waist', 'Waist at navel', 'cm'],
+  ['ref_hips', 'Hips', 'cm'], ['ref_arm', 'Upper arm', 'cm'], ['ref_thigh', 'Thigh', 'cm'], ['ref_calf', 'Calf', 'cm'], ['ref_weight', 'Weight', 'kg'],
+  ['ref_bf', 'Body fat (DEXA, calipers…)', '%'], ['ref_penis_len', 'Penis length, resting', 'cm'], ['ref_penis_girth', 'Penis girth, resting', 'cm']];
 for (const [k, [label, unit, dec]] of Object.entries(HEALTH)) META[k] ??= { label, unit, dec };
 // US cup letter from bust minus underbust (one letter per inch).
 const cupLetter = (cm) => ['AA', 'A', 'B', 'C', 'D', 'DD', 'DDD/F', 'G', 'H'][Math.max(0, Math.min(8, Math.round(cm / 2.54)))];
@@ -51,6 +55,7 @@ function healthTable() {
     : '<p class="muted">Pair the iPhone app (Profile) to bring in Apple Health data.</p>';
 }
 const imperial = () => S?.profile?.units === 'imperial';
+const inApp = new URLSearchParams(location.search).has('app'); // inside the iPhone app: no backend tools (camera setup, pairing, developer)
 const K = { cm: 1 / 2.54, kg: 2.20462 };
 const toUnit = (v, u) => (imperial() && K[u] ? v * K[u] : v);
 const fromUnit = (v, u) => (imperial() && K[u] ? v / K[u] : v);
@@ -96,6 +101,7 @@ camera.position.set(0.6, 1.25, 4.6);
 const controls = new OrbitControls(camera, renderer.domElement);
 Object.assign(controls, { enableDamping: true, autoRotate: true, autoRotateSpeed: 0.7, minDistance: 1.2, maxDistance: 9 });
 controls.target.set(0, 0.88, 0);
+if (innerWidth < 600) { camera.position.multiplyScalar(1.15); controls.target.y = 0.8; } // phone: the whole body between the bars
 controls.addEventListener('start', () => { controls.autoRotate = false; focus.target = null; });
 scene.add(new THREE.HemisphereLight('#c4dcff', '#141c2c', 1.4));
 const keyLight = new THREE.DirectionalLight('#ffffff', 2.4);
@@ -159,8 +165,8 @@ const mats = {
   skin: new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.6, sheen: 0.3, sheenRoughness: 0.7, sheenColor: '#ffcfb8' }),
   // Additive glow over the selected / hovered part, so the skin itself stays untouched.
   selected: glowMaterial(0.45), hovered: glowMaterial(0.25),
-  hair: strands(null, '#3b2a20'), brows: strands(texture('/static/assets/eyebrow001.webp'), '#3b2a20'),
-  lashes: strands(texture('/static/assets/eyelashes01.webp'), '#ffffff'),
+  hair: strands(null, '#3b2a20'), brows: strands(texture('/static/assets/eyebrow001.png'), '#3b2a20'),
+  lashes: strands(texture('/static/assets/eyelashes01.png'), '#ffffff'),
   eyes: new THREE.MeshPhysicalMaterial({ roughness: 0.05, clearcoat: 1 }),
   ...Object.fromEntries(['trunks', 'briefs', 'bra'].map((g) => [g, new THREE.MeshPhysicalMaterial({ map: fabric(), roughness: 0.85,
     sheen: 0.5, sheenRoughness: 0.8, sheenColor: '#9aa3b5', side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })])),
@@ -188,7 +194,7 @@ async function updateLook() {
   mats.skin.map = skin;
   mats.skin.needsUpdate = true;
   look = { hair, brows: !face, auto, clothes: look.clothes };
-  if (HAIRS[hair]) mats.hair.map = texture(`/static/assets/${hair}.webp`);
+  if (HAIRS[hair]) mats.hair.map = texture(`/static/assets/${hair}.png`);
   for (const m of [mats.hair, mats.brows]) m.color.set(hairColor).multiplyScalar(3.5); // strand textures average ~0.28 (linear); this restores the chosen colour
   mats.eyes.map = texture(`/static/assets/eye_${p.eye_color && p.eye_color !== 'auto' ? p.eye_color : auto.eye ?? 'brown'}.jpg`);
   mats.hair.needsUpdate = mats.eyes.needsUpdate = true;
@@ -201,11 +207,10 @@ function partColor(p) { // multiplies the skin texture: white = true skin colour
   return t ? COLORS.white.clone().lerp(COLORS[t], 0.35) : COLORS.white;
 }
 
-// Breast shape: your latest tape measurements, else the camera's bust and underbust.
+// Breast shape from the camera's bust and underbust.
 const latest = (k) => S.logs.findLast((l) => l[k] != null)?.[k];
 function shape(m) {
-  const bust = latest('tape_bust') ?? m.chest, under = latest('tape_underbust') ?? m.underbust;
-  return { cup: bust && under ? bust - under : null };
+  return { cup: m.chest && m.underbust ? m.chest - m.underbust : null };
 }
 // Body triangles under the worn garments are dropped so skin can't poke through.
 const dressed = {};
@@ -390,14 +395,14 @@ canvas.addEventListener('pointerup', (e) => {
 });
 
 // ---------- main screen: summary, today, timeline ----------
-const LOGGED = new Set(['weight', 'tape_bust', 'tape_underbust']);
+const LOGGED = new Set(['weight']);
 const valueOf = (k) => (LOGGED.has(k) ? latest(k) : cur()[k]);
 function todayCard() {
   const t = S.insights.days.at(-1), usual = S.insights.usual_kcal;
   const items = [
     ['scan', 'Body scan', t.views ? `${t.views} views so far — keep walking past` : 'Walk past the camera; turning helps'],
-    ['weight', 'Weigh-in', 'Step on the scale, or log it in BodyLab Sync'],
-    ['food', 'Food', t.kcal ? `${Math.round(t.kcal).toLocaleString()}${usual ? ` of ~${Math.round(usual).toLocaleString()}` : ''} kcal logged` : 'Log meals in BodyLab Sync or any food app'],
+    ['weight', 'Weigh-in', 'Step on the scale, or log it in the BodyLab app'],
+    ['food', 'Food', t.kcal ? `${Math.round(t.kcal).toLocaleString()}${usual ? ` of ~${Math.round(usual).toLocaleString()}` : ''} kcal logged` : 'Log meals in the BodyLab app or any food app'],
     ['sleep', 'Sleep', 'Wear your Watch to bed'],
     ['activity', 'Activity', 'Wear your Watch'],
   ];
@@ -465,21 +470,20 @@ function partPanel(k) {
       <details><summary>More numbers</summary>
         <table>${['fat_kg', 'ffmi', 'whtr', 'whr'].map((x) => `<tr><td>${META[x].label}</td><td>${fmt(x, m[x])}</td></tr>`).join('')}</table>
         ${healthTable()}
-        <p class="muted">Body fat uses the US Navy circumference formula. Expect ±3–4 points; tape-calibrating neck and waist (tap them) tightens it.</p>
+        <p class="muted">Body fat uses the US Navy circumference formula on your fitted body. Expect ±3–4 points.</p>
       </details>`;
   }
-  const p = S.insights.parts[k] || {}, cal = S.calibration?.[k];
+  const p = S.insights.parts[k] || {};
   const breasts = k === 'chest' && S.profile?.sex === 'female' ? (() => {
-    const m = cur(), bust = latest('tape_bust') ?? m.chest, under = latest('tape_underbust') ?? m.underbust;
-    return `${metricBlock('underbust', false)}<p>${bust && under ? `Cup size about <b>${cupLetter(bust - under)}</b>.` : 'Cup size appears once bust and underbust are measured.'}</p>`;
+    const m = cur();
+    return `${metricBlock('underbust', false)}<p>${m.chest && m.underbust ? `Cup size about <b>${cupLetter(m.chest - m.underbust)}</b>.` : 'Cup size appears once the camera has your bust and underbust.'}</p>`;
   })() : '';
   return `${metricBlock(k, false)}${breasts}
     ${p.workouts || p.change != null ? `<p>${p.workouts ? `${p.workouts} workouts trained this in the last 4 weeks.` : ''}</p>` : ''}
-    <details><summary>Goal</summary>${goalBlock(k)}</details>
-    <p class="muted">${cal ? `Calibrated to your tape measurements (×${cal.toFixed(3)}).` : 'Tape-measure this in BodyLab Sync to calibrate the camera.'}</p>`;
+    <details><summary>Goal</summary>${goalBlock(k)}</details>`;
 }
 function logItem(l) {
-  const txt = l.kind === 'measure' ? '📏 ' + Object.keys(l).filter((x) => META[x]).map((x) => `${META[x].label} ${fmt(x, l[x])}`).join(' · ')
+  const txt = l.kind === 'reference' ? '🔬 Reference: ' + REFS.filter(([k]) => l[k] != null).map(([k, label, u]) => `${label} ${refText(l[k], u)}`).join(' · ')
     : l.kind === 'workout'
     ? `🏋️ ${l.type} · ${l.minutes} min${l.focus?.length ? ' · ' + l.focus.join(', ') : ''}${l.notes ? ' · ' + l.notes : ''}`
     : '📋 ' + [l.weight && fmt('weight', l.weight), l.kcal && `${Math.round(l.kcal)} kcal`, l.protein && `${Math.round(l.protein)} g protein`,
@@ -550,16 +554,16 @@ function pairBlock() {
   if (!S.sync.url) return '<p class="muted">Run <code>tailscale serve --bg --https=8443 http://127.0.0.1:8765</code> so your iPhone can reach BodyLab, then reload.</p>';
   const link = `bodylab://pair?server=${encodeURIComponent(S.sync.url)}&token=${encodeURIComponent(S.sync.token)}`;
   return `<div class="qr" title="Pairing code">${renderSVG(link, { pixelSize: 4 })}</div>
-    <p class="muted">Scan with the iPhone Camera to pair BodyLab Sync. Apple Health fills in your height, sex and age, then keeps everything flowing in.</p>`;
+    <p class="muted">Scan with the iPhone Camera to pair the BodyLab app. Apple Health fills in your height, sex and age, then keeps everything flowing in.</p>`;
 }
 function settingsPanel() {
   const p = S.profile || {}, imp = p.units ? imperial() : true, first = !p.height_cm;
   const h = p.height_cm ? (imp ? p.height_cm / 2.54 : p.height_cm).toFixed(1) : '';
   const opt = (value, label, on) => `<option value="${value}" ${on ? 'selected' : ''}>${label}</option>`;
   return `<h2>${first ? 'Welcome to BodyLab' : 'Settings'}</h2>
-    ${first ? `<p>Install BodyLab Sync on your iPhone and scan this code. Everything about you comes from Apple Health and the app.</p>${pairBlock()}`
+    ${first ? `<p>Install the BodyLab app on your iPhone and scan this code. Everything about you comes from Apple Health and the app.</p>${pairBlock()}`
     : `<p class="muted">${[h && `${h} ${imp ? 'in' : 'cm'}`, p.sex, p.birth_date && `born ${esc(p.birth_date)}`, imp ? 'imperial units' : 'metric units'].filter(Boolean).join(' · ')}
-       — from Apple Health and your phone. Log anything else in BodyLab Sync.</p>`}
+       — from Apple Health and your phone.</p>`}
     <details><summary>Your look</summary>
       <div class="row" style="justify-content:flex-start">${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
         <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
@@ -571,17 +575,25 @@ function settingsPanel() {
         <label>Eyes<select name="eye_color">${opt('auto', S.face ? 'From photo' : 'Brown', !p.eye_color || p.eye_color === 'auto')}${EYES.map((e) => opt(e, e, p.eye_color === e)).join('')}</select></label>
         ${S.face ? '' : `<label>Skin tone<input type="color" name="skin" value="${esc(p.skin ?? '#c99478')}"></label>`}
       </div><button>Save look</button></form></details>
-    <details><summary>Camera</summary>
+    ${inApp ? '' : `<details><summary>Camera</summary>
       <form id="fCamera" class="stack">
         <label>Camera URL<input name="camera_url" value="${esc(p.camera_url ?? '')}" placeholder="http://&lt;pi-tailscale-ip&gt;:8000/stream.mjpg"></label>
         <label>Rotation<select name="rotate">${[0, 90, 180, 270].map((r) => opt(r, r ? r + '° clockwise' : 'None', (p.rotate ?? 0) === r)).join('')}</select></label>
         <label class="check"><input type="checkbox" name="bare_only" ${p.bare_only === false ? '' : 'checked'}> Only measure bare skin (underwear is fine): clothes inflate measurements</label>
         <label>Preview<select name="preview">${opt('silhouette', 'Silhouette only (private)', p.preview !== 'camera')}${opt('camera', 'Camera image (for aiming)', p.preview === 'camera')}</select></label>
         <button>Save</button></form>
-      <p class="muted">Only you are measured (your face must match your photo; one person in view). Frames are never stored.</p>
+      <p class="muted">Only you are measured (your face must match your photo; one person in view). Frames are never stored, unless you turn on reference images under Developer.</p>
       <button type="button" id="clear">Discard today's measurements</button></details>
-    ${first ? '' : `<details><summary>iPhone and Apple Health</summary>${pairBlock()}</details>`}`;
+    ${first ? '' : `<details><summary>iPhone and Apple Health</summary>${pairBlock()}</details>`}`}
+    ${inApp ? '' : `<details><summary>Developer</summary>
+      <p class="muted">For tuning BodyLab's measuring. Nothing here changes your numbers.</p>
+      <label class="check"><input type="checkbox" id="refImages" ${p.reference ? 'checked' : ''}> Save reference images: a few cropped frames of you
+        per angle per day (at most ${80}), on this Mac only. ${S.reference_images ? `${S.reference_images} saved.` : ''}</label>
+      <form id="fRef" class="stack"><div class="grid2">${REFS.filter(([k]) => !(k === 'ref_underbust' && p.sex !== 'female') && !(k.startsWith('ref_penis') && p.sex === 'female'))
+        .map(([k, label, u]) => `<label>${label} (${u === '%' ? '%' : uLabel(u)})<input name="${k}" type="number" step="any"></label>`).join('')}</div>
+        <button>Save reference measurements</button></form></details>`}`;
 }
+const refText = (v, u) => (u === '%' ? `${v}%` : `${+toUnit(v, u).toFixed(1)} ${uLabel(u)}`);
 function renderPanel() {
   if (!view) return ($('#panel').hidden = true);
   $('#panel').hidden = false;
@@ -617,6 +629,10 @@ $('#panel').addEventListener('change', async (e) => {
     toast('Face photo saved ✓');
     return refresh();
   }
+  if (e.target.id === 'refImages') {
+    await api('POST', '/api/profile', { reference: e.target.checked });
+    toast(e.target.checked ? 'Saving reference images' : 'Reference images off (saved ones kept)');
+  }
 });
 $('#panel').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -624,6 +640,11 @@ $('#panel').addEventListener('submit', async (e) => {
   try {
     if (f.id === 'fLook') await api('POST', '/api/profile', o);
     else if (f.id === 'fCamera') await api('POST', '/api/profile', { ...o, bare_only: fd.has('bare_only') });
+    else if (f.id === 'fRef') {
+      await api('POST', '/api/logs', { kind: 'reference', ...Object.fromEntries(Object.entries(o).filter(([, v]) => v !== '')
+        .map(([k, v]) => [k, fromUnit(+v, REFS.find(([r]) => r === k)[2])])) });
+      f.reset();
+    }
     else if (f.id === 'fGoal' || f.dataset.goal) {
       const k = f.dataset.goal || o.metric;
       await api('POST', '/api/goals', { metric: k, target: fromUnit(+o.target, META[k].unit) });

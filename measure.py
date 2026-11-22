@@ -20,12 +20,10 @@ PLAUSIBLE = {'neck_w': (.04, .1), 'shoulders_w': (.17, .36), 'chest_w': (.12, .3
              'arm_l_w': (.035, .1), 'arm_r_w': (.035, .1), 'thigh_l_w': (.06, .16), 'thigh_r_w': (.06, .16),
              'calf_l_w': (.045, .11), 'calf_r_w': (.045, .11), 'lv_shoulder': (.75, .87), 'lv_hip': (.43, .58), 'lv_knee': (.22, .33)}
 SEEN = {'neck': (.035, .11), 'chest': (.08, .31), 'underbust': (.07, .3), 'waist': (.07, .33), 'hips': (.08, .33)}  # any angle
-# Optional tape measurements (cm): each calibrates the camera's estimate of that part.
-MEASURE = {'tape_bust': (50, 200), 'tape_underbust': (50, 180), 'tape_neck': (20, 70), 'tape_chest': (50, 200),
-           'tape_hips': (50, 220), 'tape_arm': (15, 70), 'tape_thigh': (25, 110), 'tape_calf': (20, 70)}
-# Which tape measurement calibrates which camera estimate (waist comes from Apple Health as tape_waist).
-TAPE = {'neck': 'tape_neck', 'chest': 'tape_chest', 'underbust': 'tape_underbust', 'waist': 'tape_waist', 'hips': 'tape_hips',
-        'arm_l': 'tape_arm', 'arm_r': 'tape_arm', 'thigh_l': 'tape_thigh', 'thigh_r': 'tape_thigh', 'calf_l': 'tape_calf', 'calf_r': 'tape_calf'}
+# Reference measurements (developer only, never shown or used by the app): ground truth for tuning the camera.
+REFERENCE = {'ref_neck': (20, 70), 'ref_chest': (50, 200), 'ref_underbust': (50, 180), 'ref_waist': (40, 220), 'ref_hips': (50, 220),
+             'ref_arm': (15, 70), 'ref_thigh': (25, 110), 'ref_calf': (20, 70), 'ref_weight': (20, 400), 'ref_bf': (2, 75),
+             'ref_penis_len': (2, 30), 'ref_penis_girth': (3, 25)}
 
 
 def implausible(raw):
@@ -39,10 +37,10 @@ TORSO = {'neck': .9, 'chest': .72, 'underbust': .72, 'waist': .78, 'hips': .75} 
 # Tape ÷ ellipse perimeter for the same width and depth: torsos are boxier than ellipses (measured on MakeHuman's templates).
 SHAPE = {'neck': 1.0, 'chest': 1.07, 'underbust': 1.04, 'waist': 1.03, 'hips': 1.04}
 LIMBS = ['arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'calf_l', 'calf_r']
-CALIBRATABLE = [*TORSO, 'shoulders', *LIMBS]
-METRICS = ['bf', 'weight', 'lean_kg', 'fat_kg', 'ffmi', 'whtr', 'whr', *CALIBRATABLE, *MEASURE]
+PARTS = [*TORSO, 'shoulders', *LIMBS]
+METRICS = ['bf', 'weight', 'lean_kg', 'fat_kg', 'ffmi', 'whtr', 'whr', *PARTS]
 # Workout focus -> body parts it trains (cardio only counts toward overall load).
-FOCUS = {'full body': CALIBRATABLE, 'chest': ['chest'], 'back': ['chest', 'shoulders'], 'shoulders': ['shoulders'],
+FOCUS = {'full body': PARTS, 'chest': ['chest'], 'back': ['chest', 'shoulders'], 'shoulders': ['shoulders'],
          'arms': ['arm_l', 'arm_r'], 'core': ['waist'], 'legs': ['thigh_l', 'thigh_r', 'calf_l', 'calf_r'],
          'glutes': ['hips'], 'cardio': []}
 
@@ -350,7 +348,7 @@ def navy_bf(sex, height, neck, waist, hips):
 def derive(raw, profile, weight=None):
     """Raw height fractions -> (metrics, dims). metrics: circumferences/breadth in cm, bf %, ratios, kg.
     dims: sizes in cm for drawing the avatar."""
-    H, cal = profile['height_cm'], profile.get('calib', {})
+    H = profile['height_cm']
     dims = {k: v * H for k, v in raw.items() if isinstance(v, (int, float)) and not k.startswith('n_')}
     m = {}
     tape = raw.get('tape', {})  # tape-measured on the fitted body (fit.py): preferred over ellipses
@@ -358,12 +356,12 @@ def derive(raw, profile, weight=None):
         if p + '_w' in dims:
             dims.setdefault(p + '_d', dims[p + '_w'] * ratio)
         if p in tape or p + '_w' in dims:
-            m[p] = (tape.get(p) or ellipse(dims[p + '_w'], dims[p + '_d']) * SHAPE[p]) * cal.get(p, 1)
+            m[p] = tape.get(p) or ellipse(dims[p + '_w'], dims[p + '_d']) * SHAPE[p]
     if 'shoulders_w' in dims:
-        m['shoulders'] = dims['shoulders_w'] * cal.get('shoulders', 1)
+        m['shoulders'] = dims['shoulders_w']
     for p in LIMBS:
         if p in tape or p + '_w' in dims:
-            m[p] = (tape.get(p) or math.pi * dims[p + '_w']) * cal.get(p, 1)
+            m[p] = tape.get(p) or math.pi * dims[p + '_w']
     if 'waist' in m:
         m['whtr'] = m['waist'] / H
         if 'hips' in m:
@@ -379,18 +377,6 @@ def derive(raw, profile, weight=None):
     return {k: round(v, 3) for k, v in m.items()}, {k: round(v, 1) for k, v in dims.items()}
 
 
-def calibration(estimates, logs, female=False):
-    """Per-part correction from your tape measurements: the median of tape ÷ camera over every day with a body
-    estimate within 3 days of a measurement. estimates: [(ts, uncalibrated metrics)]."""
-    out = {}
-    for part, key in TAPE.items():
-        key = 'tape_bust' if part == 'chest' and female else key
-        ratios = [l[key] / m[part] for l in logs if l.get(key) for ts, m in estimates if m.get(part) and abs(ts - l['ts']) < 3 * 86400]
-        if ratios:
-            out[part] = min(1.6, max(.6, statistics.median(ratios)))
-    return out
-
-
 def nearest(points, ts, max_days=7):
     """Value of the (ts, value) point closest to ts within max_days, else None."""
     best = min(points, key=lambda p: abs(p[0] - ts), default=None)
@@ -399,7 +385,7 @@ def nearest(points, ts, max_days=7):
 
 def series(metric, scans, logs):
     logged = [(l['ts'], l[metric]) for l in logs if l.get(metric) is not None]
-    if logged or metric == 'weight' or metric in MEASURE:
+    if logged or metric == 'weight':
         return logged
     return [(s['ts'], s['m'][metric]) for s in scans if metric in s['m']]
 
@@ -493,7 +479,7 @@ def insights(scans, logs, goals, now=None):
                'kcal': avg([d['kcal'] for d in daily if d['ts'] >= since and 'kcal' in d]),
                'changes': {k: trend_change(series(k, scans, logs), since) for k in ('bf', 'waist', 'weight', 'lean_kg')}}
     parts = {}
-    for p in CALIBRATABLE:
+    for p in PARTS:
         ws = [w for w in recent if any(p in FOCUS.get(f, []) for f in w.get('focus', []))]
         parts[p] = {'workouts': len(ws), 'load': load(ws), 'change': _delta(series(p, scans, logs), since)}
 

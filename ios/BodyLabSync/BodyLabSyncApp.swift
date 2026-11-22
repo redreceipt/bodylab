@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 @main
 struct BodyLabSyncApp: App {
@@ -24,10 +25,12 @@ struct RootView: View {
             PairView()
         } else {
             TabView {
-                TodayView().tabItem { Label("Today", systemImage: "checklist") }
+                BodyView().tabItem { Label("Body", systemImage: "figure.stand") }
                 LogView().tabItem { Label("Log", systemImage: "plus.circle") }
                 MeView().tabItem { Label("Me", systemImage: "person.crop.circle") }
             }
+            .preferredColorScheme(.dark)
+            .tint(Color(red: 0.24, green: 0.94, blue: 1))  // the web app's accent
         }
     }
 }
@@ -52,44 +55,38 @@ struct PairView: View {
                 }
                 if !health.status.isEmpty { Text(health.status).foregroundStyle(.secondary) }
             }
-            .navigationTitle("BodyLab Sync")
+            .navigationTitle("BodyLab")
         }
     }
 }
 
 /// What BodyLab has today and what's still missing.
-struct TodayView: View {
-    @EnvironmentObject var health: HealthSync
+/// The BodyLab web app itself (same UI everywhere), over your tailnet.
+struct BodyView: View {
+    @AppStorage("server") private var server = ""
 
     var body: some View {
-        NavigationStack {
-            List {
-                if let s = health.summary {
-                    Section {
-                        LabeledContent("Body fat", value: s.bodyFat.map { String(format: "%.1f%%", $0) } ?? "—")
-                        LabeledContent("Weight", value: s.weight ?? "—")
-                    }
-                }
-                Section("Today") {
-                    ForEach(health.today, id: \.label) { item in
-                        HStack(alignment: .top) {
-                            Image(systemName: item.done ? "checkmark.circle.fill" : "circle").foregroundStyle(item.done ? .green : .secondary)
-                            VStack(alignment: .leading) {
-                                Text(item.label)
-                                if !item.done { Text(item.hint).font(.caption).foregroundStyle(.secondary) }
-                            }
-                        }
-                    }
-                }
-                Section { Text(health.status).font(.footnote).foregroundStyle(.secondary) }
-            }
-            .navigationTitle("Today")
-            .refreshable { await health.sync() }
-        }
+        WebView(url: URL(string: server)?.appending(queryItems: [.init(name: "app", value: "1")])).ignoresSafeArea(edges: .top).background(Color.black)
     }
 }
 
-/// Everything you'd enter by hand. Food, weight, waist and workouts go into Apple Health; the rest to BodyLab.
+struct WebView: UIViewRepresentable {
+    let url: URL?
+
+    func makeUIView(context: Context) -> WKWebView {
+        let view = WKWebView()
+        view.isOpaque = false
+        view.backgroundColor = .black
+        view.scrollView.backgroundColor = .black
+        view.scrollView.bounces = false
+        if let url { view.load(URLRequest(url: url)) }
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {}
+}
+
+/// Food, weight and workouts, saved to Apple Health (BodyLab reads them back).
 struct LogView: View {
     @EnvironmentObject var health: HealthSync
     @State private var kcal = ""
@@ -99,7 +96,6 @@ struct LogView: View {
     @State private var minutes = "45"
     @State private var effort = 7.0
     @State private var focus: Set<String> = []
-    @State private var tape: [String: String] = [:]
     private let types = ["Strength", "Cardio", "HIIT", "Sports", "Mobility"]
     private let areas = ["full body", "chest", "back", "shoulders", "arms", "core", "legs", "glutes", "cardio"]
 
@@ -127,18 +123,6 @@ struct LogView: View {
                     Button("Save workout") {
                         Task { await health.logWorkout(type: workoutType, minutes: Double(minutes) ?? 0, effort: effort, focus: Array(focus)); focus = [] }
                     }.disabled((Double(minutes) ?? 0) <= 0)
-                }
-                Section {
-                    ForEach(health.tapeFields, id: \.key) { f in
-                        TextField("\(f.label) (\(health.metric ? "cm" : "in"))", text: Binding(get: { tape[f.key] ?? "" }, set: { tape[f.key] = $0 }))
-                            .keyboardType(.decimalPad)
-                    }
-                    Button("Save measurements") { Task { await health.logTape(tape.compactMapValues(Double.init)); tape = [:] } }
-                        .disabled(tape.compactMapValues(Double.init).isEmpty)
-                } header: {
-                    Text("Tape measurements")
-                } footer: {
-                    Text("Body parts calibrate the camera automatically. Fill in any; same time of day each time.")
                 }
                 Section { Text(health.status).font(.footnote).foregroundStyle(.secondary) }
             }

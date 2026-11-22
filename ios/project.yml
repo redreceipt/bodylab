@@ -18,14 +18,16 @@ targets:
     info:
       path: BodyLabSync/Info.plist
       properties:
-        CFBundleDisplayName: BodyLab Sync
+        CFBundleDisplayName: BodyLab
         NSHealthShareUsageDescription: BodyLab reads weight, nutrition, sleep, activity and workouts to show how they change your body.
-        NSHealthUpdateUsageDescription: BodyLab saves the food, weight, workouts and waist measurements you log so every app sees them.
+        NSHealthUpdateUsageDescription: BodyLab saves the food, weight and workouts you log so every app sees them.
         NSCameraUsageDescription: BodyLab uses a face photo to make your 3D body look like you. It stays on your BodyLab server.
         CFBundleURLTypes:
           - CFBundleURLName: bodylab-pairing
             CFBundleURLSchemes: [bodylab]
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+          UIImageName: LaunchMark
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.redreceipt.bodylab.sync
@@ -34,3 +36,4 @@ targets:
         SWIFT_VERSION: "5.0"
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon  # icon and launch mark: uv run python tools/brand.py

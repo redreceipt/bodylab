@@ -7,20 +7,8 @@ import SwiftUI
 @MainActor
 final class HealthSync: ObservableObject {
     @Published var status = ""
-    @Published var summary: Summary?
-    @Published var today: [Check] = []
-    @Published var female = false
     let metric = Locale.current.measurementSystem == .metric
 
-    struct Summary { let bodyFat: Double?, weight: String? }
-    struct Check { let label: String, done: Bool, hint: String }
-    struct Field { let key: String, label: String }
-    var tapeFields: [Field] {
-        [.init(key: "tape_neck", label: "Neck"), .init(key: female ? "tape_bust" : "tape_chest", label: female ? "Bust" : "Chest"),
-         .init(key: "tape_waist", label: "Waist"), .init(key: "tape_hips", label: "Hips"), .init(key: "tape_arm", label: "Upper arm"),
-         .init(key: "tape_thigh", label: "Thigh"), .init(key: "tape_calf", label: "Calf")]
-            + (female ? [.init(key: "tape_underbust", label: "Underbust")] : [])
-    }
 
     private let store = HKHealthStore()
     private let windowDays = 90
@@ -78,7 +66,7 @@ final class HealthSync: ObservableObject {
         read.formUnion([HKQuantityType(.height), HKQuantityType(.heartRate), HKCategoryType(.sleepAnalysis),
                         HKObjectType.workoutType(), HKCharacteristicType(.biologicalSex), HKCharacteristicType(.dateOfBirth)])
         let write: Set<HKSampleType> = [HKQuantityType(.dietaryEnergyConsumed), HKQuantityType(.dietaryProtein), HKQuantityType(.bodyMass),
-                                        HKQuantityType(.waistCircumference), HKObjectType.workoutType()]
+                                        HKObjectType.workoutType()]
         do {
             try await store.requestAuthorization(toShare: write, read: read)
             observe()
@@ -131,31 +119,9 @@ final class HealthSync: ObservableObject {
             ]
             let reply = try await post("api/sync", JSONSerialization.data(withJSONObject: body), type: "application/json")
             status = "Synced \(reply["saved"] ?? 0) records at \(Date.now.formatted(date: .omitted, time: .shortened))"
-            await refreshToday()
         } catch {
             status = "Sync failed: \(error.localizedDescription)"
         }
-    }
-
-    /// Today's checklist and latest numbers, from BodyLab.
-    func refreshToday() async {
-        guard let state = try? await request("api/state", method: "GET") else { return }
-        let profile = state["profile"] as? [String: Any] ?? [:]
-        female = profile["sex"] as? String == "female"
-        let insights = state["insights"] as? [String: Any] ?? [:]
-        let day = (insights["days"] as? [[String: Any]])?.last ?? [:]
-        let usual = insights["usual_kcal"] as? Double, kcal = day["kcal"] as? Double, views = day["views"] as? Int ?? 0
-        today = [
-            .init(label: "Body scan", done: day["scan"] as? Bool ?? false, hint: views > 0 ? "\(views) views so far — keep walking past" : "Walk past the camera; turning helps"),
-            .init(label: "Weigh-in", done: day["weight"] as? Bool ?? false, hint: "Step on the scale, or log it here"),
-            .init(label: "Food", done: day["food"] as? Bool ?? false,
-                  hint: kcal.map { "\(Int($0)) \(usual.map { "of ~\(Int($0)) " } ?? "")kcal logged" } ?? "Log meals here or in any food app"),
-            .init(label: "Sleep", done: day["sleep"] as? Bool ?? false, hint: "Wear your Watch to bed"),
-            .init(label: "Activity", done: day["activity"] as? Bool ?? false, hint: "Wear your Watch"),
-        ]
-        let m = (state["scans"] as? [[String: Any]])?.last?["m"] as? [String: Any] ?? [:]
-        let kg = (state["logs"] as? [[String: Any]])?.last(where: { $0["weight"] != nil })?["weight"] as? Double
-        summary = .init(bodyFat: m["bf"] as? Double, weight: kg.map { metric ? String(format: "%.1f kg", $0) : String(format: "%.1f lb", $0 * 2.20462) })
     }
 
     // MARK: logging (Apple Health is the record; BodyLab reads it back on sync)
@@ -192,21 +158,6 @@ final class HealthSync: ObservableObject {
             _ = try await builder.finishWorkout()
             await sync()
         } catch { status = "Couldn't save the workout: \(error.localizedDescription)" }
-    }
-
-    /// Waist goes to Apple Health; the other body parts to BodyLab directly.
-    func logTape(_ values: [String: Double]) async {
-        let cm = values.mapValues { metric ? $0 : $0 * 2.54 }
-        do {
-            if let waist = cm["tape_waist"] { try await save(.waistCircumference, waist, .meterUnit(with: .centi)) }
-            let rest = cm.filter { $0.key != "tape_waist" }
-            if !rest.isEmpty {
-                var body: [String: Any] = rest
-                body["kind"] = "measure"
-                _ = try await post("api/logs", JSONSerialization.data(withJSONObject: body), type: "application/json")
-            }
-            await sync()
-        } catch { status = "Couldn't save measurements: \(error.localizedDescription)" }
     }
 
     /// Face photo for the realistic avatar. Stays on your BodyLab server.

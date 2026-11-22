@@ -212,7 +212,7 @@ def median(frames):
 def app_state():
     prof, logs, c = get_profile(), get_logs(), db()
     goals = {r['metric']: {'target': r['target'], 'start': r['start'], 'ts': r['ts']} for r in c.execute('select * from goals')}
-    scans, hidden, calib = [], 0, {}
+    scans, hidden = [], 0
     if prof and prof.get('height_cm'):
         w, rows = weights(logs), []
         fits = {r['day']: json.loads(r['params'])['tape'] for r in c.execute('select day, params from fits')}
@@ -222,11 +222,8 @@ def app_state():
                 hidden += 1
             else:
                 rows.append((r, raw))
-        # Tape measurements correct the camera per body part, for every day (past and future).
-        calib = measure.calibration([(r['ts'], measure.derive(raw, {**prof, 'calib': {}})[0]) for r, raw in rows], logs,
-                                    prof.get('sex') == 'female')
         for r, raw in rows:
-            m, dims = measure.derive(raw, {**prof, 'calib': calib}, measure.nearest(w, r['ts']))
+            m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']))
             scans.append({'id': r['id'], 'ts': r['ts'], 'day': r['day'], 'fit': 'tape' in raw, 'side': raw.get('n_angle', 0) >= 30,
                           'frames': raw.get('n_frames'), 'm': m, 'dims': dims})
     face = face_files()[1]
@@ -235,7 +232,7 @@ def app_state():
         face.pop('embedding', None)  # stays server-side
     sync = f'https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else None
     return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': sync},
-            'face': face, 'hidden_scans': hidden, 'calibration': calib,
+            'face': face, 'hidden_scans': hidden, 'reference_images': len(list(reference_dir().glob('*.jpg'))),
             'insights': measure.insights(scans, logs, goals)}
 
 
@@ -298,7 +295,7 @@ class Capture:
         self.status = {'state': 'starting', 'msg': 'Connecting to camera…'}
         self.want_clear, self.dirty = False, True
         self.prof, self.weight, self.prof_ts, self.me = {}, None, 0.0, None
-        self.gate, self.skin, self.match, self.last_id, self.stored = Gate(), None, None, 0.0, [None, 0]
+        self.gate, self.skin, self.match, self.last_id, self.stored, self.last_ref = Gate(), None, None, 0.0, [None, 0], 0.0
         threading.Thread(target=self.read_loop, daemon=True).start()
         threading.Thread(target=self.process_loop, daemon=True).start()
 
@@ -402,6 +399,8 @@ class Capture:
             if r['obs']:
                 rec = {'ts': now, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
                        'sil': silhouette(mask, pts, world, r['origin'], r['H'])}
+                if self.prof.get('reference') and now - self.last_ref > 2 and reference_wanted(rec):
+                    self.last_ref, rec['jpg'] = now, reference_crop(f, mask)  # saved only if the gate confirms it's you
                 for x in self.gate.frame(rec):
                     self.keep(x)
                 if self.gate.enrolled and not self.gate.me:
@@ -425,6 +424,8 @@ class Capture:
             self.keep(rec)
 
     def keep(self, rec):
+        if 'jpg' in rec:
+            save_reference(rec.pop('jpg'), rec)
         day = date.fromtimestamp(rec['ts'])
         if self.stored[0] != day:
             self.stored = [day, db().execute('select count(*) from frames where ts >= ?', (day_start(rec['ts']),)).fetchone()[0]]
@@ -515,6 +516,44 @@ def refit_loop():
                 return
 
 
+REF_PER_BUCKET, REF_MAX = 2, 80  # reference images per 10° of turn per day, and in all
+
+
+def reference_dir():
+    return DB_PATH.parent / 'reference'
+
+
+def reference_wanted(rec):
+    """Developer reference set: a few confirmed frames of you per 10° of turn per day, for tuning the measuring."""
+    tag = f"{date.fromtimestamp(rec['ts'])}_{int(abs(rec['theta']) // 10) * 10:02d}"
+    return len(list(reference_dir().glob(f'{tag}_*.jpg'))) < REF_PER_BUCKET
+
+
+def reference_crop(f, mask):
+    """The person (10 % margin), at most 900 px tall, as JPEG: not the room."""
+    ys, xs = np.nonzero(mask > .5)
+    if not len(ys):
+        return None
+    m = .1 * (ys.max() - ys.min())
+    crop = f[max(int(ys.min() - m), 0):int(ys.max() + m), max(int(xs.min() - m), 0):int(xs.max() + m)]
+    k = min(1, 900 / crop.shape[0])
+    return cv2.imencode('.jpg', cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+
+
+def save_reference(jpg, rec):
+    """Store a reference image with its measurements; the oldest go beyond REF_MAX. Local only (data/, gitignored)."""
+    if not jpg:
+        return
+    d = reference_dir()
+    d.mkdir(exist_ok=True)
+    name = f"{date.fromtimestamp(rec['ts'])}_{int(abs(rec['theta']) // 10) * 10:02d}_{int(rec['ts'])}"
+    (d / f'{name}.jpg').write_bytes(jpg)
+    (d / f'{name}.json').write_text(json.dumps(rec))
+    for old in sorted(d.glob('*.jpg'), key=lambda p: p.stat().st_mtime)[:-REF_MAX]:
+        old.unlink()
+        old.with_suffix('.json').unlink(missing_ok=True)
+
+
 def tidy():
     """Keep BodyLab's disk use bounded: raw frames for 45 days, and its own log under 5 MB."""
     with db() as c:  # freed pages are reused, so the file stops growing once it holds 45 days
@@ -565,7 +604,7 @@ def post_profile(b):
             prof[k] = b[k]
     if 'rotate' in b:
         prof['rotate'] = int(b['rotate']) if int(b['rotate']) in ROTATE else 0
-    for k in ('bare_only', 'clothes'):
+    for k in ('bare_only', 'clothes', 'reference'):
         if k in b:
             prof[k] = bool(b[k])
     if 'preview' in b:
@@ -591,8 +630,8 @@ def post_log(b):
     kind = b.get('kind')
     if kind == 'workout':
         data = workout_data(b)
-    elif kind in ('daily', 'measure'):
-        data = daily_data(b) if kind == 'daily' else {k: num(b[k], lo, hi, k) for k, (lo, hi) in measure.MEASURE.items()
+    elif kind in ('daily', 'reference'):
+        data = daily_data(b) if kind == 'daily' else {k: num(b[k], lo, hi, k) for k, (lo, hi) in measure.REFERENCE.items()
                                                        if b.get(k) not in (None, '')}
         if not data:
             raise ValueError('Enter at least one value')

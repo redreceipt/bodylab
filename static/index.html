@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BodyLab</title>
+<link rel="icon" href="/static/assets/icon.png"><link rel="apple-touch-icon" href="/static/assets/icon.png">
 <script type="importmap">{"imports": {"three": "/static/vendor/three.module.js", "three/addons/": "/static/vendor/"}}</script>
 <style>
 :root { --bg:#060a13; --panel:rgba(13,19,33,.88); --line:rgba(120,200,255,.16); --fg:#e6f1ff; --dim:#8399b3; --acc:#3ef0ff; --good:#4cff9a; --bad:#ff6b6b; }
@@ -94,6 +95,18 @@ ul.tips { padding-left:18px; color:var(--dim); font-size:12.5px }
 #tip { position:fixed; pointer-events:none; padding:6px 10px; border-radius:8px; background:var(--panel); border:1px solid var(--acc); font-size:12.5px; display:none; z-index:3 }
 #toast { position:fixed; bottom:80px; left:50%; transform:translateX(-50%); padding:9px 16px; border-radius:10px; background:var(--panel); border:1px solid var(--good); display:none; z-index:4 }
 #toast.err { border-color:var(--bad) }
+/* Phone: status on top, compact cards, tabs as a bottom bar, panels as a bottom sheet. */
+@media (max-width: 600px) {
+  #camBar { top:8px; left:8px; right:8px } #cam { width:100%; font-size:12px } #camMsg { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  #hud { top:52px; left:8px; right:8px; width:auto; flex-direction:row; align-items:flex-start; gap:8px }
+  #hud .brand { display:none } #summary { flex:0 0 auto; padding:8px 12px } #summary .v { font-size:22px }
+  #today { flex:1; padding:8px 12px } #today li.ok { display:none } #today ul { font-size:12px }
+  #nav { left:8px; right:8px; bottom:8px; flex-direction:row } #nav button { width:auto; flex:1; text-align:center; padding:9px 4px }
+  #timeline { bottom:58px; left:8px; right:8px; width:auto; transform:none; padding:7px 12px; gap:10px }
+  #timeline label { flex-shrink:0 } #scanLabel { flex:1 }
+  #panel { top:auto; left:0; right:0; bottom:0; width:auto; max-height:78vh; border-radius:14px 14px 0 0 }
+  #preview { top:52px; right:8px; left:auto }
+}
 </style>
 </head>
 <body>

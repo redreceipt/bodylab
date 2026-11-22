@@ -434,7 +434,7 @@ def main():
             tex = next(l.split()[1] for l in mat.splitlines() if l.startswith('diffuseTexture'))
             rgba = image(path.rsplit('/', 1)[0] + '/' + tex)
             out = gray_rgba(rgba, 1024 if kind == 'hair' else 256) if kind != 'eyelashes' else cv2.resize(rgba, (256, 256))
-            cv2.imwrite(str(OUT / f'{name}.webp'), out, [cv2.IMWRITE_WEBP_QUALITY, 90])
+            cv2.imwrite(str(OUT / f'{name}.png'), out, [cv2.IMWRITE_PNG_COMPRESSION, 9])  # iOS WebKit rejects alpha WebP
     # Eye colours: texture + mean iris colour (irises sit at fixed spots in every MakeHuman eye texture).
     meta['eyes'] = {}
     for color in EYE_COLORS:
