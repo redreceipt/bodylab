@@ -282,13 +282,25 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
       group.add(new THREE.Mesh(g, mats.genitals));
     }
     if (HAIRS[look.hair]) {
-      const hair = new THREE.Mesh(proxy(look.hair, fit.pos), mats.hair);
+      const geom = proxy(look.hair, fit.pos);
+      const hair = new THREE.Mesh(S.face?.hair?.fringe === false ? trimFringe(geom, fit.pos) : geom, mats.hair);
       hair.castShadow = true;
       group.add(hair);
     }
   }
   group.scale.setScalar(0.01); // cm → m
   return group;
+}
+
+// No fringe in your photo: drop the haircut's hair hanging in front of the forehead, so your own hairline shows.
+function trimFringe(geom, pos) {
+  const eyes = fitProxy('high-poly', pos), n = eyes.length / 3, p = geom.attributes.position.array, idx = geom.index.array, keep = [];
+  let ey = 0, ez = 0;
+  for (let i = 0; i < n; i++) { ey += eyes[i * 3 + 1] / n; ez += eyes[i * 3 + 2] / n; }
+  const low = (v) => p[v * 3 + 1] < ey + 5.5 && p[v * 3 + 2] > ez - 4; // cm: below mid-forehead, in front of the temples
+  for (let t = 0; t < idx.length; t += 3) if (!(low(idx[t]) && low(idx[t + 1]) && low(idx[t + 2]))) keep.push(idx[t], idx[t + 1], idx[t + 2]);
+  geom.setIndex(keep);
+  return geom;
 }
 
 function paint() {
@@ -579,6 +591,8 @@ function settingsPanel() {
       <form id="fCamera" class="stack">
         <label>Camera URL<input name="camera_url" value="${esc(p.camera_url ?? '')}" placeholder="http://&lt;pi-tailscale-ip&gt;:8000/stream.mjpg"></label>
         <label>Rotation<select name="rotate">${[0, 90, 180, 270].map((r) => opt(r, r ? r + '° clockwise' : 'None', (p.rotate ?? 0) === r)).join('')}</select></label>
+        <label>Second camera URL (optional: another angle on the same spot)<input name="camera2_url" value="${esc(p.camera2_url ?? '')}" placeholder="http://&lt;tailscale-ip&gt;:8000/stream.mjpg"></label>
+        <label>Second camera rotation<select name="rotate2">${[0, 90, 180, 270].map((r) => opt(r, r ? r + '° clockwise' : 'None', (p.rotate2 ?? 0) === r)).join('')}</select></label>
         <label class="check"><input type="checkbox" name="bare_only" ${p.bare_only === false ? '' : 'checked'}> Only measure bare skin (underwear is fine): clothes inflate measurements</label>
         <label>Preview<select name="preview">${opt('silhouette', 'Silhouette only (private)', p.preview !== 'camera')}${opt('camera', 'Camera image (for aiming)', p.preview === 'camera')}</select></label>
         <button>Save</button></form>
@@ -681,7 +695,7 @@ $('#cam').addEventListener('click', () => {
 async function poll() {
   try {
     const st = await (await fetch('/api/status')).json();
-    $('#camMsg').textContent = st.msg;
+    $('#camMsg').textContent = st.msg + (st.cam2 ? ` · 2nd camera: ${st.cam2.state === 'offline' ? 'offline' : st.cam2.state === 'scanning' ? 'measuring' : 'on'}` : '');
     $('#dot').className = st.state;
     $('#barF').style.width = Math.min(1, (st.frames ?? 0) / 150) * 50 + '%'; // views today (150 = plenty)
     $('#barS').style.width = Math.min(1, (st.angle ?? 0) / 75) * 50 + '%'; // how far you've turned: sets depth

@@ -249,7 +249,10 @@ def hair_style(hair, img, face):
     crown = (top - ys.min()) / fh  # thickness above the forehead
     style = ('long01' if length > .35 else 'bob02' if length > -.15 else 'afro01' if width > 1.7 or crown > .45
              else 'short04' if crown < .12 else 'short02')
-    return {'style': style, 'color': '#' + ''.join(f'{int(v):02x}' for v in rgb)}
+    # A fringe: hair over the forehead (between the face's top and the brows, inner brow to inner brow).
+    y0, y1, x0, x1 = int(top), int(face[9][1]), int(face[105][0]), int(face[334][0])
+    fringe = bool(hair[y0:max(y1, y0 + 1), min(x0, x1):max(x0, x1) + 1].mean() > .25)
+    return {'style': style, 'color': '#' + ''.join(f'{int(v):02x}' for v in rgb), 'fringe': fringe}
 
 
 # How much each part's circumference typically moves per kg of fat lost/gained (cm/kg), until your own history says

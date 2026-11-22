@@ -22,7 +22,7 @@ from collections import deque
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 import mediapipe as mp
@@ -289,7 +289,8 @@ class Capture:
     No special pose: each frame contributes whatever it shows (a waist width at some angle, a calf, your
     torso length). Frames are stored (twice a second at most) and fused into one body estimate per day."""
 
-    def __init__(self):
+    def __init__(self, cam=0):
+        self.cam, self.key = cam, '' if cam == 0 else str(cam + 1)  # profile keys camera_url/rotate, camera2_url/rotate2
         self.frame = self.jpeg = self.url = None
         self.frame_ts = self.last_seen = self.last_store = self.last_fit = 0.0
         self.status = {'state': 'starting', 'msg': 'Connecting to camera…'}
@@ -310,7 +311,7 @@ class Capture:
 
     def read_loop(self):
         while True:
-            self.url = (get_profile() or {}).get('camera_url')
+            self.url = (get_profile() or {}).get(f'camera{self.key}_url')
             vc = cv2.VideoCapture(self.url) if self.url else None
             while vc and vc.isOpened():
                 ok, f = vc.read()
@@ -337,15 +338,15 @@ class Capture:
                 self.gate.enrolled = self.me is not None
             if time.time() - self.frame_ts > 5:
                 self.status = {'state': 'offline', 'msg': f'Camera offline ({self.url}) — retrying…' if self.url
-                               else 'Set your camera URL in Settings → Camera'}
-            if self.dirty and time.time() - self.last_fit > 5 and self.prof.get('height_cm'):  # camera offline too (e.g. a new body fit)
+                               else 'Set your camera URL in Settings → Camera' if self.cam == 0 else 'No second camera'}
+            if self.cam == 0 and self.dirty and time.time() - self.last_fit > 5 and self.prof.get('height_cm'):  # the first camera fuses all cameras' frames
                 self.fit(time.time())
             if f is None or f is last:
                 time.sleep(.01)
                 continue
             last = f
-            if self.prof.get('rotate') in ROTATE:  # camera mounted sideways / upside down
-                f = cv2.rotate(f, ROTATE[self.prof['rotate']])
+            if self.prof.get(f'rotate{self.key}') in ROTATE:  # camera mounted sideways / upside down
+                f = cv2.rotate(f, ROTATE[self.prof[f'rotate{self.key}']])
             ts_ms = max(ts_ms + 1, int(time.monotonic() * 1000))
             res = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB,
                                                        data=cv2.cvtColor(f, cv2.COLOR_BGR2RGB)), ts_ms)
@@ -397,7 +398,7 @@ class Capture:
             elif bare and self.skin is None:
                 msg, r['obs'] = 'Face the camera for a moment so BodyLab can see your skin tone', {}
             if r['obs']:
-                rec = {'ts': now, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
+                rec = {'ts': now, 'cam': self.cam, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
                        'sil': silhouette(mask, pts, world, r['origin'], r['H'])}
                 if self.prof.get('reference') and now - self.last_ref > 2 and reference_wanted(rec):
                     self.last_ref, rec['jpg'] = now, reference_crop(f, mask)  # saved only if the gate confirms it's you
@@ -435,7 +436,7 @@ class Capture:
         if rec['ts'] - self.last_store < .5 or self.stored[1] >= FRAMES_PER_DAY:  # 2/s at most, 400/day is plenty
             return
         self.stored[1] += 1
-        self.last_store, self.dirty = rec['ts'], True
+        self.last_store, cap.dirty = rec['ts'], True  # the first camera fuses
         with db() as c:
             c.execute('insert into frames(ts, data) values (?, ?)', (rec['ts'], json.dumps(rec)))
 
@@ -546,7 +547,7 @@ def save_reference(jpg, rec):
         return
     d = reference_dir()
     d.mkdir(exist_ok=True)
-    name = f"{date.fromtimestamp(rec['ts'])}_{int(abs(rec['theta']) // 10) * 10:02d}_{int(rec['ts'])}"
+    name = f"{date.fromtimestamp(rec['ts'])}_{int(abs(rec['theta']) // 10) * 10:02d}_{int(rec['ts'])}_cam{rec.get('cam', 0) + 1}"
     (d / f'{name}.jpg').write_bytes(jpg)
     (d / f'{name}.json').write_text(json.dumps(rec))
     for old in sorted(d.glob('*.jpg'), key=lambda p: p.stat().st_mtime)[:-REF_MAX]:
@@ -588,11 +589,13 @@ def post_profile(b):
         prof['sex'] = 'female' if b['sex'] == 'female' else 'male'
     if 'units' in b:
         prof['units'] = 'imperial' if b['units'] == 'imperial' else 'metric'
-    if 'camera_url' in b:
-        url = str(b['camera_url']).strip()
+    for key in ('camera_url', 'camera2_url'):
+        if key not in b:
+            continue
+        url = str(b[key]).strip()
         if url and urlparse(url).scheme not in ('http', 'https', 'rtsp'):
             raise ValueError('Camera URL must start with http://, https:// or rtsp://')
-        prof['camera_url'] = url
+        prof[key] = url
     if 'skin' in b:
         if not re.fullmatch(r'#[0-9a-fA-F]{6}', str(b['skin'])):
             raise ValueError('Skin tone must be a #rrggbb colour')
@@ -602,8 +605,9 @@ def post_profile(b):
             if not re.fullmatch(pattern, str(b[k])):
                 raise ValueError(f'Invalid {k}')
             prof[k] = b[k]
-    if 'rotate' in b:
-        prof['rotate'] = int(b['rotate']) if int(b['rotate']) in ROTATE else 0
+    for key in ('rotate', 'rotate2'):
+        if key in b:
+            prof[key] = int(b[key]) if int(b[key]) in ROTATE else 0
     for k in ('bare_only', 'clothes', 'reference'):
         if k in b:
             prof[k] = bool(b[k])
@@ -744,9 +748,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/state':
             return self.reply(app_state())
         if path == '/api/status':
-            return self.reply({**cap.status, 'rev': data_rev()})
+            return self.reply({**cap.status, 'rev': data_rev()} | ({'cam2': cap2.status} if cap2.url else {}))
         if path == '/api/live.mjpg':
-            return self.stream()
+            return self.stream(cap2 if parse_qs(urlparse(self.path).query).get('cam') == ['2'] else cap)
         if path == '/api/skin' and (DB_PATH.parent / 'skin.bin').exists():  # bone weights for posing fitted bodies (fit.py)
             return self.send(200, (DB_PATH.parent / 'skin.bin').read_bytes(), 'application/octet-stream')
         if path.startswith('/api/fit/'):  # a day's fitted body: rest mesh (int16 mm) + stance bone transforms (fit.py)
@@ -793,7 +797,7 @@ class Handler(BaseHTTPRequestHandler):
             c.execute(f"delete from {parts[1]} where {'metric' if parts[1] == 'goals' else 'id'} = ?", (parts[2],))
         self.reply({'ok': True})
 
-    def stream(self):
+    def stream(self, c):
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
         self.send_header('Cache-Control', 'no-store')
@@ -801,7 +805,7 @@ class Handler(BaseHTTPRequestHandler):
         last = None
         try:
             while True:
-                j = cap.jpeg
+                j = c.jpeg
                 if j is None or j is last:
                     time.sleep(.03)
                     continue
@@ -816,13 +820,13 @@ if __name__ == '__main__':
     tidy()
     ensure_model()
     jpg, meta = face_files()
-    if meta.exists() and not {'embedding', 'hair'} <= json.loads(meta.read_text()).keys():  # photo from an older version
+    if meta.exists() and 'fringe' not in json.loads(meta.read_text()).get('hair', {}):  # photo analysed by an older version
         try:
             post_face(jpg.read_bytes())
         except ValueError as e:
             print(f'Face photo needs replacing: {e}', flush=True)
     TS_HOST, TS_OWNER = tailnet()
-    cap = Capture()
+    cap, cap2 = Capture(), Capture(1)
     threading.Thread(target=refit_loop, daemon=True).start()
     print(f'BodyLab → http://localhost:{PORT}' + (f'  ·  tailnet: https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else ''), flush=True)
     ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
