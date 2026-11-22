@@ -33,6 +33,12 @@ for h, k, a in ((23, 25, 27), (24, 26, 28)):
 
 world = np.zeros((33, 3))
 world[[11, 12, 23, 24], 0] = .2, -.2, .1, -.1   # shoulders and hips square to the camera: yaw 0
+world[[11, 12], 1], world[[25, 26], 1], world[[27, 28], 1] = -.5, .45, .9  # standing: shoulders up (y down), knees, ankles
+world[[25, 27], 0], world[[26, 28], 0] = .1, -.1
+seated = world.copy()
+seated[[25, 26], 1], seated[[25, 26], 2] = 0, -.45  # thighs forward, level with the hips
+seated[[27, 28], 1], seated[[27, 28], 2] = .45, -.45  # shins down
+assert not M.bent(world) and M.bent(seated)
 r = M.observe(pts, np.ones(33), world, img / 255.0)
 assert not r['problem'] and r['full'] and r['theta'] == 0, r['problem']
 obs = r['obs']
@@ -151,6 +157,8 @@ assert g.face(.5, 1) == [] and g.end() == []  # one lucky match isn't enough
 old, new, late = R(0), R(100), R(200)
 assert [g.frame(x) for x in (old, new)] and g.face(.8, 120) == [] and g.face(.8, 130) == [new] and g.frame(late) == [] and g.end() == []
 # ^ frames over a minute from any match (her, back to the camera, just before or after you) never count
+g.frame(R(0))
+assert [g.face(.05, 1 + i, frontal=False) for i in range(5)] and not g.other  # a turned face never counts against you
 assert app.Gate(enrolled=False).frame('x') == ['x']  # no face photo yet: anyone alone counts
 
 # Energy balance: 500 kcal/day deficit for 28 days predicts ~1.8 kg lost.

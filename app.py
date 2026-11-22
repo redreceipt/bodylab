@@ -37,6 +37,8 @@ MODEL_URL = ('https://storage.googleapis.com/mediapipe-models/pose_landmarker/'
              'pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task')
 FACE_MODEL = ROOT / 'models' / 'face_landmarker.task'
 FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task'
+CLOTHES_MODEL = (ROOT / 'models' / 'selfie_multiclass_256x256.tflite',  # skin vs clothes, per pixel
+                 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite')
 HAIR_MODEL = (ROOT / 'models' / 'hair_segmenter.tflite',
               'https://storage.googleapis.com/mediapipe-models/image_segmenter/hair_segmenter/float32/latest/hair_segmenter.tflite')
 ZOO = 'https://github.com/opencv/opencv_zoo/raw/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/'
@@ -261,7 +263,7 @@ class Gate:
             self.waiting = (self.waiting + [rec])[-600:]
         return []
 
-    def face(self, score, ts):
+    def face(self, score, ts, frontal=True):
         """Your face's similarity to your photo (SFace cosine) at time ts. Returns frames now confirmed as you."""
         if score >= SAME_PERSON:
             self.matches, self.misses = self.matches + 1, 0
@@ -270,7 +272,7 @@ class Gate:
             ready = [r for r in self.waiting if r['ts'] - self.last <= self.WINDOW or ts - r['ts'] <= self.WINDOW]
             self.me, self.last, self.waiting = True, ts, []
             return ready
-        if score < .2:  # clearly someone else; in-between scores (far away, dim light) decide nothing
+        if score < .2 and frontal:  # clearly someone else; turned faces, distance and dim light decide nothing
             self.misses += 1
             if self.misses >= self.MISSES:
                 self.me, self.other, self.waiting = False, True, []
@@ -327,6 +329,8 @@ class Capture:
             base_options=BaseOptions(model_asset_path=str(MODEL)), num_poses=2,
             running_mode=vision.RunningMode.VIDEO, output_segmentation_masks=True))
         self.faces = Faces()
+        self.clothes = vision.ImageSegmenter.create_from_options(vision.ImageSegmenterOptions(
+            base_options=BaseOptions(model_asset_path=str(CLOTHES_MODEL[0])), output_category_mask=True))
         last, ts_ms = None, 0
         while True:
             f = self.frame
@@ -387,7 +391,8 @@ class Capture:
                 self.skin = np.median(np.vstack(patches), axis=0)
             if facing and self.me is not None and (not self.gate.me or now - self.last_id > 2):  # re-checked every 2 s
                 self.last_id = now
-                self.identify(f, pts)
+                eyes = np.linalg.norm(pts[2] - pts[5])  # a face seen near head-on: both ears, nose between the eyes
+                self.identify(f, pts, vis[[7, 8]].min() > .5 and abs(pts[0][0] - (pts[2][0] + pts[5][0]) / 2) < .25 * eyes)
             r = measure.observe(pts, vis, world, mask, female=self.prof.get('sex') == 'female',
                                 torso_ratio=self.prof.get('torso_ratio', .29), ycc=ycc, skin=self.skin)
             msg = r['problem']
@@ -397,11 +402,16 @@ class Capture:
                 msg, r['obs'] = 'Not you — BodyLab only measures the profile owner', {}
             elif bare and self.skin is None:
                 msg, r['obs'] = 'Face the camera for a moment so BodyLab can see your skin tone', {}
+            skin = cat = None
+            if r['obs'] and bare:  # clothes inflate every outline: the torso must be bare (underwear is fine)
+                skin, cat, box = bare_skin(self.clothes, f, mask, pts)
+                if skin['torso'] < .6:
+                    msg, r['obs'] = 'Clothes on — BodyLab measures bare skin (underwear is fine)', {}
             if r['obs']:
                 rec = {'ts': now, 'cam': self.cam, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
-                       'sil': silhouette(mask, pts, world, r['origin'], r['H'])}
+                       'sil': silhouette(mask, pts, world, r['origin'], r['H'])} | ({'skin': skin} if skin else {})
                 if self.prof.get('reference') and now - self.last_ref > 2 and reference_wanted(rec):
-                    self.last_ref, rec['jpg'] = now, reference_crop(f, mask)  # saved only if the gate confirms it's you
+                    self.last_ref, rec['jpg'] = now, reference_crop(f, mask if cat is None else None, cat, box)  # saved only if it's you
                 for x in self.gate.frame(rec):
                     self.keep(x)
                 if self.gate.enrolled and not self.gate.me:
@@ -411,7 +421,7 @@ class Capture:
         self.status = self.next_status(r, msg)
         self.publish(f, res, mask, r)
 
-    def identify(self, f, pts):
+    def identify(self, f, pts, frontal=True):
         span = max(np.linalg.norm(pts[7] - pts[8]), 20)  # ear to ear
         (x0, y0), (x1, y1) = (pts[0] - 1.6 * span).astype(int), (pts[0] + 1.6 * span).astype(int)
         crop = f[max(y0, 0):max(y1, 0), max(x0, 0):max(x1, 0)]
@@ -421,7 +431,7 @@ class Capture:
         if emb is None:
             return
         self.match = round(float(emb @ self.me), 2)
-        for rec in self.gate.face(self.match, time.time()):
+        for rec in self.gate.face(self.match, time.time(), frontal):
             self.keep(rec)
 
     def keep(self, rec):
@@ -429,7 +439,8 @@ class Capture:
             save_reference(rec.pop('jpg'), rec)
         day = date.fromtimestamp(rec['ts'])
         if self.stored[0] != day:
-            self.stored = [day, db().execute('select count(*) from frames where ts >= ?', (day_start(rec['ts']),)).fetchone()[0]]
+            self.stored = [day, db().execute("select count(*) from frames where ts >= ? and coalesce(json_extract(data, '$.cam'), 0) = ?",
+                                             (day_start(rec['ts']), self.cam)).fetchone()[0]]  # 400 a day per camera
             if day != date.today():
                 return
             tidy()  # once a day
@@ -530,13 +541,43 @@ def reference_wanted(rec):
     return len(list(reference_dir().glob(f'{tag}_*.jpg'))) < REF_PER_BUCKET
 
 
-def reference_crop(f, mask):
-    """The person (10 % margin), at most 900 px tall, as JPEG: not the room."""
+def person_box(mask, margin=.1):
+    """(y0, y1, x0, x1) around the person mask, with a margin."""
     ys, xs = np.nonzero(mask > .5)
     if not len(ys):
         return None
-    m = .1 * (ys.max() - ys.min())
-    crop = f[max(int(ys.min() - m), 0):int(ys.max() + m), max(int(xs.min() - m), 0):int(xs.max() + m)]
+    m = margin * (ys.max() - ys.min())
+    return max(int(ys.min() - m), 0), int(ys.max() + m), max(int(xs.min() - m), 0), int(xs.max() + m)
+
+
+def bare_skin(segmenter, f, mask, pts):
+    """Share of skin (vs clothes) over the torso (shoulders to hips) and the shins (knees to ankles), from MediaPipe's
+    multiclass person segmenter on the person's crop. Also returns its category mask and the crop box."""
+    box = person_box(mask)
+    y0, y1, x0, x1 = box
+    crop = np.ascontiguousarray(cv2.cvtColor(f[y0:y1, x0:x1], cv2.COLOR_BGR2RGB))
+    cat = segmenter.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)).category_mask.numpy_view()
+    p = pts - [x0, y0]
+
+    def share(quad):
+        region = np.zeros(cat.shape, np.uint8)
+        cv2.fillConvexPoly(region, np.round(quad).astype(np.int32), 1)
+        c = cat[region > 0]
+        skin, cloth = (c == 2).sum(), (c == 4).sum()  # 2 = body skin, 4 = clothes
+        return round(float(skin / (skin + cloth)), 2) if skin + cloth else 1.0
+    return {'torso': share(p[[11, 12, 24, 23]]), 'legs': min(share(p[[25, 27, 27, 25]] + [[-8, 0], [-8, 0], [8, 0], [8, 0]]),
+                                                            share(p[[26, 28, 28, 26]] + [[-8, 0], [-8, 0], [8, 0], [8, 0]]))}, cat, box
+
+
+def reference_crop(f, mask=None, cat=None, box=None):
+    """The person (10 % margin), background greyed out, at most 900 px tall, as JPEG: you, not the room."""
+    box = box or (mask is not None and person_box(mask))
+    if not box:
+        return None
+    y0, y1, x0, x1 = box
+    crop = f[y0:y1, x0:x1].copy()
+    person = cat > 0 if cat is not None else mask[y0:y1, x0:x1] > .5
+    crop[~person] = 128
     k = min(1, 900 / crop.shape[0])
     return cv2.imencode('.jpg', cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
 
@@ -819,6 +860,7 @@ if __name__ == '__main__':
     init_db()
     tidy()
     ensure_model()
+    ensure_model(*CLOTHES_MODEL)
     jpg, meta = face_files()
     if meta.exists() and 'fringe' not in json.loads(meta.read_text()).get('hair', {}):  # photo analysed by an older version
         try:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """BodyLab camera: MJPEG at http://<tailscale-ip>:8000/stream.mjpg, bound to the tailnet address only.
-A Raspberry Pi camera (picamera2), or any Linux webcam via ffmpeg (DEVICE=/dev/video0, SIZE=1280x720, FPS=15)."""
+A Raspberry Pi camera (picamera2), or any Linux webcam via ffmpeg (DEVICE=/dev/video0, SIZE=1280x720, FPS=15; INPUT=yuyv422
+for webcams without MJPEG: their frames are JPEG-encoded here)."""
 import io
 import os
 import socketserver
@@ -51,10 +52,12 @@ class Server(socketserver.ThreadingMixIn, server.HTTPServer):
 
 
 def webcam():
-    """The webcam's own MJPEG frames, passed through by ffmpeg without re-encoding (restarted if it stops)."""
+    """The webcam's MJPEG frames via ffmpeg: passed through as they are, or encoded from raw (restarted if it stops)."""
+    fmt = os.environ.get('INPUT', 'mjpeg')
     while True:
-        p = subprocess.Popen(['ffmpeg', '-loglevel', 'error', '-f', 'v4l2', '-input_format', 'mjpeg', '-video_size', '%dx%d' % SIZE,
-                              '-framerate', str(FPS), '-i', os.environ.get('DEVICE', '/dev/video0'), '-c', 'copy', '-f', 'mjpeg', '-'],
+        p = subprocess.Popen(['ffmpeg', '-loglevel', 'error', '-f', 'v4l2', '-input_format', fmt, '-video_size', '%dx%d' % SIZE,
+                              '-framerate', str(FPS), '-i', os.environ.get('DEVICE', '/dev/video0'),
+                              *(['-c', 'copy'] if fmt == 'mjpeg' else ['-c:v', 'mjpeg', '-q:v', '3']), '-f', 'mjpeg', '-'],
                              stdout=subprocess.PIPE)
         buf = b''
         while chunk := p.stdout.read(1 << 16):

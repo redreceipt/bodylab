@@ -91,6 +91,8 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
     perp = np.array([-down[1], down[0]])
     if abs(down[0]) > .25:
         return fail('Leaning — only upright frames are measured')
+    if bent(world):
+        return fail('Sitting or crouching — only standing frames are measured')
     theta = out['theta'] = (yaw(world, SH_L, SH_R) + yaw(world, HIP_L, HIP_R)) / 2
     obs = out['obs']
 
@@ -183,6 +185,18 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
         del obs[k]  # one misread part shouldn't cost the rest of the frame
     out['H'], out['origin'] = H, hp  # px per standing height, hip centre: to store a scale-free silhouette
     return out if obs else fail('Nothing measurable in this frame')
+
+
+def bent(world, limit=45):
+    """Both hips or both knees bent past `limit` degrees (MediaPipe 3D landmarks): sitting or crouching. Walking
+    (one leg straight) isn't."""
+    def angle(a, b):
+        n = np.linalg.norm(a) * np.linalg.norm(b)
+        return np.degrees(np.arccos(np.clip(a @ b / n, -1, 1))) if n > 1e-9 else 0
+    torso = world[[HIP_L, HIP_R]].mean(0) - world[[SH_L, SH_R]].mean(0)
+    hips = [angle(torso, world[k] - world[h]) for h, k in ((HIP_L, KN_L), (HIP_R, KN_R))]
+    knees = [angle(world[k] - world[h], world[a] - world[k]) for h, k, a in ((HIP_L, KN_L, AN_L), (HIP_R, KN_R, AN_R))]
+    return min(hips) > limit or min(knees) > limit
 
 
 def fit_ellipse(seen, ratio):
