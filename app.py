@@ -235,6 +235,7 @@ def app_state():
     sync = f'https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else None
     return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': sync},
             'face': face, 'hidden_scans': hidden, 'reference_images': len(list(reference_dir().glob('*.jpg'))),
+            'skin_baked': (DB_PATH.parent / 'skin.jpg').stat().st_mtime if (DB_PATH.parent / 'skin.jpg').exists() else None,
             'insights': measure.insights(scans, logs, goals)}
 
 
@@ -809,6 +810,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({**cap.status, 'rev': data_rev()} | ({'cam2': cap2.status} if cap2.url else {}))
         if path == '/api/live.mjpg':
             return self.stream(cap2 if parse_qs(urlparse(self.path).query).get('cam') == ['2'] else cap)
+        if path == '/api/skin.jpg' and (DB_PATH.parent / 'skin.jpg').exists():  # your skin, baked from the cameras (fit.py)
+            return self.send(200, (DB_PATH.parent / 'skin.jpg').read_bytes(), 'image/jpeg')
         if path == '/api/skin' and (DB_PATH.parent / 'skin.bin').exists():  # bone weights for posing fitted bodies (fit.py)
             return self.send(200, (DB_PATH.parent / 'skin.bin').read_bytes(), 'application/octet-stream')
         if path.startswith('/api/fit/'):  # a day's fitted body: rest mesh (int16 mm) + stance bone transforms (fit.py)

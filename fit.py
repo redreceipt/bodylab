@@ -39,7 +39,14 @@ def load(db, day=None):
     noon = time.mktime(time.strptime(day + ' 12', '%Y-%m-%d %H'))
     w = c.execute("select json_extract(data, '$.weight'), abs(ts - ?) / 86400 from logs where kind = 'daily' "
                   "and json_extract(data, '$.weight') > 0 and abs(ts - ?) < 180 * 86400 order by abs(ts - ?) limit 1", (noon,) * 3).fetchone()
-    return day, [f for f in rows if f.get('sil')], prof | ({'weight': w[0], 'weight_age': w[1]} if w else {})
+    prof |= {'weight': w[0], 'weight_age': w[1]} if w else {}
+    last = c.execute('select params from fits where day <= ? order by day desc limit 1', (day,)).fetchone()
+    if last and prof.get('weight'):  # body composition from the last fit: what the muscle/fat split should look like
+        import measure
+        t = json.loads(last[0])['tape']
+        bf = measure.navy_bf(prof.get('sex'), prof['height_cm'], t['neck'], t['waist'], t['hips'])
+        prof |= {'bf': bf, 'ffmi': prof['weight'] * (1 - bf / 100) / (prof['height_cm'] / 100) ** 2}
+    return day, [f for f in rows if f.get('sil')], prof
 
 
 def borders(c, eps=.004):
@@ -172,6 +179,11 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     a, b = C, torch.roll(C, -1, 1)
 
     use = torch.ones(B, device=dev)  # frames the shape is fitted to
+    # shortcut: linear maps from body fat % and fat-free mass index to Anny's fat and muscle axes, eyeballed on its
+    # renders (lean ~10 % men show definition near muscle .65 / fat .3); refine against reference captures.
+    off = (10, 3) if female else (0, 0)
+    fat_t = float(np.clip(.2 + (prof['bf'] - 8 - off[0]) / 40, .1, .9)) if 'bf' in prof else .45
+    muscle_t = float(np.clip(.5 + (prof['ffmi'] - 19 + off[1]) / 8, .2, 1)) if 'ffmi' in prof else .6
 
     def loss(stage):
         out = run()
@@ -185,9 +197,9 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
         rest = out['rest_vertices'][0]
         l_h = (rest[body, 2].max() - rest[body, 2].min() - H) ** 2
         mass = volume(rest) * DENSITY
-        # Outlines can't separate muscle from fat; lean toward a fit adult unless they insist.
+        # Outlines can't separate muscle from fat: lean on your body composition (last fit), else a fit adult.
         l_reg = (rot ** 2).mean() * .01 + (cam[:, 0] ** 2).mean() * .1 + (torch.tanh(local) ** 2).mean() * .02 \
-            + .002 * ((torch.sigmoid(phen['muscle']) - .6) ** 2 + (torch.sigmoid(phen['weight']) - .45) ** 2)
+            + .004 * ((torch.sigmoid(phen['muscle']) - muscle_t) ** 2 + (torch.sigmoid(phen['weight']) - fat_t) ** 2)
         total = l_kp + .3 * l_3d + 10 * l_h + l_reg
         if prof.get('weight') and stage:  # outlines leave volume loose (±10 %); a weigh-in pins it, trusted less with age
             trust = min(1, max(0, 1 - (prof.get('weight_age', 0) - 4) / 180))
@@ -462,8 +474,11 @@ def bake_skin(db, prof, views):
     if not vs:
         return
     tex, cover = bake.bake(vs, src, uv, tris, base=cv2.imread(str(ROOT / f"static/assets/skin_{prof.get('sex', 'male')}.jpg")))
-    cv2.imwrite(str(Path(db).parent / 'skin.jpg'), tex, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    print(f'skin baked from {len(vs)} captures, {cover.mean() * 100:.0f} % of the texture seen')
+    ys, xs = bake.texels(uv, tris, 256)[:2]
+    seen = cv2.resize(cover, (256, 256), interpolation=cv2.INTER_AREA)[ys, xs].mean()  # share of the body's surface, not of the image
+    print(f'skin baked from {len(vs)} captures, {seen * 100:.0f} % of the body seen')
+    if seen >= .5:  # patchier than that looks worse than the template
+        cv2.imwrite(str(Path(db).parent / 'skin.jpg'), tex, [cv2.IMWRITE_JPEG_QUALITY, 90])
 
 
 def store(db, day, res, rest, G, model_skin=None):

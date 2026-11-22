@@ -76,11 +76,11 @@ function median(d) {
 // Skin texture canvas for `sex`, tinted to your skin and with your face photo baked in.
 // The photo keeps only its fine detail (features, pores, brows); broad colour and shading come from the
 // skin texture, so its studio lighting doesn't make the face look pasted on. Scalp under hair takes the hair colour.
-export async function skinCanvas(sex, { face, photo, tone, hairColor }) {
+export async function skinCanvas(sex, { face, photo, tone, hairColor, baseUrl }) {
   const A = assets(), anchors = A.arr(`face_uv.${sex}`);
   const at = (k) => [anchors[k * 2] * SIZE, (1 - anchors[k * 2 + 1]) * SIZE];
   const c = canvas(SIZE), ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(await loadImage(`/static/assets/skin_${sex}.jpg`), 0, 0, SIZE, SIZE);
+  ctx.drawImage(await loadImage(baseUrl ?? `/static/assets/skin_${sex}.jpg`), 0, 0, SIZE, SIZE); // baseUrl: your skin, baked from the cameras
   const oval = A.meta.face_oval.filter((k) => !Number.isNaN(anchors[k * 2])).map(at);
   const mx = oval.reduce((s, p) => s + p[0], 0) / oval.length, my = oval.reduce((s, p) => s + p[1], 0) / oval.length;
   const ovalPath = (g, k, dx = 0, dy = 0) => {

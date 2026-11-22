@@ -1,6 +1,7 @@
 """Your skin texture from the reference captures: every texel of the body's UV layout is looked up in each capture
 where the fitted, posed body shows it (visible, facing the camera, on skin rather than clothes), and the views are
-blended, best-facing and sharpest first. Parts no camera saw keep the template skin, tinted to yours.
+blended, best-facing and sharpest first, and only their fine detail is kept (on the template's even lighting) so the
+room's light doesn't show. Parts no camera saw keep the template skin.
 Used by fit.py --store; only the texture is kept."""
 import json
 from pathlib import Path
@@ -48,6 +49,15 @@ def skin_mask(img):
     return cv2.erode(m, np.ones((7, 7), np.uint8)) > 0
 
 
+def sample(img, p):
+    """Bilinear colours of img at points p (N, 2), as float (remap maps must stay under 32k a side)."""
+    n, w = len(p), 4096
+    q = np.zeros((-(-n // w) * w, 2), np.float32)
+    q[:n] = p
+    out = cv2.remap(img, q[:, 0].reshape(-1, w), q[:, 1].reshape(-1, w), cv2.INTER_LINEAR)
+    return out.reshape(-1, 3)[:n].astype(float)
+
+
 def bake(views, src, uv, tris, size=2048, base=None):
     """views: [{'img': BGR, 'px': (V, 2) image px of every base vertex, 'cam': (V, 3) camera-frame positions (m, z away),
     'weight': quality}]. Returns (texture BGR uint8, coverage 0..1 per texel)."""
@@ -70,7 +80,7 @@ def bake(views, src, uv, tris, size=2048, base=None):
         inside = (p[:, 0] >= 0) & (p[:, 0] < w - 1) & (p[:, 1] >= 0) & (p[:, 1] < h - 1)
         pi = np.clip(np.round(p).astype(int), 0, [w - 1, h - 1])
         ok = inside & (facing[t] > .3) & (z <= zbuf[pi[:, 1], pi[:, 0]] + .015) & v['skin'][pi[:, 1], pi[:, 0]]
-        col = cv2.remap(img, p[ok, 0].astype(np.float32)[None], p[ok, 1].astype(np.float32)[None], cv2.INTER_LINEAR)[0].astype(float)
+        col = sample(img, p[ok])
         per_view.append((ok, col, facing[t][ok] ** 2 * v['weight']))
     # Each view's colour balance matched to all views' median (the two cameras see different white balance).
     allc = np.concatenate([c for _, c, _ in per_view]) if per_view else np.zeros((0, 3))
@@ -86,11 +96,11 @@ def bake(views, src, uv, tris, size=2048, base=None):
     seen = wsum > 0
     tex[ys[seen], xs[seen]] = acc[seen] / wsum[seen, None]
     cover[ys[seen], xs[seen]] = np.clip(wsum[seen] / .3, 0, 1)
-    if base is not None:  # unseen parts: the template skin, tinted to the baked colour; soft seams
+    if base is not None:  # your skin's detail on the template's even lighting (tone comes from your face photo, later)
         base = cv2.resize(base, (size, size)).astype(float)
-        inside = np.zeros((size, size), bool)
-        inside[ys, xs] = True
-        gain = target / np.maximum(np.median(base[inside], 0), 1) if seen.any() else 1
+        # Detail = your skin ÷ its own blur (~1.5 cm): marks, hair, pores, not the room's light falling across you.
+        lit = cv2.GaussianBlur(tex * cover[..., None], (0, 0), 12) / np.maximum(cv2.GaussianBlur(cover, (0, 0), 12), 1e-3)[..., None]
+        detail = np.clip(tex / np.maximum(lit, 1), .6, 1.6)
         a = np.minimum(cv2.GaussianBlur(cover, (0, 0), 3), cover)[..., None]  # feathered inward from what was seen
-        tex = np.where(cover[..., None] > 0, tex * a + base * gain * (1 - a), base * gain)
+        tex = base * (1 + (detail - 1) * a)
     return np.clip(tex, 0, 255).astype(np.uint8), cover

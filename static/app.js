@@ -95,6 +95,7 @@ function toast(msg, err = false) {
 const renderer = new THREE.WebGLRenderer({ canvas: $('#c'), antialias: true, alpha: true });
 renderer.setPixelRatio(devicePixelRatio);
 renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
 camera.position.set(0.6, 1.25, 4.6);
@@ -103,14 +104,19 @@ Object.assign(controls, { enableDamping: true, autoRotate: true, autoRotateSpeed
 controls.target.set(0, 0.88, 0);
 if (innerWidth < 600) { camera.position.multiplyScalar(1.15); controls.target.y = 0.8; } // phone: the whole body between the bars
 controls.addEventListener('start', () => { controls.autoRotate = false; focus.target = null; });
-scene.add(new THREE.HemisphereLight('#c4dcff', '#141c2c', 1.4));
-const keyLight = new THREE.DirectionalLight('#ffffff', 2.4);
+// Lit like a person, not a mannequin: a warm key with soft shadows, a cool fill, warm bounce from below, a subtle rim.
+scene.add(new THREE.HemisphereLight('#f4f1ee', '#4a3a32', 0.7));
+const keyLight = new THREE.DirectionalLight('#ffeedd', 2.6);
 keyLight.position.set(2, 4, 3);
 keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(1024, 1024);
+keyLight.shadow.mapSize.set(2048, 2048);
+Object.assign(keyLight.shadow, { radius: 4, bias: -0.0004, normalBias: 0.02 });
 Object.assign(keyLight.shadow.camera, { left: -1.5, right: 1.5, top: 2.5, bottom: -0.5 });
 scene.add(keyLight);
-const rim = new THREE.DirectionalLight('#3ef0ff', 1.3);
+const fill = new THREE.DirectionalLight('#dfe8ff', 0.7);
+fill.position.set(-3, 2, 2.5);
+scene.add(fill);
+const rim = new THREE.DirectionalLight('#9feeff', 0.9);
 rim.position.set(-3, 2.5, -3);
 scene.add(rim);
 const floor = new THREE.Mesh(new THREE.CircleGeometry(0.95, 72), new THREE.MeshStandardMaterial({ color: '#0c1524', roughness: 0.9 }));
@@ -130,8 +136,30 @@ let avatar = null, ghost = null, scanning = false;
 const A = initBody(...await Promise.all([fetch('/static/assets/body.json').then((r) => r.json()),
   fetch('/static/assets/body.bin').then((r) => r.arrayBuffer())]));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.45;
+scene.environmentIntensity = 0.55;
+
+// Skin micro-detail: a tiling normal map of pores and fine creases (procedural), much finer than any texture texel.
+function poreNormals(size = 512) {
+  const h = new Float32Array(size * size);
+  for (let n = 0; n < 9000; n++) { // pores: small pits
+    const x = Math.random() * size, y = Math.random() * size, r = 1 + Math.random() * 1.5;
+    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+      const d = Math.hypot(dx, dy) / r;
+      if (d < 1.5) h[((Math.floor(y) + dy + size) % size) * size + ((Math.floor(x) + dx + size) % size)] -= Math.exp(-d * d * 2);
+    }
+  }
+  const c = document.createElement('canvas'), g = c.getContext('2d'), im = g.createImageData(size, size);
+  c.width = c.height = size;
+  const at = (x, y) => h[((y + size) % size) * size + ((x + size) % size)];
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const nx = (at(x - 1, y) - at(x + 1, y)) * 0.6, ny = (at(x, y - 1) - at(x, y + 1)) * 0.6, l = Math.hypot(nx, ny, 1), i = (y * size + x) * 4;
+    im.data[i] = (nx / l * 0.5 + 0.5) * 255; im.data[i + 1] = (ny / l * 0.5 + 0.5) * 255; im.data[i + 2] = (1 / l * 0.5 + 0.5) * 255; im.data[i + 3] = 255;
+  }
+  g.putImageData(im, 0, 0);
+  return Object.assign(new THREE.CanvasTexture(c), { wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping, repeat: new THREE.Vector2(14, 14), anisotropy: 8 });
+}
 
 const textures = {};
 const texture = (url) => (textures[url] ??= Object.assign(new THREE.TextureLoader().load(url), { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 }));
@@ -162,7 +190,9 @@ function fabric() {
   return Object.assign(new THREE.CanvasTexture(c), { colorSpace: THREE.SRGBColorSpace, flipY: false, anisotropy: 8 });
 }
 const mats = {
-  skin: new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.6, sheen: 0.3, sheenRoughness: 0.7, sheenColor: '#ffcfb8' }),
+  // Skin: soft specular, a warm sheen standing in for light scattering under the skin, pores for micro-detail.
+  skin: new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.52, specularIntensity: 0.45, sheen: 0.35, sheenRoughness: 0.55,
+    sheenColor: '#ff9a7a', normalMap: poreNormals(), normalScale: new THREE.Vector2(0.35, 0.35) }),
   // Additive glow over the selected / hovered part, so the skin itself stays untouched.
   selected: glowMaterial(0.45), hovered: glowMaterial(0.25),
   hair: strands(null, '#3b2a20'), brows: strands(texture('/static/assets/eyebrow001.png'), '#3b2a20'),
@@ -180,13 +210,14 @@ async function updateLook() {
   const p = S.profile || {}, sex = p.sex === 'female' ? 'female' : 'male', face = S.face;
   look.clothes = p.clothes === true; // nude unless censored
   $('#censored').checked = look.clothes;
-  const key = JSON.stringify([sex, p.skin, p.hair, p.hair_color, p.eye_color, face?.ts]);
+  const key = JSON.stringify([sex, p.skin, p.hair, p.hair_color, p.eye_color, face?.ts, S.skin_baked]);
   if (key === lookKey) return;
   lookKey = key;
   const photo = face && await loadImage(`/api/face.jpg?${face.ts}`);
   const auto = { ...(face ? photoColors(photo, face) : {}), hair: face?.hair?.color };
   const hair = p.hair ?? face?.hair?.style ?? (sex === 'female' ? 'long01' : 'short02'), hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
-  const { canvas: skinTex, tone } = await skinCanvas(sex, { face, photo, tone: p.skin, hairColor: HAIRS[hair] ? hairColor : null });
+  const { canvas: skinTex, tone } = await skinCanvas(sex, { face, photo, tone: p.skin, hairColor: HAIRS[hair] ? hairColor : null,
+    baseUrl: S.skin_baked ? `/api/skin.jpg?${S.skin_baked}` : null });
   mats.genitals.color.set(`rgb(${tone.map(Math.round).join(',')})`).multiplyScalar(0.93); // a touch darker than the face's tone
   const skin = new THREE.CanvasTexture(skinTex);
   Object.assign(skin, { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 });
