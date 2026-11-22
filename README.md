@@ -2,7 +2,7 @@
 
 Track body composition by walking past a camera. BodyLab watches a network camera, measures your silhouette, estimates circumferences and body fat, and fits a realistic 3D body to you (your face, skin, eyes and hair from one photo). Click any part for its history and goals. Apple Health supplies the inputs (food, activity, heart, sleep, workouts), and an **inputs → outputs** view shows how they move your body.
 
-Everything runs on your machine. Camera video stays in memory; only measurements (and your face photo, if you add one) are stored.
+Everything runs on your machine; other devices reach it only over your Tailscale tailnet, and only when signed in as you. Camera video stays in memory; only measurements (and your face photo, if you add one) are stored.
 
 ## Quick start
 
@@ -35,7 +35,8 @@ Env: `PORT` (8765), `COOLDOWN_MIN` (10, minimum minutes between saved scans), `B
 Calories in minus active and resting energy gives your **energy balance**, so Insights compares predicted weight change (~7700 kcal per kg) with what the scale and camera measured.
 
 ```sh
-tailscale serve --bg --https=8443 http://127.0.0.1:8765   # tailnet-only HTTPS; only /api/sync and /api/face (token) answer remotely
+tailscale serve --bg --https=8443 http://127.0.0.1:8765   # tailnet-only HTTPS: the iPhone syncs here, and you can open
+                                                          # https://<this-mac>.<tailnet>.ts.net:8443 from your other devices
 cd ios && BODYLAB_TEAM=<your team id> xcodegen && open BodyLabSync.xcodeproj   # then ⌘R on your iPhone
 ```
 

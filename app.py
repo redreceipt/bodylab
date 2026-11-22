@@ -32,7 +32,8 @@ FACE_MODEL = ROOT / 'models' / 'face_landmarker.task'
 FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task'
 ROTATE = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
 PORT = int(os.environ.get('PORT', '8765'))
-SYNC_PORT = 8443  # `tailscale serve --bg --https=8443 8765` exposes /api/sync to your tailnet
+SYNC_PORT = 8443  # `tailscale serve --bg --https=8443 http://127.0.0.1:8765` puts BodyLab on your tailnet
+TS_HOST = TS_OWNER = None  # set at startup from `tailscale status`
 COOLDOWN_S = float(os.environ.get('COOLDOWN_MIN', '10')) * 60
 FRONT_FRAMES, SIDE_FRAMES, LIVE_FRAMES = 40, 20, 12
 DB_PATH = Path(os.environ.get('BODYLAB_DB') or ROOT / 'data' / 'bodylab.db')
@@ -77,12 +78,13 @@ def sync_token():
         return c.execute("select v from settings where k = 'sync_token'").fetchone()[0]
 
 
-def sync_url():
+def tailnet():
+    """(this Mac's tailnet hostname, owner's login) or (None, None) without Tailscale."""
     try:
         st = json.loads(subprocess.run(['tailscale', 'status', '--json'], capture_output=True, timeout=5).stdout)
-        return f"https://{st['Self']['DNSName'].rstrip('.')}:{SYNC_PORT}"
-    except Exception:  # no Tailscale CLI: the Profile panel just shows the token
-        return None
+        return st['Self']['DNSName'].rstrip('.'), st['User'][str(st['Self']['UserID'])]['LoginName']
+    except Exception:
+        return None, None
 
 
 def ensure_model(path=MODEL, url=MODEL_URL):
@@ -171,7 +173,8 @@ def app_state():
             m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']))
             scans.append({'id': r['id'], 'ts': r['ts'], 'side': 'neck_d' in raw, 'm': m, 'dims': dims})
     face = face_files()[1]
-    return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': SYNC_URL},
+    sync = f'https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else None
+    return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': sync},
             'face': json.loads(face.read_text()) if face.exists() else None,
             'insights': measure.insights(scans, logs, goals)}
 
@@ -441,9 +444,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send(code, json.dumps(obj).encode())
 
     def allowed(self):
-        # Blocks DNS rebinding and cross-site requests: the camera feed and data stay with this origin.
-        origin = self.headers.get('Origin')
-        if urlparse(f'//{self.headers.get("Host", "")}').hostname not in LOCAL or (origin and urlparse(origin).hostname not in LOCAL):
+        # Only this Mac, or you on your tailnet via `tailscale serve` (which sets a verified Tailscale-User-Login).
+        # The Host/Origin checks also block DNS rebinding and cross-site requests.
+        host, origin = urlparse(f'//{self.headers.get("Host", "")}').hostname, self.headers.get('Origin')
+        ok = host in LOCAL or (TS_HOST and host == TS_HOST and self.headers.get('Tailscale-User-Login') == TS_OWNER)
+        if not ok or (origin and urlparse(origin).hostname not in (*LOCAL, TS_HOST)):
             self.send(403, b'forbidden', 'text/plain')
             return False
         return True
@@ -522,7 +527,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     init_db()
     ensure_model()
-    SYNC_URL = sync_url()
+    TS_HOST, TS_OWNER = tailnet()
     cap = Capture()
-    print(f'BodyLab → http://localhost:{PORT}', flush=True)
+    print(f'BodyLab → http://localhost:{PORT}' + (f'  ·  tailnet: https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else ''), flush=True)
     ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
