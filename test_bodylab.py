@@ -11,8 +11,8 @@ S = 4  # px per cm; figure spans y=250 (head top) .. 950 (floor) = 700 px = 175 
 img = np.zeros((1000, 800), np.uint8)
 cv2.ellipse(img, (400, 290), (36, 40), 0, 0, 360, 255, -1)          # head
 cv2.line(img, (400, 320), (400, 390), 255, 12 * S)                    # neck 12 cm
-cv2.rectangle(img, (330, 380), (470, 560), 255, -1)                   # chest/waist 35 cm
-cv2.rectangle(img, (320, 560), (480, 650), 255, -1)                   # hips 40 cm
+cv2.rectangle(img, (330, 380), (470, 575), 255, -1)                   # chest/waist 35 cm
+cv2.rectangle(img, (320, 575), (480, 650), 255, -1)                   # hips 40 cm
 pts = np.zeros((33, 2))
 pts[[7, 8]] = (380, 290), (420, 290)
 pts[[11, 12]] = (460, 395), (340, 395)                                # person's left = image right
@@ -62,11 +62,11 @@ frames = []
 for t in rng.uniform(0, 90, 60):
     th = math.radians(t)
     width = 2 * math.sqrt((.1 * math.cos(th)) ** 2 + (.075 * math.sin(th)) ** 2) * rng.normal(1, .02)  # waist 35x26 cm (H=175)
-    frames.append({'theta': t, 'full': True, 'obs': {**obs, 'waist': width}})
+    frames.append({'theta': t, 'full': True, 'obs': {**obs, 'waist': width, 'neck': obs['neck'] * (1.3 if t > 30 else 1)}})  # jaw in side views
 frames[0]['obs'] = {**obs, 'waist': .3}  # one misread frame
 est = M.estimate(frames)
 assert abs(est['waist_w'] * 175 - 35) < .7 and abs(est['waist_d'] * 175 - 26.25) < .7, (est['waist_w'] * 175, est['waist_d'] * 175)
-assert abs(est['neck_d'] / est['neck_w'] - 1) < 1e-9  # front-on only: depth falls back to the typical ratio
+assert abs(est['neck_w'] / obs['neck'] - 1) < .02 and abs(est['neck_d'] / est['neck_w'] - M.TORSO['neck']) < 1e-9  # front views only
 m, dims = M.derive(est, {'height_cm': 175, 'sex': 'male'})
 assert M.implausible(est) is None and 'bf' in m
 assert M.implausible({**est, 'neck_w': .13, 'hips_w': .12}) == ['neck_w', 'hips_w']  # e.g. the 70 cm 'neck' misread

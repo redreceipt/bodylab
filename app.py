@@ -459,7 +459,7 @@ class Capture:
             st['live'] = self.live
         if r is None:
             return {**st, 'state': 'adjust' if msg else 'idle', 'msg': msg or 'Watching — walk past any time; every view helps'}
-        if r['obs']:
+        if r['obs'] and not msg:  # msg here: waiting for your face, not you, or too dark
             return {**st, 'state': 'scanning', 'msg': f"Measuring — {today['frames']} views today, turned up to {round(today['angle'])}°"}
         return {**st, 'state': 'adjust', 'msg': msg or 'Watching'}
 

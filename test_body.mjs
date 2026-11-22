@@ -1,11 +1,12 @@
 // Self-check for static/body.js (template fitting). Run: node test_body.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fitBody, fitProxy, initBody } from './static/body.js';
+import { fitBody, fitProxy, genitalPositions, initBody } from './static/body.js';
 
 const file = (f) => readFileSync(new URL(`./static/assets/${f}`, import.meta.url));
 const bin = file('body.bin');
 const A = initBody(JSON.parse(file('body.json')), bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.length));
+for (const k of Object.keys(A.meta.arrays)) assert(A.arr(k).length > 0, k); // every array loads (e.g. uint32)
 const t = A.male;
 
 // x-extent of vertices whose part passes `use`, within ±1.2 cm of height y
@@ -60,3 +61,4 @@ for (const H of [t.H, t.H * 1.1]) {
   near(girth, 11, 0.07);
 }
 console.log('body ok');
+assert(genitalPositions(same.pos).every(Number.isFinite)); // nude mode builds

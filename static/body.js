@@ -6,7 +6,7 @@
 
 let T = null;
 const REG = { head: 0, torso: 1, arm_l: 2, arm_r: 3, leg_l: 4, leg_r: 5 };
-const TYPES = { float32: Float32Array, uint8: Uint8Array, uint16: Uint16Array };
+const TYPES = { float32: Float32Array, uint8: Uint8Array, uint16: Uint16Array, uint32: Uint32Array };
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // Piecewise-linear lookup in [[x, ...values]] sorted by x; clamps outside.
@@ -67,7 +67,7 @@ function template(pos, J, sex) {
     neck: pick(range(sh + 0.2 * (J.eye_l[1] - sh), sh + 0.55 * (J.eye_l[1] - sh), 8), (a, b) => a < b),
     shoulders: slab(sh, () => true),
     chest: slab(yAt(0.3)),
-    waist: sex === 'female' ? pick(range(yAt(0.5), yAt(0.8), 7), (a, b) => a < b) : slab(yAt(0.73)),
+    waist: sex === 'female' ? pick(range(yAt(0.5), yAt(0.8), 7), (a, b) => a < b) : slab(yAt(0.69)), // men: the navel
     underbust: slab(yAt(0.42)),
     hips: pick(range(yAt(0.95), yAt(1.1), 6), (a, b) => a > b),
   };

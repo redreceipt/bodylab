@@ -36,7 +36,9 @@ def implausible(raw):
         bad.append('hips_w')
     return list(dict.fromkeys(bad)) or None
 
-TORSO = {'neck': 1.0, 'chest': .72, 'underbust': .72, 'waist': .78, 'hips': .75}  # typical depth/width until turned views exist
+TORSO = {'neck': .9, 'chest': .72, 'underbust': .72, 'waist': .78, 'hips': .75}  # typical depth/width until turned views exist
+# Tape ÷ ellipse perimeter for the same width and depth: torsos are boxier than ellipses (measured on MakeHuman's templates).
+SHAPE = {'neck': 1.0, 'chest': 1.07, 'underbust': 1.04, 'waist': 1.03, 'hips': 1.04}
 LIMBS = ['arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'calf_l', 'calf_r']
 CALIBRATABLE = [*TORSO, 'shoulders', *LIMBS]
 METRICS = ['bf', 'weight', 'lean_kg', 'fat_kg', 'ffmi', 'whtr', 'whr', *CALIBRATABLE, *MEASURE]
@@ -135,7 +137,7 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
     p_chest = slice_('chest', [at(.30)], bare=not female)  # a sports bra is fine
     if female:  # under the breasts: with the bust, gives cup size; and it's the ribcage the avatar fits to
         slice_('underbust', [at(.42)], bare=False)
-    p_waist = slice_('waist', [at(f) for f in (np.linspace(.5, .8, 7) if female else [.73])])  # Navy: men at the navel
+    p_waist = slice_('waist', [at(f) for f in (np.linspace(.5, .8, 7) if female else [.84])])  # Navy: women narrowest, men at the navel
     p_hips = slice_('hips', [at(f) for f in np.linspace(.95, 1.15, 6)], pick=max, bare=False)  # underwear is fine
 
     if theta < 25:
@@ -210,7 +212,8 @@ def estimate(frames):
     ellipses fitted to the widths seen at each yaw; everything else is a median. None if too little to go on."""
     raw = {'n_frames': len(frames), 'n_angle': round(max((f['theta'] for f in frames), default=0))}
     for level, ratio in TORSO.items():
-        seen = [(f['theta'], f['obs'][level]) for f in frames if level in f['obs']]
+        # A turned neck's outline includes the jaw, so its depth comes from TORSO, not side views.
+        seen = [(f['theta'], f['obs'][level]) for f in frames if level in f['obs'] and (level != 'neck' or f['theta'] < 30)]
         if len(seen) >= 8:
             a, b = fit_ellipse(seen, ratio)
             raw[level + '_w'], raw[level + '_d'] = 2 * a, 2 * b
@@ -354,7 +357,7 @@ def derive(raw, profile, weight=None):
     for p, ratio in TORSO.items():
         if p + '_w' in dims:
             dims.setdefault(p + '_d', dims[p + '_w'] * ratio)
-            m[p] = ellipse(dims[p + '_w'], dims[p + '_d']) * cal.get(p, 1)
+            m[p] = ellipse(dims[p + '_w'], dims[p + '_d']) * SHAPE[p] * cal.get(p, 1)
     if 'shoulders_w' in dims:
         m['shoulders'] = dims['shoulders_w'] * cal.get('shoulders', 1)
     for p in LIMBS:
