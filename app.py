@@ -296,7 +296,7 @@ class Capture:
         self.frame = self.jpeg = self.url = None
         self.frame_ts = self.last_seen = self.last_store = self.last_fit = 0.0
         self.status = {'state': 'starting', 'msg': 'Connecting to camera…'}
-        self.want_clear, self.dirty, self.live = False, True, None
+        self.want_clear, self.dirty = False, True
         self.prof, self.weight, self.prof_ts, self.me = {}, None, 0.0, None
         self.gate, self.skin, self.match, self.last_id, self.stored = Gate(), None, None, 0.0, [None, 0]
         threading.Thread(target=self.read_loop, daemon=True).start()
@@ -363,7 +363,7 @@ class Capture:
             with db() as c:
                 c.execute('delete from frames where ts >= ?', (day_start(now),))
                 c.execute('delete from scans where day = ?', (date.today().isoformat(),))
-            self.want_clear, self.live, self.dirty = False, None, False
+            self.want_clear, self.dirty = False, False
         r, mask, msg = None, None, None
         people = [i for i, m in enumerate(res.segmentation_masks or []) if (m.numpy_view() > .5).mean() > .01]
         if len(people) > 1:  # whose frames are whose is no longer certain
@@ -452,17 +452,12 @@ class Capture:
                       (now, json.dumps(raw), date.fromtimestamp(now).isoformat()))
         if raw.get('torso_ratio') and abs(raw['torso_ratio'] - self.prof.get('torso_ratio', 0)) > .002:
             set_profile({**(get_profile() or {}), 'torso_ratio': round(raw['torso_ratio'], 4)})  # scales partial views
-        with db() as c:
-            f = c.execute('select params from fits where day = ?', (date.fromtimestamp(now).isoformat(),)).fetchone()
-        self.live = dict(zip(('m', 'dims'), measure.derive(raw | ({'tape': json.loads(f[0])['tape']} if f else {}), self.prof, self.weight)))
 
     def next_status(self, r, msg):
         today = getattr(self, 'today', {'frames': 0, 'angle': 0})
         st = {'state': 'idle', 'frames': today['frames'], 'angle': round(today['angle']), 'match': self.match}
         if not self.prof.get('height_cm'):
             return {**st, 'msg': 'Set your height in Settings to start'}
-        if self.live and r is not None and not self.gate.other:
-            st['live'] = self.live
         if r is None:
             return {**st, 'state': 'adjust' if msg else 'idle', 'msg': msg or 'Watching — walk past any time; every view helps'}
         if r['obs'] and not msg:  # msg here: waiting for your face, not you, or too dark
@@ -518,8 +513,6 @@ def refit_loop():
             print('body fit failed:', (p.stderr.strip().splitlines() or ['?'])[-1], flush=True)
             if 'ModuleNotFoundError' in p.stderr:
                 return
-        else:
-            cap.dirty = True  # re-derive today's measurements from the fit
 
 
 def tidy():

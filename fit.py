@@ -157,7 +157,7 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
         shift = torch.cat([cam[:, 1:], torch.zeros(B, 1, device=dev)], 1)[:, None]
         return (k3 - hip) * s + shift, (v3 - hip) * s + shift
 
-    tris = torch.tensor(assets()[2], device=dev)
+    tris = torch.tensor(assets()[2], device=dev)  # whole body
     volume = lambda v: torch.einsum('ij,ij->i', v[tris[:, 0]], torch.cross(v[tris[:, 1]], v[tris[:, 2]], -1)).sum().abs() / 6 * 1000  # noqa: E731
     Wt = torch.tensor(W, dtype=torch.float32, device=dev)
     Wt = Wt - Wt[:, 9:11].mean(1, keepdim=True)
@@ -217,10 +217,13 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
         k3, v3 = project(out)
         rest = out['rest_vertices'][0].cpu().numpy()
         heads = out['rest_bone_heads'][0].cpu().numpy()
-        neck = heads[model.bone_labels.index('neck01')].tolist(), heads[model.bone_labels.index('head')].tolist()
+        bone = lambda b: heads[model.bone_labels.index(b)].tolist()  # noqa: E731
+        neck = bone('neck01'), bone('head')
+        limbs = {f'{k}_{s.lower()}': (bone(f'{a}.{s}'), bone(f'{b}.{s}')) for s in 'LR' for k, a, b in
+                 (('arm', 'upperarm01', 'lowerarm01'), ('thigh', 'upperleg01', 'lowerleg01'), ('calf', 'lowerleg01', 'foot'))}
         res = {'phenotypes': {k: round(torch.sigmoid(v).item(), 4) for k, v in phen.items()} | {'age': round(age_p, 4)},
                'local': {k: round(v, 4) for k, v in zip(labels, (torch.tanh((local + local[mirror]) / 2) * local_on).tolist()) if abs(v) > 1e-3},
-               'fit': {k: round(v, 2) for k, v in parts.items()}, 'neck_axis': neck}
+               'fit': {k: round(v, 2) for k, v in parts.items()}, 'neck_axis': neck, 'limb_axes': limbs}
         if plot:
             draw(plot, frames, C.cpu().numpy(), out['vertices'], model, verts, project, out)
         fixed = shape(1)  # computed without gradients: the stance only moves bones
@@ -299,23 +302,25 @@ def assets():
     mid = np.intersect1d(mid, np.unique(F))
     # the navel: the front-midline vertex furthest behind its neighbours 1-3 cm above and below
     navel = min(mid, key=lambda k: T[k, 2] - np.mean([T[q, 2] for q in mid if 1 < abs(T[q, 1] - T[k, 1]) < 3] or [T[k, 2]]))
-    return F[~arm[F].any(1)], int(navel), F
+    return F[~arm[F].any(1)], int(navel), F, arr('weights').reshape(-1, 6) / 255
 
 
-def tape(rest, neck=None):
+def tape(rest, neck=None, limbs=None):
     """Tape-style circumferences (cm) of the rest-pose body: the convex hull of horizontal slices of the body
     without its arms, like a tape bridging hollows. Neck: narrowest below the jaw; chest: widest; waist: at the
     navel; hips: widest round the seat. neck: (base, top) of the neck's bones; the neck is taped across its own
-    axis (it leans forward, so a level slice catches the chin)."""
+    axis (it leans forward, so a level slice catches the chin). limbs: {'arm_l': (shoulder, elbow), ...} bone ends:
+    arms at their midpoint, thighs 40 % down, calves at their widest, each across the bone and on that limb alone."""
     import cv2
-    F, navel, _ = assets()
+    F, navel, Fall, reg = assets()
     V = rest * 100
     z0, H = V[np.unique(F), 2].min(), np.ptp(V[np.unique(F), 2])
     a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
 
-    def ring(z, at=None, n=np.array([0, 0, 1.])):
+    def ring(z, at=None, n=np.array([0, 0, 1.]), tri=None):
         """Tape length round the slice through point `at` (or height z) across direction n."""
         at = np.array([0, 0, z]) if at is None else at
+        a, b, c = (V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]) if tri is None else (V[tri[:, 0]], V[tri[:, 1]], V[tri[:, 2]])
         da, db, dc = (a - at) @ n, (b - at) @ n, (c - at) @ n
         pts = []
         for p, q, dp, dq in ((a, b, da, db), (b, c, db, dc), (c, a, dc, da)):
@@ -334,7 +339,15 @@ def tape(rest, neck=None):
         neck_c = min(ring(0, b0 + (b1 - b0) * t, ax) for t in np.linspace(.2, .8, 13))
     else:
         neck_c = min(at(.83, .88))
-    return {'neck': round(neck_c, 1), 'chest': round(max(at(.68, .76)), 1), 'waist': round(ring(V[navel, 2]), 1),
+    out = {}
+    for k, (p0, p1) in (limbs or {}).items():
+        p0, p1 = np.asarray(p0) * 100, np.asarray(p1) * 100
+        r = ['arm_l', 'arm_r', 'leg_l', 'leg_r'].index(k.replace('thigh', 'leg').replace('calf', 'leg')) + 2
+        tri = Fall[(reg[Fall, r] > .5).all(1)]
+        ax = (p1 - p0) / np.linalg.norm(p1 - p0)
+        ts = [.5] if k.startswith('arm') else [.4] if k.startswith('thigh') else np.linspace(.2, .45, 6)
+        out[k] = round(max(ring(0, p0 + (p1 - p0) * t, ax, tri) for t in ts), 1)
+    return out | {'neck': round(neck_c, 1), 'chest': round(max(at(.68, .76)), 1), 'waist': round(ring(V[navel, 2]), 1),
             'hips': round(max(at(.46, .56)), 1), 'navel_h': round(float((V[navel, 2] - z0) / H), 3), 'height': round(float(H), 1)}
 
 
@@ -343,7 +356,7 @@ def store(db, day, res, rest, G, model_skin=None):
     feet at 0, int16 mm) followed by the stance's bone transforms in that frame (float32, 3×4 per bone). The skin
     weights the transforms apply with (8 bones per vertex, uint8 index + weight) go once into skin.bin."""
     import sqlite3 as sq
-    F, _, _ = assets()
+    F = assets()[0]
     zmin = rest[np.unique(F), 2].min()
     mesh = np.round(np.stack([rest[:, 0], rest[:, 2] - zmin, -rest[:, 1]], 1) * 1000).astype('<i2')
     C = np.array([[100., 0, 0, 0], [0, 0, 100, -100 * zmin], [0, -100, 0, 0], [0, 0, 0, 1]])  # Anny m -> template cm
@@ -387,7 +400,7 @@ if __name__ == '__main__':
     if len(frames) < MIN_FRAMES:
         raise SystemExit(f'need {MIN_FRAMES} frames')
     res, rest, G = fit(frames, prof, plot=a.plot)
-    res |= {'tape': tape(rest, res['neck_axis']), 'frames': len(frames)}
+    res |= {'tape': tape(rest, res['neck_axis'], res['limb_axes']), 'frames': len(frames)}
     if a.save:
         np.save(a.save, rest)
     if a.store:

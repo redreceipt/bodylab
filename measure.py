@@ -362,8 +362,8 @@ def derive(raw, profile, weight=None):
     if 'shoulders_w' in dims:
         m['shoulders'] = dims['shoulders_w'] * cal.get('shoulders', 1)
     for p in LIMBS:
-        if p + '_w' in dims:
-            m[p] = math.pi * dims[p + '_w'] * cal.get(p, 1)
+        if p in tape or p + '_w' in dims:
+            m[p] = (tape.get(p) or math.pi * dims[p + '_w']) * cal.get(p, 1)
     if 'waist' in m:
         m['whtr'] = m['waist'] / H
         if 'hips' in m:

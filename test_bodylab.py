@@ -202,6 +202,9 @@ assert np.allclose(FIT.kabsch(pts, pts @ rz.T), rz)
 meta = json.loads((FIT.ROOT / 'static/assets/body.json').read_text())
 t, off, n = meta['arrays']['male']
 tm = np.frombuffer((FIT.ROOT / 'static/assets/body.bin').read_bytes(), np.float32, n, off).reshape(-1, 3)
-tp = FIT.tape(np.stack([tm[:, 0], -tm[:, 2], tm[:, 1]], 1) / 100)  # template in Anny's frame: tape like a person
+J = {k: np.array([v[0], -v[2], v[1]]) / 100 for k, v in meta['joints']['male'].items()}  # Anny frame, metres
+limbs = {f'{k}_{s}': (J[f'{a}_{s}'], J[f'{b}_{s}']) for s in 'lr' for k, a, b in (('arm', 'shoulder', 'elbow'), ('thigh', 'hip', 'knee'), ('calf', 'knee', 'ankle'))}
+tp = FIT.tape(np.stack([tm[:, 0], -tm[:, 2], tm[:, 1]], 1) / 100, limbs=limbs)  # template in Anny's frame: tape like a person
+assert 22 < tp['arm_l'] < 34 and 42 < tp['thigh_l'] < 60 and 30 < tp['calf_l'] < 42 and abs(tp['arm_l'] - tp['arm_r']) < 1, tp
 assert 34 < tp['neck'] < 42 and 85 < tp['chest'] < 100 and 70 < tp['waist'] < 85 and 85 < tp['hips'] < 100 and .58 < tp['navel_h'] < .65, tp
 print('fit helpers ok', tp)

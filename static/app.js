@@ -8,7 +8,6 @@ import { renderSVG } from './vendor/uqr.mjs';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 let S = null;      // /api/state
-let live = null;   // {m, dims} while someone stands in front of the camera
 let idx = -1;      // selected scan
 let view = null;   // open panel: {tab} or {part}
 let hovered = null, selectedPart = null, lastRev = null, lastDimsKey = '';
@@ -64,7 +63,7 @@ function fmt(k, v, signed = false) {
 }
 const day = (ts) => new Date(ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 const isoDay = (iso) => new Date(iso + 'T12:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-const cur = () => live?.m ?? S.scans[idx]?.m ?? {};
+const cur = () => S.scans[idx]?.m ?? {};
 const base = () => S.scans[0]?.m ?? {};
 const series = (k) => (LOGGED.has(k) ? S.logs.filter((l) => l[k] != null).map((l) => [l.ts, l[k]])
   : S.scans.filter((s) => s.m[k] != null).map((s) => [s.ts, s.m[k]]));
@@ -307,16 +306,16 @@ function paint() {
 }
 
 function rebuildAvatar(force = false) {
-  const sex = S.profile?.sex, today = live?.dims ?? S.scans[idx]?.dims ?? {}, dims = predicted?.dims ?? today;
-  const m = predicted?.m ?? live?.m ?? S.scans[idx]?.m ?? {};
-  const mesh = fitted(predicted || live ? S.scans.at(-1) : S.scans[idx]); // predictions reshape today's fit
+  const sex = S.profile?.sex, today = S.scans[idx]?.dims ?? {}, dims = predicted?.dims ?? today;
+  const m = predicted?.m ?? S.scans[idx]?.m ?? {};
+  const mesh = fitted(predicted ? S.scans.at(-1) : S.scans[idx]); // predictions reshape today's fit
   const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(m), !!predicted, !!mesh]);
   if (!force && key === lastDimsKey) return paint();
   lastDimsKey = key;
   for (const g of [avatar, ghost]) if (g) { scene.remove(g); g.traverse((o) => o.geometry?.dispose()); }
   avatar = buildAvatar(dims, sex, false, m, mesh, predicted ? today : dims);
   scene.add(avatar);
-  const showGhost = predicted || ($('#ghost').checked && S.scans.length > 1 && (live || idx > 0));
+  const showGhost = predicted || ($('#ghost').checked && S.scans.length > 1 && idx > 0);
   ghost = showGhost ? (predicted ? buildAvatar(today, sex, true, {}, mesh, today) // predicted: outline = today
     : buildAvatar(S.scans[0].dims, sex, true, {}, fitted(S.scans[0]), S.scans[0].dims)) : null;
   if (ghost) scene.add(ghost);
@@ -419,7 +418,7 @@ function renderTimeline() {
   $('#scrub').max = Math.max(0, n - 1);
   $('#scrub').value = idx;
   $('#scrub').hidden = $('#ghostLabel').hidden = n < 2 || !!predicted;
-  $('#scanLabel').textContent = predicted ? `predicted · in ${plan.weeks} weeks` : live ? 'today, live' : n ? day(S.scans[idx].ts) : 'no estimate yet';
+  $('#scanLabel').textContent = predicted ? `predicted · in ${plan.weeks} weeks` : n ? day(S.scans[idx].ts) : 'no estimate yet';
 }
 $('#scrub').addEventListener('input', (e) => { idx = +e.target.value; renderAll(); });
 $('#ghost').addEventListener('change', () => rebuildAvatar(true));
@@ -523,11 +522,13 @@ function progressPanel() {
 // What if: a plan's effect on your body, simulated from your own data.
 const plan = { kcal: -300, strength: 3, protein: 1.6, weeks: 12 };
 let predicted = null, predictTimer = null;
+const planText = (name, v) => ({ kcal: `${v} kcal/day`, strength: `${v}/week`, weeks: `${v} weeks`,
+  protein: imperial() ? `${(v / 2.2046).toFixed(2)} g/lb` : `${v} g/kg` })[name];
 function whatifPanel() {
-  const r = (name, label, min, max, step, unit) => `<label>${label} <b>${plan[name]}${unit}</b><input type="range" name="${name}" min="${min}" max="${max}" step="${step}" value="${plan[name]}"></label>`;
+  const r = (name, label, min, max, step) => `<label>${label} <b>${planText(name, plan[name])}</b><input type="range" name="${name}" min="${min}" max="${max}" step="${step}" value="${plan[name]}"></label>`;
   return `<h2>What if…</h2><p class="muted">The avatar shows you after this plan; the outline is you today.</p>
-    <form id="fPlan" class="stack">${r('kcal', 'Calories vs maintenance', -1000, 800, 50, ' kcal/day')}${r('strength', 'Strength workouts', 0, 6, 1, '/week')}
-      ${r('protein', 'Protein', 0.8, 2.4, 0.1, ' g/kg')}${r('weeks', 'For', 1, 52, 1, ' weeks')}</form><div id="planOut" class="callout"><p class="muted">Simulating…</p></div>`;
+    <form id="fPlan" class="stack">${r('kcal', 'Calories vs maintenance', -1000, 800, 50)}${r('strength', 'Strength workouts', 0, 6, 1)}
+      ${r('protein', 'Protein', 0.8, 2.4, 0.1)}${r('weeks', 'For', 1, 52, 1)}</form><div id="planOut" class="callout"><p class="muted">Simulating…</p></div>`;
 }
 async function runPlan() {
   try {
@@ -603,7 +604,7 @@ addEventListener('keydown', (e) => e.key === 'Escape' && open(null));
 $('#panel').addEventListener('input', (e) => {
   if (e.target.form?.id !== 'fPlan') return;
   plan[e.target.name] = +e.target.value;
-  e.target.previousElementSibling.textContent = e.target.previousElementSibling.textContent.replace(/^-?[\d.]+/, e.target.value);
+  e.target.previousElementSibling.textContent = planText(e.target.name, e.target.value);
   clearTimeout(predictTimer);
   predictTimer = setTimeout(runPlan, 250);
 });
@@ -665,12 +666,10 @@ async function poll() {
     $('#barS').style.width = Math.min(1, (st.angle ?? 0) / 75) * 50 + '%'; // how far you've turned: sets depth
     $('#evidence').title = `${st.frames ?? 0} views today, turned up to ${st.angle ?? 0}°`;
     scanning = st.state === 'scanning';
-    const wasLive = !!live;
-    live = st.live ?? null;
     if (st.rev !== lastRev && lastRev !== null) {
-      if (live) idx = Infinity; // today's estimate changed: follow it
-      await refresh(!$('#panel').contains(document.activeElement)); // new evidence, iPhone sync, face photo; don't clobber typing
-    } else if (live || wasLive) renderAll(false);
+      if (idx >= S.scans.length - 1) idx = Infinity; // on the latest day: follow it as it updates
+      await refresh(!$('#panel').contains(document.activeElement)); // new evidence, a new body fit, iPhone sync, face photo; don't clobber typing
+    }
     lastRev = st.rev;
   } catch { /* server restarting */ }
   setTimeout(poll, 700);
