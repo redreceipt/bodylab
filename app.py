@@ -715,7 +715,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({**cap.status, 'rev': data_rev()})
         if path == '/api/live.mjpg':
             return self.stream()
-        if path.startswith('/api/fit/'):  # a day's fitted body mesh (int16 mm, web template frame)
+        if path == '/api/skin' and (DB_PATH.parent / 'skin.bin').exists():  # bone weights for posing fitted bodies (fit.py)
+            return self.send(200, (DB_PATH.parent / 'skin.bin').read_bytes(), 'application/octet-stream')
+        if path.startswith('/api/fit/'):  # a day's fitted body: rest mesh (int16 mm) + stance bone transforms (fit.py)
             r = db().execute('select mesh from fits where day = ?', (path.rsplit('/', 1)[1],)).fetchone()
             return self.send(200, r[0], 'application/octet-stream') if r else self.send(404, b'no fit', 'text/plain')
         if path == '/api/face.jpg' and face_files()[0].exists():

@@ -19,9 +19,7 @@ final class HealthSync: ObservableObject {
         [.init(key: "tape_neck", label: "Neck"), .init(key: female ? "tape_bust" : "tape_chest", label: female ? "Bust" : "Chest"),
          .init(key: "tape_waist", label: "Waist"), .init(key: "tape_hips", label: "Hips"), .init(key: "tape_arm", label: "Upper arm"),
          .init(key: "tape_thigh", label: "Thigh"), .init(key: "tape_calf", label: "Calf")]
-            + (female ? [.init(key: "tape_underbust", label: "Underbust")]
-                      : [.init(key: "penis_len_soft", label: "Penis length, resting"), .init(key: "penis_girth_soft", label: "Penis girth, resting"),
-                         .init(key: "penis_len_erect", label: "Penis length, erect"), .init(key: "penis_girth_erect", label: "Penis girth, erect")])
+            + (female ? [.init(key: "tape_underbust", label: "Underbust")] : [])
     }
 
     private let store = HKHealthStore()
@@ -196,7 +194,7 @@ final class HealthSync: ObservableObject {
         } catch { status = "Couldn't save the workout: \(error.localizedDescription)" }
     }
 
-    /// Waist goes to Apple Health; the rest (other body parts, genital and bust measurements) to BodyLab directly.
+    /// Waist goes to Apple Health; the other body parts to BodyLab directly.
     func logTape(_ values: [String: Double]) async {
         let cm = values.mapValues { metric ? $0 : $0 * 2.54 }
         do {

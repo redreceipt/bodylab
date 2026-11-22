@@ -167,10 +167,10 @@ wl = [{'kind': 'daily', 'ts': now - d * 86400, 'weight': 80 - (27 - d) * .05 + (
 assert abs(M.insights([], wl, {}, now)['summary']['changes']['weight'] + 1.35) < .1  # true -1.35; last-minus-first says +0.15
 # Today's checklist: a weigh-in and a short food log show as done / incomplete.
 d = [{'kind': 'daily', 'ts': now - k * 86400, 'kcal': 2200, 'steps': 8000} for k in range(1, 8)]
-d += [{'kind': 'daily', 'ts': now, 'kcal': 600, 'weight': 80}, {'kind': 'measure', 'ts': now, 'penis_len_soft': 9.5}]
+d += [{'kind': 'daily', 'ts': now, 'kcal': 600, 'weight': 80}, {'kind': 'measure', 'ts': now, 'tape_bust': 95}]
 day = M.insights([], d, {}, now)['days'][-1]
 assert day['weight'] and not day['food'] and not day['sleep'] and not day['scan'] and day['kcal'] == 600, day
-assert M.series('penis_len_soft', [], d) == [(now, 9.5)]
+assert M.series('tape_bust', [], d) == [(now, 95)]
 # Predictions: a 500 kcal/day deficit for 12 weeks loses ~5 kg, mostly fat; lifting + protein keeps more lean mass.
 start = {'weight': 90, 'bf': 25, 'waist': 95, 'hips': 102, 'chest': 104, 'neck': 40, 'arm_l': 35}
 rest = M.predict(start, 'male', 12, -500, 0, 1.0, 180)

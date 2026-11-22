@@ -126,15 +126,16 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
     rot = torch.zeros(B, len(POSED), 3, device=dev, requires_grad=True)
     cam = torch.zeros(B, 3, device=dev, requires_grad=True)  # log scale, x, y shift
 
-    def run(pose_only=False):
-        p = {k: torch.sigmoid(v).expand(B) for k, v in phen.items()}
-        p |= {'gender': torch.full((B,), 1. if female else 0., device=dev), 'age': torch.full((B,), age_p, device=dev),  # Anny: 0 = male
-              'cupsize': torch.full((B,), .5, device=dev), 'firmness': torch.full((B,), .5, device=dev)}
-        p = {k: v for k, v in p.items() if k in model.phenotype_labels}
+    def shape(n):
+        p = {k: torch.sigmoid(v).expand(n) for k, v in phen.items()}
+        p |= {'gender': torch.full((n,), 1. if female else 0., device=dev), 'age': torch.full((n,), age_p, device=dev)}  # Anny: 0 = male
+        lc = (torch.tanh((local + local[mirror]) / 2) * local_on).expand(n, -1)  # left = right
+        return {'phenotype_kwargs': p, 'local_changes_kwargs': lc}
+
+    def run():
         pose = torch.eye(4, device=dev).repeat(B, model.bone_count, 1, 1)
         pose[:, posed, :3, :3] = roma.rotvec_to_rotmat(rot)
-        lc = (torch.tanh((local + local[mirror]) / 2) * local_on).expand(B, -1)  # left = right
-        return model(pose_parameters=pose, phenotype_kwargs=p, local_changes_kwargs=lc)
+        return model(pose_parameters=pose, **shape(B))
 
     # Each frame's turn, from its 3D landmarks against the rest pose's shoulders, hips and head.
     with torch.no_grad():
@@ -222,7 +223,66 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
                'fit': {k: round(v, 2) for k, v in parts.items()}, 'neck_axis': neck}
         if plot:
             draw(plot, frames, C.cpu().numpy(), out['vertices'], model, verts, project, out)
-    return res, rest
+        fixed = shape(1)  # computed without gradients: the stance only moves bones
+    return res, rest, stance(model, fixed, kreg)
+
+
+def stance(model, shape, kreg):
+    """Bone transforms (posed × rest⁻¹, Anny frame) for a relaxed stance: arms hanging beside the body with each
+    hand clear of the hips, elbows slightly bent."""
+    import roma
+    import torch
+    dev = shape['local_changes_kwargs'].device
+    names = [f'{b}.{s}' for b in ('upperarm01', 'lowerarm01') for s in 'LR']
+    bones = torch.tensor([model.bone_labels.index(b) for b in names], device=dev)
+    rot = torch.zeros(len(names), 3, device=dev, requires_grad=True)
+    twist_b = torch.tensor([model.bone_labels.index(f'lowerarm02.{s}') for s in 'LR'], device=dev)
+    twist = torch.zeros(2, device=dev, requires_grad=True)  # forearm twist only (a free wrist bends sideways)
+    axes = torch.zeros(2, 3, device=dev)
+
+    def run(tw=None):
+        pose = torch.eye(4, device=dev).repeat(1, model.bone_count, 1, 1)
+        pose[0, bones, :3, :3] = roma.rotvec_to_rotmat(rot)
+        pose[0, twist_b, :3, :3] = roma.rotvec_to_rotmat(axes * (twist if tw is None else tw)[:, None])
+        return model(pose_parameters=pose, **shape)
+    with torch.no_grad():
+        out = run()
+        k, V = kreg(out)[0], out['vertices'][0]  # both in the posed output's frame
+        top = model.vertex_bone_indices[torch.arange(len(V)), model.vertex_bone_weights.argmax(1)]
+        limb = torch.tensor([any(t in b for t in ('arm', 'hand', 'finger', 'wrist', 'shoulder', 'metacarpal', 'clavicle'))
+                             for b in model.bone_labels], device=dev)[top]
+        for j, s in enumerate('LR'):  # the forearm's own axis: the local axis whose turn leaves the wrist in place
+            moved = []
+            for e in torch.eye(3, device=dev):
+                axes[j] = e
+                moved.append((kreg(run(torch.full((2,), .5, device=dev)))[0][7 + j] - k[7 + j]).norm())
+            axes[j] = torch.eye(3, device=dev)[int(torch.stack(moved).argmin())]
+        tip = lambda b: top == model.bone_labels.index(b)  # noqa: E731  vertices of a finger's last segment
+        tips = [(tip(f'finger1-3.{s}'), tip(f'finger5-3.{s}')) for s in 'LR']  # thumb, little finger
+        targets = []
+        for side, (s, e, w) in ((1, (3, 5, 7)), (-1, (4, 6, 8))):  # KP order: shoulders 3/4, elbows 5/6, wrists 7/8
+            S, Lu, Ll = k[s], (k[e] - k[s]).norm(), (k[w] - k[e]).norm()
+            zw = S[2] - .95 * (Lu + Ll)
+            band = V[~limb & ((V[:, 2] - zw).abs() < .03) & (V[:, 0] * side > 0)]
+            x = side * max(abs(S[0].item()) + .08 * (Lu + Ll).item(), band[:, 0].abs().max().item() + .045)
+            W = torch.stack([torch.tensor(x, device=dev), S[1] - .05, zw])  # front is -y: hands a little forward
+            E = S + (W - S) * Lu / (Lu + Ll) + torch.tensor([0, .025, 0], device=dev)  # elbow a little back: a slight bend
+            targets += [(e, E), (w, W)]
+    opt = torch.optim.Adam([rot, twist], lr=.03)
+    for _ in range(200):
+        opt.zero_grad()
+        o = run()
+        kp, out_v = kreg(o)[0], o['vertices'][0]
+        loss = sum(((kp[i] - t) ** 2).sum() for i, t in targets) + 1e-4 * (rot ** 2).sum()
+        for thumb, little in tips:  # palms toward the thighs: thumb 5 cm in front of the little finger, level with it
+            d = out_v[thumb].mean(0) - out_v[little].mean(0)
+            loss = loss + .3 * ((d[1] + .05) ** 2 + d[2] ** 2)
+        loss.backward()
+        opt.step()
+    with torch.no_grad():
+        out = run()
+        G = out['bone_poses'][0] @ torch.linalg.inv(out['rest_bone_poses'][0])
+        return (torch.linalg.inv(G[model.bone_labels.index('root')]) @ G).cpu().numpy()  # posed output sits elsewhere: keep the root put
 
 
 def assets():
@@ -278,15 +338,25 @@ def tape(rest, neck=None):
             'hips': round(max(at(.46, .56)), 1), 'navel_h': round(float((V[navel, 2] - z0) / H), 3), 'height': round(float(H), 1)}
 
 
-def store(db, day, res, rest):
-    """Save the fit: its parameters and measurements, and the mesh in the web template's frame (y up, front +z,
-    feet at 0) as int16 millimetres."""
+def store(db, day, res, rest, G, model_skin=None):
+    """Save the fit: its parameters and measurements; the rest-pose mesh in the web template's frame (y up, front +z,
+    feet at 0, int16 mm) followed by the stance's bone transforms in that frame (float32, 3×4 per bone). The skin
+    weights the transforms apply with (8 bones per vertex, uint8 index + weight) go once into skin.bin."""
     import sqlite3 as sq
     F, _, _ = assets()
     zmin = rest[np.unique(F), 2].min()
     mesh = np.round(np.stack([rest[:, 0], rest[:, 2] - zmin, -rest[:, 1]], 1) * 1000).astype('<i2')
+    C = np.array([[100., 0, 0, 0], [0, 0, 100, -100 * zmin], [0, -100, 0, 0], [0, 0, 0, 1]])  # Anny m -> template cm
+    Gt = (C @ G @ np.linalg.inv(C))[:, :3].astype('<f4')
     with sq.connect(db, timeout=30) as c:
-        c.execute('insert or replace into fits(day, ts, params, mesh) values (?, ?, ?, ?)', (day, time.time(), json.dumps(res), mesh.tobytes()))
+        c.execute('insert or replace into fits(day, ts, params, mesh) values (?, ?, ?, ?)',
+                  (day, time.time(), json.dumps(res), mesh.tobytes() + Gt.tobytes()))
+    skin = Path(db).parent / 'skin.bin'
+    if model_skin is not None and not skin.exists():
+        idx, w = model_skin
+        top = np.argsort(-w, 1)[:, :8]
+        wq = np.round(np.take_along_axis(w, top, 1) * 255).astype(np.uint8)
+        skin.write_bytes(np.take_along_axis(idx, top, 1).astype(np.uint8).tobytes() + wq.tobytes())
 
 
 def draw(path, frames, C, vertices, model, verts, project, out):
@@ -316,10 +386,12 @@ if __name__ == '__main__':
     print(day, len(frames), 'frames')
     if len(frames) < MIN_FRAMES:
         raise SystemExit(f'need {MIN_FRAMES} frames')
-    res, rest = fit(frames, prof, plot=a.plot)
+    res, rest, G = fit(frames, prof, plot=a.plot)
     res |= {'tape': tape(rest, res['neck_axis']), 'frames': len(frames)}
     if a.save:
         np.save(a.save, rest)
     if a.store:
-        store(a.db, day, res, rest)
+        import anny
+        m = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default')
+        store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()))
     print(json.dumps(res, indent=1))

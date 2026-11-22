@@ -20,9 +20,8 @@ PLAUSIBLE = {'neck_w': (.04, .1), 'shoulders_w': (.17, .36), 'chest_w': (.12, .3
              'arm_l_w': (.035, .1), 'arm_r_w': (.035, .1), 'thigh_l_w': (.06, .16), 'thigh_r_w': (.06, .16),
              'calf_l_w': (.045, .11), 'calf_r_w': (.045, .11), 'lv_shoulder': (.75, .87), 'lv_hip': (.43, .58), 'lv_knee': (.22, .33)}
 SEEN = {'neck': (.035, .11), 'chest': (.08, .31), 'underbust': (.07, .3), 'waist': (.07, .33), 'hips': (.08, .33)}  # any angle
-# Tape measurements you enter (cm): male health (resting and erect, bone-pressed length; mid-shaft girth) and bust.
-MEASURE = {'penis_len_soft': (2, 30), 'penis_girth_soft': (3, 25), 'penis_len_erect': (3, 35), 'penis_girth_erect': (4, 30),
-           'tape_bust': (50, 200), 'tape_underbust': (50, 180), 'tape_neck': (20, 70), 'tape_chest': (50, 200),
+# Optional tape measurements (cm): each calibrates the camera's estimate of that part.
+MEASURE = {'tape_bust': (50, 200), 'tape_underbust': (50, 180), 'tape_neck': (20, 70), 'tape_chest': (50, 200),
            'tape_hips': (50, 220), 'tape_arm': (15, 70), 'tape_thigh': (25, 110), 'tape_calf': (20, 70)}
 # Which tape measurement calibrates which camera estimate (waist comes from Apple Health as tape_waist).
 TAPE = {'neck': 'tape_neck', 'chest': 'tape_chest', 'underbust': 'tape_underbust', 'waist': 'tape_waist', 'hips': 'tape_hips',

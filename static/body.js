@@ -195,6 +195,25 @@ export function fitBody(dims, H, sex, shape = {}, fitted = null, ref = {}) {
   return { pos: out, parts: t.parts };
 }
 
+// Linear blend skinning: G = 3×4 bone transforms (posed × rest⁻¹), skin = 8 (bone, weight) bytes per vertex.
+export function pose(pos, G, skin) {
+  const out = Float32Array.from(pos), n = pos.length / 3, w = skin.subarray(n * 8);
+  for (let i = 0; i < n; i++) {
+    const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
+    let X = 0, Y = 0, Z = 0, sum = 0;
+    for (let k = i * 8; k < i * 8 + 8; k++) {
+      if (!w[k]) continue;
+      const g = skin[k] * 12;
+      X += w[k] * (G[g] * x + G[g + 1] * y + G[g + 2] * z + G[g + 3]);
+      Y += w[k] * (G[g + 4] * x + G[g + 5] * y + G[g + 6] * z + G[g + 7]);
+      Z += w[k] * (G[g + 8] * x + G[g + 9] * y + G[g + 10] * z + G[g + 11]);
+      sum += w[k];
+    }
+    if (sum) { out[i * 3] = X / sum; out[i * 3 + 1] = Y / sum; out[i * 3 + 2] = Z / sum; }
+  }
+  return out;
+}
+
 // MakeHuman proxy (hair, brows, lashes, eyes): each vertex = weighted 3 base vertices + offset scaled by body size.
 export function fitProxy(name, pos) {
   const refs = T.arr(`${name}.refs`), w = T.arr(`${name}.w`), d = T.arr(`${name}.d`);
