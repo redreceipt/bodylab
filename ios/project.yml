@@ -1,5 +1,5 @@
-# Generate the Xcode project with `xcodegen` (brew install xcodegen), then open BodyLabSync.xcodeproj,
-# pick your Team under Signing & Capabilities, and change the bundle ID if it's taken.
+# Generate the Xcode project with `BODYLAB_TEAM=<your team id> xcodegen` (brew install xcodegen), open
+# BodyLabSync.xcodeproj and run it on your iPhone. Change the bundle ID if it's taken.
 name: BodyLabSync
 options:
   deploymentTarget:
@@ -28,6 +28,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.redreceipt.bodylab.sync
+        DEVELOPMENT_TEAM: ${BODYLAB_TEAM}  # BODYLAB_TEAM=<your team id> xcodegen
         CODE_SIGN_STYLE: Automatic
         SWIFT_VERSION: "5.0"
         MARKETING_VERSION: "1.0"
