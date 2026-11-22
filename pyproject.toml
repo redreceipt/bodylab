@@ -10,3 +10,6 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+fit = ["anny>=0.6.2"]  # body-shape fitting (PyTorch); optional: uv run --group fit

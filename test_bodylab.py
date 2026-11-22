@@ -70,6 +70,9 @@ assert abs(est['neck_w'] / obs['neck'] - 1) < .02 and abs(est['neck_d'] / est['n
 m, dims = M.derive(est, {'height_cm': 175, 'sex': 'male'})
 assert M.implausible(est) is None and 'bf' in m
 assert M.implausible({**est, 'neck_w': .13, 'hips_w': .12}) == ['neck_w', 'hips_w']  # e.g. the 70 cm 'neck' misread
+# A body-shape fit's tape measurements win over ellipses, and give body fat before the camera has a waist.
+m2, _ = M.derive({'neck_w': .07, 'hips_w': .2, 'tape': {'neck': 39.6, 'waist': 88.5, 'hips': 105.8}}, {'height_cm': 182.9, 'sex': 'male'})
+assert m2['waist'] == 88.5 and abs(m2['bf'] - M.navy_bf('male', 182.9, 39.6, 88.5, 105.8)) < .01, m2
 
 # Clothing check: a skin-coloured torso line passes, a blue-shirt line doesn't.
 ycc = np.zeros((100, 100, 3), np.uint8)
@@ -185,3 +188,20 @@ sil = app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0)
 big = app.silhouette(cv2.resize(img, None, fx=2, fy=2) / 255.0, pts * 2, world, pts[23:25].mean(0) * 2, 1400.0)
 assert len(sil['c']) == 160 and abs(np.array(sil['c']).min(0) - np.array(big['c']).min(0)).max() < .01
 print('sync ok')
+
+# Body-shape fit helpers (fit.py; the fit itself needs the optional PyTorch group).
+import json  # noqa: E402
+import fit as FIT  # noqa: E402
+a = np.linspace(-math.pi, 0, 30)
+cut = np.r_[np.c_[.2 * np.cos(a), .4 * np.sin(a)], np.c_[np.linspace(.2, .15, 6), np.linspace(0, .3, 6)],  # round top, slanted sides
+            np.c_[np.linspace(.15, -.15, 9), np.full(9, .3)], np.c_[np.linspace(-.15, -.2, 6), np.linspace(.3, 0, 6)]]
+assert FIT.borders(cut) == [-np.inf, np.inf, -np.inf, .3]  # only the flat bottom is the image's edge
+rz = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1.]])
+pts = np.random.default_rng(2).normal(size=(6, 3))
+assert np.allclose(FIT.kabsch(pts, pts @ rz.T), rz)
+meta = json.loads((FIT.ROOT / 'static/assets/body.json').read_text())
+t, off, n = meta['arrays']['male']
+tm = np.frombuffer((FIT.ROOT / 'static/assets/body.bin').read_bytes(), np.float32, n, off).reshape(-1, 3)
+tp = FIT.tape(np.stack([tm[:, 0], -tm[:, 2], tm[:, 1]], 1) / 100)  # template in Anny's frame: tape like a person
+assert 34 < tp['neck'] < 42 and 85 < tp['chest'] < 100 and 70 < tp['waist'] < 85 and 85 < tp['hips'] < 100 and .58 < tp['navel_h'] < .65, tp
+print('fit helpers ok', tp)

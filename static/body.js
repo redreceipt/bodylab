@@ -110,10 +110,19 @@ function morphWeights(sex, shape, s) {
 }
 
 // dims: scan sizes in cm (from /api/state); shape: see morphWeights. Returns fitted positions of every
-// base-mesh vertex for height H.
-export function fitBody(dims, H, sex, shape = {}) {
+// base-mesh vertex for height H. fitted: the day's body-shape fit (same vertices, cm), used as is.
+export function fitBody(dims, H, sex, shape = {}, fitted = null) {
   const t = T[sex === 'female' ? 'female' : 'male'], d = dims || {}, s = H / t.H, n = T.n;
   const ratio = (scan, tmpl) => (scan ? clamp(scan / (tmpl * s), 0.6, 1.8) : 1);
+  if (fitted) {  // the fit already shaped the bust; genital size still comes from tape
+    const pos = Float32Array.from(fitted);
+    for (const [name, wt] of Object.entries(morphWeights(sex, shape, s))) {
+      if (/^(cup|firm)/.test(name)) continue;
+      const idx = T.arr(`morph.${name}.idx`), dd = T.arr(`morph.${name}.d`);
+      for (let j = 0; j < idx.length; j++) for (let k = 0; k < 3; k++) pos[idx[j] * 3 + k] += wt * s * dd[j * 3 + k];
+    }
+    return { pos, parts: t.parts };
+  }
   let pos = t.pos;
   const morphs = Object.entries(morphWeights(sex, shape, s));
   if (morphs.length) {

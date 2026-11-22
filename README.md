@@ -2,7 +2,7 @@
 
 Track body composition by walking past a camera. BodyLab watches a network camera, measures your silhouette, estimates circumferences and body fat, and fits a realistic 3D body to you (your face, skin, eyes and hair from one photo). Apple Health supplies the inputs (food, activity, heart, sleep, workouts); **Progress** shows how they move your body, a **Today** checklist shows what's missing, and **What if…** shows you after a plan, predicted from your own data. See [ROADMAP.md](ROADMAP.md) for where it's going.
 
-Everything runs on your machine; other devices reach it only over your Tailscale tailnet, and only when signed in as you. Camera video stays in memory; only measurements, a scale-free outline per useful frame (kept 45 days, at most 400 a day) and your face photo are stored, so disk use stays under ~100 MB.
+Everything runs on your machine; other devices reach it only over your Tailscale tailnet, and only when signed in as you. Camera video stays in memory; only measurements, a scale-free outline per useful frame (kept 45 days, at most 400 a day), one fitted body mesh per day (115 KB) and your face photo are stored.
 
 ## Quick start
 
@@ -10,6 +10,7 @@ Requires [uv](https://docs.astral.sh/uv/) and a camera that serves MJPEG or RTSP
 
 ```sh
 uv run app.py              # http://localhost:8765 (downloads MediaPipe models on first use)
+uv sync --group fit        # optional: fit your real body shape (PyTorch + Anny, ~2.5 GB with Anny's cache)
 tools/autostart.sh         # optional: start at login and keep running (macOS)
 uv run python test_bodylab.py && node test_body.mjs
 ```
@@ -58,7 +59,8 @@ Mounted sideways? Set **Camera rotation** in Settings.
 ## How it works
 
 - **Measuring:** [MediaPipe Pose](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) finds 33 landmarks (2D and 3D) and a person mask per frame. Each frame yields whatever it can: widths across the mask at anatomical levels, scaled by your height (or, when your feet are out of frame, by your learned torso length), plus how far you're turned from the camera. Slices an arm or clothing would distort are skipped individually.
-- **Fusing:** a torso slice is roughly an ellipse, whose silhouette width at yaw θ is 2√(a²cos²θ + b²sin²θ). Fitting that (robustly) to all of a day's widths gives both width and depth; limbs use medians. Circumferences come from the ellipses; body fat from the US Navy formula. Tape measurements logged on the iPhone calibrate the camera automatically (median of tape ÷ camera within 3 days; past days are corrected too).
+- **Fusing:** a torso slice is roughly an ellipse, whose silhouette width at yaw θ is 2√(a²cos²θ + b²sin²θ). Fitting that (robustly) to all of a day's widths gives both width and depth; limbs use medians. Circumferences come from the ellipses (scaled for torsos being boxier than ellipses; the neck from front views, since a turned neck's outline includes the jaw; men's waist at the navel); body fat from the US Navy formula. Tape measurements logged on the iPhone calibrate the camera automatically (median of tape ÷ camera within 3 days; past days are corrected too).
+- **Body shape:** with the `fit` group installed, [Anny](https://github.com/naver/anny) (Apache-2.0, MakeHuman's mesh) is fitted to all of a day's outlines at once (`fit.py`, about a minute on an M4's GPU): each frame gets its own pose and turn from MediaPipe's landmarks, one shape is shared, and parts cut off by the image's edge are ignored. It refits as frames arrive. Circumferences are then tape-measured on the fitted mesh and replace the ellipse estimates, and the 3D body is that mesh. Outlines leave overall volume loose (about ±10 %), so a weigh-in from the last few days pins it.
 - **3D body:** [MakeHuman](http://www.makehumancommunity.org)'s CC0 base mesh, fitted in the browser (`static/body.js`): torso width/depth per level, limbs radially around their bones, heights to your landmarks, blended by the rig's skin weights. Hair, brows, lashes and eyes are MakeHuman proxies anchored to the mesh, so they follow the fit.
 - **Your face:** the template head is rendered once and run through MediaPipe's face landmarker, giving each of 478 landmarks a spot on the skin texture. Your photo's landmarks then warp it, triangle by triangle, onto that texture (`static/look.js`), keeping the photo's fine detail but taking broad colour and shading from the skin, so studio lighting doesn't make it look pasted on. Skin tone and eye colour are read from the same photo; your hair is segmented to pick its colour and the closest haircut. An underwear toggle shows the bare body.
 - **Only you, only real scans:** a frame counts only when one person is in view and your face has matched your photo twice ([OpenCV](https://github.com/opencv/opencv_zoo) YuNet + SFace), within a minute of the frame. Your face is re-checked every 2 s; a face that clearly isn't yours, a second person, or a room too dark to tell discards everything not yet confirmed. Saved frames must also have human proportions and, by default, bare skin on the torso (checked against your face's skin tone in the same frame), since clothes inflate every measurement. The live preview is a silhouette unless you switch it to the camera image.
@@ -71,4 +73,4 @@ Expect roughly ±3–4 body-fat points without calibration. Clothing, posture an
 
 ## License
 
-MIT. Bundles [three.js](https://threejs.org) (MIT), [uqr](https://github.com/unjs/uqr) (MIT), assets derived from [MakeHuman](http://www.makehumancommunity.org) (CC0: mesh, skins, hair, eyes) and MediaPipe's canonical face-mesh triangulation (Apache-2.0); downloads MediaPipe pose, face and hair models (Apache-2.0) and OpenCV Zoo face detection/recognition models (MIT, Apache-2.0).
+MIT. Bundles [three.js](https://threejs.org) (MIT), [uqr](https://github.com/unjs/uqr) (MIT), assets derived from [MakeHuman](http://www.makehumancommunity.org) (CC0: mesh, skins, hair, eyes) and MediaPipe's canonical face-mesh triangulation (Apache-2.0); optionally installs Anny (Apache-2.0, CC0 data) and PyTorch (BSD); downloads MediaPipe pose, face and hair models (Apache-2.0) and OpenCV Zoo face detection/recognition models (MIT, Apache-2.0).

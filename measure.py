@@ -221,7 +221,7 @@ def estimate(frames):
         vals = [f['obs'][k] for f in frames if k in f['obs']]
         if len(vals) >= 5:
             raw[k] = float(np.median(vals))
-    return raw if {'neck_w', 'waist_w', 'hips_w'} <= raw.keys() else None
+    return raw if {'neck_w', 'hips_w'} <= raw.keys() else None  # no waist yet: no body fat, the rest still counts
 
 
 def skin_share(ycc, skin, a, b, tol=14):
@@ -352,12 +352,14 @@ def derive(raw, profile, weight=None):
     """Raw height fractions -> (metrics, dims). metrics: circumferences/breadth in cm, bf %, ratios, kg.
     dims: sizes in cm for drawing the avatar."""
     H, cal = profile['height_cm'], profile.get('calib', {})
-    dims = {k: v * H for k, v in raw.items() if v is not None and not k.startswith('n_')}
+    dims = {k: v * H for k, v in raw.items() if isinstance(v, (int, float)) and not k.startswith('n_')}
     m = {}
+    tape = raw.get('tape', {})  # tape-measured on the fitted body (fit.py): preferred over ellipses
     for p, ratio in TORSO.items():
         if p + '_w' in dims:
             dims.setdefault(p + '_d', dims[p + '_w'] * ratio)
-            m[p] = ellipse(dims[p + '_w'], dims[p + '_d']) * SHAPE[p] * cal.get(p, 1)
+        if p in tape or p + '_w' in dims:
+            m[p] = (tape.get(p) or ellipse(dims[p + '_w'], dims[p + '_d']) * SHAPE[p]) * cal.get(p, 1)
     if 'shoulders_w' in dims:
         m['shoulders'] = dims['shoulders_w'] * cal.get('shoulders', 1)
     for p in LIMBS:

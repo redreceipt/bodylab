@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 import statistics
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -73,7 +74,8 @@ def init_db():
             create index if not exists frames_ts on frames(ts);
             create table if not exists logs(id integer primary key, ts real, kind text, data text, ext_id text unique);
             create table if not exists goals(metric text primary key, target real, start real, ts real);
-            create table if not exists settings(k text primary key, v text);''')
+            create table if not exists settings(k text primary key, v text);
+            create table if not exists fits(day text primary key, ts real, params text, mesh blob);''')
         if 'day' not in [r[1] for r in c.execute('pragma table_info(scans)')]:  # one fused estimate per day
             c.execute('alter table scans add column day text')
         c.execute('create unique index if not exists scans_day on scans(day)')
@@ -213,8 +215,9 @@ def app_state():
     scans, hidden, calib = [], 0, {}
     if prof and prof.get('height_cm'):
         w, rows = weights(logs), []
+        fits = {r['day']: json.loads(r['params'])['tape'] for r in c.execute('select day, params from fits')}
         for r in c.execute('select * from scans order by ts'):
-            raw = json.loads(r['raw'])
+            raw = json.loads(r['raw']) | ({'tape': fits[r['day']]} if r['day'] in fits else {})
             if measure.implausible(raw):  # misread poses saved before the plausibility check; kept, not shown
                 hidden += 1
             else:
@@ -224,7 +227,8 @@ def app_state():
                                     prof.get('sex') == 'female')
         for r, raw in rows:
             m, dims = measure.derive(raw, {**prof, 'calib': calib}, measure.nearest(w, r['ts']))
-            scans.append({'id': r['id'], 'ts': r['ts'], 'side': raw.get('n_angle', 0) >= 30, 'frames': raw.get('n_frames'), 'm': m, 'dims': dims})
+            scans.append({'id': r['id'], 'ts': r['ts'], 'day': r['day'], 'fit': 'tape' in raw, 'side': raw.get('n_angle', 0) >= 30,
+                          'frames': raw.get('n_frames'), 'm': m, 'dims': dims})
     face = face_files()[1]
     face = json.loads(face.read_text()) if face.exists() else None
     if face:
@@ -328,19 +332,21 @@ class Capture:
         last, ts_ms = None, 0
         while True:
             f = self.frame
-            if time.time() - self.frame_ts > 5:
-                self.status = {'state': 'offline', 'msg': f'Camera offline ({self.url}) — retrying…' if self.url
-                               else 'Set your camera URL in Settings → Camera'}
-            if f is None or f is last:
-                time.sleep(.01)
-                continue
-            last = f
             if time.time() - self.prof_ts > 2:
                 self.prof, self.weight, self.prof_ts = get_profile() or {}, (weights(get_logs()) or [(0, None)])[-1][1], time.time()
                 face = face_files()[1]
                 emb = json.loads(face.read_text()).get('embedding') if face.exists() else None
                 self.me = np.array(emb) if emb else None
                 self.gate.enrolled = self.me is not None
+            if time.time() - self.frame_ts > 5:
+                self.status = {'state': 'offline', 'msg': f'Camera offline ({self.url}) — retrying…' if self.url
+                               else 'Set your camera URL in Settings → Camera'}
+            if self.dirty and time.time() - self.last_fit > 5 and self.prof.get('height_cm'):  # camera offline too (e.g. a new body fit)
+                self.fit(time.time())
+            if f is None or f is last:
+                time.sleep(.01)
+                continue
+            last = f
             if self.prof.get('rotate') in ROTATE:  # camera mounted sideways / upside down
                 f = cv2.rotate(f, ROTATE[self.prof['rotate']])
             ts_ms = max(ts_ms + 1, int(time.monotonic() * 1000))
@@ -402,8 +408,6 @@ class Capture:
                     msg = msg or 'Face the camera for a moment so BodyLab knows it is you'
         elif now - self.last_seen > 1.5:  # nobody in view: the next person starts a new session
             self.end_session()
-        if now - self.last_fit > 5 and self.dirty:
-            self.fit(now)
         self.status = self.next_status(r, msg)
         self.publish(f, res, mask, r)
 
@@ -448,7 +452,9 @@ class Capture:
                       (now, json.dumps(raw), date.fromtimestamp(now).isoformat()))
         if raw.get('torso_ratio') and abs(raw['torso_ratio'] - self.prof.get('torso_ratio', 0)) > .002:
             set_profile({**(get_profile() or {}), 'torso_ratio': round(raw['torso_ratio'], 4)})  # scales partial views
-        self.live = dict(zip(('m', 'dims'), measure.derive(raw, self.prof, self.weight)))
+        with db() as c:
+            f = c.execute('select params from fits where day = ?', (date.fromtimestamp(now).isoformat(),)).fetchone()
+        self.live = dict(zip(('m', 'dims'), measure.derive(raw | ({'tape': json.loads(f[0])['tape']} if f else {}), self.prof, self.weight)))
 
     def next_status(self, r, msg):
         today = getattr(self, 'today', {'frames': 0, 'angle': 0})
@@ -493,6 +499,27 @@ def silhouette(mask, pts, world, origin, H, n=160):
     t = np.linspace(0, seg[-1], n, endpoint=False)
     outline = np.stack([np.interp(t, seg, np.r_[c[:, k], c[0, k]]) for k in (0, 1)], 1)
     return {'c': ((outline - origin) / H).round(4).tolist(), 'l': ((pts - origin) / H).round(4).tolist(), 'w': world.round(3).tolist()}
+
+
+def refit_loop():
+    """Refit today's body shape (fit.py, PyTorch) as frames arrive: once there are enough, then whenever they've
+    grown by a quarter. Skipped if the optional `fit` dependencies aren't installed (uv sync --group fit)."""
+    while True:
+        time.sleep(600)
+        day = date.today().isoformat()
+        with db() as c:
+            n = c.execute('select count(*) from frames where ts >= ?', (day_start(time.time()),)).fetchone()[0]
+            r = c.execute('select params from fits where day = ?', (day,)).fetchone()
+        if n < 30 or (r and n < 1.25 * json.loads(r[0])['frames']):
+            continue
+        p = subprocess.run(['nice', sys.executable, str(ROOT / 'fit.py'), '--db', str(DB_PATH), '--day', day, '--store'],
+                           capture_output=True, text=True, timeout=3600)
+        if p.returncode:
+            print('body fit failed:', (p.stderr.strip().splitlines() or ['?'])[-1], flush=True)
+            if 'ModuleNotFoundError' in p.stderr:
+                return
+        else:
+            cap.dirty = True  # re-derive today's measurements from the fit
 
 
 def tidy():
@@ -688,6 +715,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({**cap.status, 'rev': data_rev()})
         if path == '/api/live.mjpg':
             return self.stream()
+        if path.startswith('/api/fit/'):  # a day's fitted body mesh (int16 mm, web template frame)
+            r = db().execute('select mesh from fits where day = ?', (path.rsplit('/', 1)[1],)).fetchone()
+            return self.send(200, r[0], 'application/octet-stream') if r else self.send(404, b'no fit', 'text/plain')
         if path == '/api/face.jpg' and face_files()[0].exists():
             return self.send(200, face_files()[0].read_bytes(), 'image/jpeg')
         f = (ROOT / path.lstrip('/')).resolve()
@@ -759,5 +789,6 @@ if __name__ == '__main__':
             print(f'Face photo needs replacing: {e}', flush=True)
     TS_HOST, TS_OWNER = tailnet()
     cap = Capture()
+    threading.Thread(target=refit_loop, daemon=True).start()
     print(f'BodyLab → http://localhost:{PORT}' + (f'  ·  tailnet: https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else ''), flush=True)
     ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
