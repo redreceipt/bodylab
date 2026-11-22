@@ -407,11 +407,17 @@ class Capture:
                 skin, cat, box = bare_skin(self.clothes, f, mask, pts)
                 if skin['torso'] < .6:
                     msg, r['obs'] = 'Clothes on — BodyLab measures bare skin (underwear is fine)', {}
+                covered = (['hips', 'thigh_l_w', 'thigh_r_w'] if skin['thighs'] < .5 else []) + (['calf_l_w', 'calf_r_w'] if skin['shins'] < .5 else [])
+                for k in covered:  # shorts or trousers: those widths would be the clothes'
+                    r['obs'].pop(k, None)
             if r['obs']:
                 rec = {'ts': now, 'cam': self.cam, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
                        'sil': silhouette(mask, pts, world, r['origin'], r['H'])} | ({'skin': skin} if skin else {})
                 if self.prof.get('reference') and now - self.last_ref > 2 and reference_wanted(rec):
-                    self.last_ref, rec['jpg'] = now, reference_crop(f, mask if cat is None else None, cat, box)  # saved only if it's you
+                    try:  # a developer extra: never costs the frame
+                        self.last_ref, rec['jpg'] = now, reference_crop(f, mask)  # saved only if it's you
+                    except Exception as e:
+                        print('reference image failed:', e, flush=True)
                 for x in self.gate.frame(rec):
                     self.keep(x)
                 if self.gate.enrolled and not self.gate.me:
@@ -546,17 +552,17 @@ def person_box(mask, margin=.1):
     ys, xs = np.nonzero(mask > .5)
     if not len(ys):
         return None
-    m = margin * (ys.max() - ys.min())
-    return max(int(ys.min() - m), 0), int(ys.max() + m), max(int(xs.min() - m), 0), int(xs.max() + m)
+    m, (h, w) = margin * (ys.max() - ys.min()), mask.shape[:2]
+    return max(int(ys.min() - m), 0), min(int(ys.max() + m), h), max(int(xs.min() - m), 0), min(int(xs.max() + m), w)
 
 
 def bare_skin(segmenter, f, mask, pts):
-    """Share of skin (vs clothes) over the torso (shoulders to hips) and the shins (knees to ankles), from MediaPipe's
-    multiclass person segmenter on the person's crop. Also returns its category mask and the crop box."""
+    """Share of skin (vs clothes) over the torso (shoulders to hips), thighs (hips to knees) and shins (knees to ankles),
+    from MediaPipe's multiclass person segmenter on the person's crop. Also returns its category mask and the crop box."""
     box = person_box(mask)
     y0, y1, x0, x1 = box
     crop = np.ascontiguousarray(cv2.cvtColor(f[y0:y1, x0:x1], cv2.COLOR_BGR2RGB))
-    cat = segmenter.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)).category_mask.numpy_view()
+    cat = segmenter.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)).category_mask.numpy_view().reshape(crop.shape[:2])
     p = pts - [x0, y0]
 
     def share(quad):
@@ -564,19 +570,23 @@ def bare_skin(segmenter, f, mask, pts):
         cv2.fillConvexPoly(region, np.round(quad).astype(np.int32), 1)
         c = cat[region > 0]
         skin, cloth = (c == 2).sum(), (c == 4).sum()  # 2 = body skin, 4 = clothes
-        return round(float(skin / (skin + cloth)), 2) if skin + cloth else 1.0
-    return {'torso': share(p[[11, 12, 24, 23]]), 'legs': min(share(p[[25, 27, 27, 25]] + [[-8, 0], [-8, 0], [8, 0], [8, 0]]),
-                                                            share(p[[26, 28, 28, 26]] + [[-8, 0], [-8, 0], [8, 0], [8, 0]]))}, cat, box
+        return round(float(skin / (skin + cloth)), 2) if skin + cloth > .3 * len(c) else 0.0  # unseen isn't bare
+    def limb(a, b, half):  # a band along a bone, `half` its length to each side
+        d = p[b] - p[a]
+        n = np.array([-d[1], d[0]]) * half
+        return share([p[a] + n, p[b] + n, p[b] - n, p[a] - n])
+    return {'torso': share(p[[11, 12, 24, 23]]), 'thighs': min(limb(23, 25, .15), limb(24, 26, .15)),
+            'shins': min(limb(25, 27, .08), limb(26, 28, .08))}, cat, box
 
 
-def reference_crop(f, mask=None, cat=None, box=None):
+def reference_crop(f, mask):
     """The person (10 % margin), background greyed out, at most 900 px tall, as JPEG: you, not the room."""
-    box = box or (mask is not None and person_box(mask))
+    box = person_box(mask)
     if not box:
         return None
     y0, y1, x0, x1 = box
     crop = f[y0:y1, x0:x1].copy()
-    person = cat > 0 if cat is not None else mask[y0:y1, x0:x1] > .5
+    person = cv2.dilate((mask[y0:y1, x0:x1] > .5).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
     crop[~person] = 128
     k = min(1, 900 / crop.shape[0])
     return cv2.imencode('.jpg', cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()

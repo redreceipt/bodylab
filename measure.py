@@ -8,6 +8,7 @@ import statistics
 import time
 from datetime import date, datetime, timedelta
 
+import cv2
 import numpy as np
 
 EAR_L, EAR_R = 7, 8
@@ -92,7 +93,11 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
     if abs(down[0]) > .25:
         return fail('Leaning — only upright frames are measured')
     if bent(world):
-        return fail('Sitting or crouching — only standing frames are measured')
+        return fail('Sitting, crouching or bending — only standing frames are measured')
+    quad = np.zeros(m.shape, np.uint8)
+    cv2.fillConvexPoly(quad, np.round(pts[[SH_L, SH_R, HIP_R, HIP_L]]).astype(np.int32), 1)
+    if quad.any() and m[quad > 0].mean() < .7:  # landmarks without a body behind them: occluded, or a misdetection
+        return fail('Your body isn\'t clearly in view')
     theta = out['theta'] = (yaw(world, SH_L, SH_R) + yaw(world, HIP_L, HIP_R)) / 2
     obs = out['obs']
 
@@ -188,15 +193,15 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
 
 
 def bent(world, limit=45):
-    """Both hips or both knees bent past `limit` degrees (MediaPipe 3D landmarks): sitting or crouching. Walking
-    (one leg straight) isn't."""
+    """Both hips or both knees bent past `limit` degrees, or the torso tilted over 25° from upright (MediaPipe 3D
+    landmarks, y down): sitting, crouching or bending over. Walking (one leg straight) isn't."""
     def angle(a, b):
         n = np.linalg.norm(a) * np.linalg.norm(b)
         return np.degrees(np.arccos(np.clip(a @ b / n, -1, 1))) if n > 1e-9 else 0
     torso = world[[HIP_L, HIP_R]].mean(0) - world[[SH_L, SH_R]].mean(0)
     hips = [angle(torso, world[k] - world[h]) for h, k in ((HIP_L, KN_L), (HIP_R, KN_R))]
     knees = [angle(world[k] - world[h], world[a] - world[k]) for h, k, a in ((HIP_L, KN_L, AN_L), (HIP_R, KN_R, AN_R))]
-    return min(hips) > limit or min(knees) > limit
+    return min(hips) > limit or min(knees) > limit or angle(-torso, np.array([0, -1., 0])) > 25
 
 
 def fit_ellipse(seen, ratio):

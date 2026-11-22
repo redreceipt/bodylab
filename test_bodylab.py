@@ -196,6 +196,20 @@ assert 4 < lost < 6.5 and rest['m']['bf'] < 25 and rest['m']['waist'] < 95, rest
 assert lift['m']['lean_kg'] > rest['m']['lean_kg'] and lift['m']['bf'] < rest['m']['bf'] and len(rest['path']) == 13
 crash = M.predict({'weight': 63, 'bf': 28}, 'female', 30, -800, 3, 1.8, 165)
 assert crash['warning'] and crash['m']['bf'] >= 11.5 and M.predict(start, 'male', 12, -500, 4, 2.0, 180)['warning'] is None
+# Skin vs clothes on the person's crop (segmenter stubbed: MediaPipe returns an (h, w, 1) category mask).
+class Seg:
+    def segment(self, image):
+        h, w = image.numpy_view().shape[:2]
+        cat = np.full((h, w, 1), 4, np.uint8)  # clothes everywhere...
+        cat[:h // 2] = 2  # ...but bare skin above the middle
+        return type('R', (), {'category_mask': type('M', (), {'numpy_view': lambda self: cat})()})()
+frame = np.zeros((1000, 800, 3), np.uint8)
+skin, cat, box = app.bare_skin(Seg(), frame, img / 255.0, pts)
+assert skin['thighs'] == skin['shins'] == 0 and 0 < skin['torso'] < 1 and cat.shape == (box[1] - box[0], box[3] - box[2]), (skin, cat.shape, box)
+assert cv2.imdecode(np.frombuffer(app.reference_crop(frame, img / 255.0), np.uint8), cv2.IMREAD_COLOR) is not None
+bent_over = world.copy()
+bent_over[[11, 12], 2] = -.45  # shoulders forward over the hips
+assert M.bent(bent_over)
 # The stored silhouette is scale-free: same body twice the size gives the same outline.
 sil = app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0)
 big = app.silhouette(cv2.resize(img, None, fx=2, fy=2) / 255.0, pts * 2, world, pts[23:25].mean(0) * 2, 1400.0)

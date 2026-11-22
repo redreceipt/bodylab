@@ -114,11 +114,15 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
     C = torch.tensor(np.array([f['sil']['c'] for f in frames]), dtype=torch.float32, device=dev) * H
     L = torch.tensor(np.array([np.array(f['sil']['l'])[list(KP.values())] for f in frames]), dtype=torch.float32, device=dev) * H
     W = np.array([np.array(f['sil']['w'])[list(KP.values())] for f in frames])
-    # Image edges, and below the crotch when the legs are clothed (trousers' outline isn't the legs'): ignored.
+    # Ignored: image edges, and clothed legs (shorts' or trousers' outline isn't the legs'): a band from the crotch
+    # (4 % of height below the hip centre) to the knees, or to the feet.
     bd = torch.tensor(np.array([borders(np.array(f['sil']['c'])) for f in frames]), dtype=torch.float32, device=dev) * H
-    bd[:, 3] = torch.where(torch.tensor([f.get('skin', {}).get('legs', 1) < .5 for f in frames], device=dev), torch.minimum(bd[:, 3], torch.tensor(.04 * H, device=dev)), bd[:, 3])
+    knee = [float(np.mean(np.array(f['sil']['l'])[[25, 26], 1])) for f in frames]
+    band = torch.tensor([[.04, np.inf if f.get('skin', {}).get('shins', 1) < .5 else kn if f.get('skin', {}).get('thighs', 1) < .5 else .04]
+                         for f, kn in zip(frames, knee)], dtype=torch.float32, device=dev) * H
     in_view = lambda p: ((p[..., 0] > bd[:, None, 0] + .01) & (p[..., 0] < bd[:, None, 1] - .01)  # noqa: E731
-                         & (p[..., 1] > bd[:, None, 2] + .01) & (p[..., 1] < bd[:, None, 3] - .01))
+                         & (p[..., 1] > bd[:, None, 2] + .01) & (p[..., 1] < bd[:, None, 3] - .01)
+                         & ~((p[..., 1] > band[:, None, 0]) & (p[..., 1] < band[:, None, 1])))
     edge_ok = in_view(C)  # outline points on an image edge aren't body edges
     kp_ok = in_view(L).float()
 
@@ -194,17 +198,25 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
             l_out = (d2 * out_m).sum() / use.sum() / v2.shape[1]
             near = ((C[:, :, None] - v2[:, None]) ** 2).sum(-1).min(-1).values
             l_in = (near * edge_ok * use[:, None]).sum() / (edge_ok * use[:, None]).sum()
+            e_sil = ((d2 * out_m).mean(1) + (near * edge_ok).sum(1) / edge_ok.sum(1).clamp_min(1)).detach().sqrt()  # per frame
             total = total + 20 * (l_out + l_in)
             parts |= {'out': ((d2 * out_m).sum() / out_m.sum().clamp_min(1)).item() ** .5 * 100, 'in': l_in.item() ** .5 * 100}
-        return total, parts, out, e_kp
+        return total, parts, out, e_kp, (e_sil if stage else None)
 
     t0 = time.time()
-    for stage, n in enumerate(iters):
+    for stage, n in enumerate([*iters, 120]):  # stage 2: refine without outlines the shared body can't explain
+        if stage == 2:
+            e = e_sil[use > 0]
+            bad = (e_sil > max(.03, 2.5 * e.median().item())) & (use > 0)  # someone else, a misread mask
+            if not bad.any():
+                break
+            use = use * ~bad
+            log(f'{int(bad.sum())} frames dropped: their outline fits no shared body')
         params = [rot, turn, cam] + ([local] + list(phen.values()) if stage else [])
         opt = torch.optim.Adam(params, lr=.02 if stage else .05)
         for i in range(n):
             opt.zero_grad()
-            total, parts, out, e_kp = loss(stage)
+            total, parts, out, e_kp, e_sil = loss(stage)
             total.backward()
             opt.step()
             if i % 50 == 0 or i == n - 1:
