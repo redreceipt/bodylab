@@ -9,6 +9,8 @@ struct BodyLabSyncApp: App {
     var body: some Scene {
         WindowGroup {
             RootView().environmentObject(health)
+                .preferredColorScheme(.dark)
+                .tint(Color(red: 0.24, green: 0.94, blue: 1))  // the web app's accent
                 .onOpenURL { url in Task { await health.pair(url) } }
         }
         .onChange(of: phase) { _, now in
@@ -29,8 +31,6 @@ struct RootView: View {
                 LogView().tabItem { Label("Log", systemImage: "plus.circle") }
                 MeView().tabItem { Label("Me", systemImage: "person.crop.circle") }
             }
-            .preferredColorScheme(.dark)
-            .tint(Color(red: 0.24, green: 0.94, blue: 1))  // the web app's accent
         }
     }
 }

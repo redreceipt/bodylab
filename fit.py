@@ -243,10 +243,14 @@ def stance(model, shape, kreg):
     twist = torch.zeros(2, device=dev, requires_grad=True)  # forearm twist only (a free wrist bends sideways)
     axes = torch.zeros(2, 3, device=dev)
 
+    curl = {}  # finger bone -> rotvec: a relaxed hand's slight curl (set below)
+
     def run(tw=None):
         pose = torch.eye(4, device=dev).repeat(1, model.bone_count, 1, 1)
         pose[0, bones, :3, :3] = roma.rotvec_to_rotmat(rot)
         pose[0, twist_b, :3, :3] = roma.rotvec_to_rotmat(axes * (twist if tw is None else tw)[:, None])
+        for b, rv in curl.items():
+            pose[0, b, :3, :3] = roma.rotvec_to_rotmat(rv)
         return model(pose_parameters=pose, **shape)
     with torch.no_grad():
         out = run()
@@ -261,6 +265,21 @@ def stance(model, shape, kreg):
                 moved.append((kreg(run(torch.full((2,), .5, device=dev)))[0][7 + j] - k[7 + j]).norm())
             axes[j] = torch.eye(3, device=dev)[int(torch.stack(moved).argmin())]
         tip = lambda b: top == model.bone_labels.index(b)  # noqa: E731  vertices of a finger's last segment
+        # Curl: each finger joint bends about the local axis that moves its fingertip toward the palm (palms face
+        # down at rest). Knuckles 15°, middle joints 30°, end joints 15°; the thumb half that.
+        V0 = run()['vertices'][0]
+        for s in 'LR':
+            for f in range(1, 6):
+                end = tip(f'finger{f}-3.{s}')
+                for j, deg in ((1, 15), (2, 30), (3, 15)):
+                    b = model.bone_labels.index(f'finger{f}-{j}.{s}')
+                    best = (-1, None)
+                    for e in torch.eye(3, device=dev):
+                        for sign in (1, -1):
+                            curl[b] = e * sign * .4
+                            down = -(run()['vertices'][0][end].mean(0) - V0[end].mean(0))[2].item()
+                            best = max(best, (down, e * sign), key=lambda x: x[0])
+                    curl[b] = best[1] * math.radians(deg) * (.5 if f == 1 else 1)
         tips = [(tip(f'finger1-3.{s}'), tip(f'finger5-3.{s}')) for s in 'LR']  # thumb, little finger
         targets = []
         for side, (s, e, w) in ((1, (3, 5, 7)), (-1, (4, 6, 8))):  # KP order: shoulders 3/4, elbows 5/6, wrists 7/8
