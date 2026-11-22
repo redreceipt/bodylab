@@ -36,7 +36,7 @@ Calories in minus active and resting energy gives your **energy balance**, so In
 
 ```sh
 tailscale serve --bg --https=8443 http://127.0.0.1:8765   # tailnet-only HTTPS; only /api/sync and /api/face (token) answer remotely
-cd ios && xcodegen && open BodyLabSync.xcodeproj           # pick your Team, run on your iPhone
+cd ios && BODYLAB_TEAM=<your team id> xcodegen && open BodyLabSync.xcodeproj   # then ⌘R on your iPhone
 ```
 
 ## Raspberry Pi camera
