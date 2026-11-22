@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
-import { fitBody, fitProxy, genitalPositions, initBody, mesh } from './body.js';
+import { drape, fitBody, fitProxy, genitalPositions, initBody, mesh } from './body.js';
 import { loadImage, photoColors, skinCanvas } from './look.js';
 import { renderSVG } from './vendor/uqr.mjs';
 
@@ -155,8 +155,9 @@ const mats = {
   hair: strands(null, '#3b2a20'), brows: strands(texture('/static/assets/eyebrow001.webp'), '#3b2a20'),
   lashes: strands(texture('/static/assets/eyelashes01.webp'), '#ffffff'),
   eyes: new THREE.MeshPhysicalMaterial({ roughness: 0.05, clearcoat: 1 }),
-  garment: new THREE.MeshStandardMaterial({ map: texture('/static/assets/sportsuit.jpg'), normalMap: new THREE.TextureLoader().load('/static/assets/sportsuit_normal.jpg'),
-    roughness: 0.85, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+  ...Object.fromEntries(['shorts', 'bra'].map((g) => [g, new THREE.MeshStandardMaterial({ map: texture(`/static/assets/${g}.jpg`),
+    normalMap: new THREE.TextureLoader().load(`/static/assets/${g}_normal.jpg`), roughness: 0.85, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })])),
   genitals: new THREE.MeshPhysicalMaterial({ roughness: 0.6, sheen: 0.3, sheenRoughness: 0.7, sheenColor: '#ffcfb8' }),
   ghost: new THREE.MeshBasicMaterial({ color: '#3ef0ff', transparent: true, opacity: 0.22, depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 8 }),
@@ -197,9 +198,8 @@ function partColor(p) { // multiplies the skin texture: white = true skin colour
 // Breast / genital shape: your latest tape measurements, else the camera's bust and underbust.
 const latest = (k) => S.logs.findLast((l) => l[k] != null)?.[k];
 function shape(m) {
-  const p = S.profile || {}, bust = latest('tape_bust') ?? m.chest, under = latest('tape_underbust') ?? m.underbust;
-  return { length: latest('penis_len_soft'), girth: latest('penis_girth_soft'), testicles: p.testicles ?? 0,
-    firmness: p.firmness ?? 0, cup: bust && under ? bust - under : null };
+  const bust = latest('tape_bust') ?? m.chest, under = latest('tape_underbust') ?? m.underbust;
+  return { length: latest('penis_len_soft'), girth: latest('penis_girth_soft'), cup: bust && under ? bust - under : null };
 }
 // Body triangles under the worn garments are dropped so skin can't poke through.
 const dressed = {};
@@ -234,7 +234,10 @@ function buildAvatar(dims, sex, isGhost, m = {}) {
     group.userData.glow = { selected: glow(mats.selected), hovered: glow(mats.hovered) };
     group.add(skin, group.userData.glow.selected, group.userData.glow.hovered, new THREE.Mesh(proxy('high-poly', fit.pos), mats.eyes), new THREE.Mesh(proxy('eyelashes01', fit.pos), mats.lashes));
     if (look.brows) group.add(new THREE.Mesh(proxy('eyebrow001', fit.pos), mats.brows));
-    for (const g of garments) group.add(Object.assign(new THREE.Mesh(proxy(g, fit.pos), mats.garment), { castShadow: true }));
+    for (const g of garments) {
+      const mesh = geometry(drape(g, fit.pos, fitProxy(g, fit.pos)), A.arr(`${g}.src`), A.arr(`${g}.uv`), A.arr(`${g}.tris`));
+      group.add(Object.assign(new THREE.Mesh(mesh, mats[g]), { castShadow: true }));
+    }
     if (!look.clothes && sex !== 'female') {
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(genitalPositions(fit.pos), 3));
@@ -362,8 +365,8 @@ function todayCard() {
   const t = S.insights.days.at(-1), usual = S.insights.usual_kcal;
   const items = [
     ['scan', 'Body scan', t.views ? `${t.views} views so far — keep walking past` : 'Walk past the camera; turning helps'],
-    ['weight', 'Weigh-in', 'Step on the scale'],
-    ['food', 'Food', t.kcal ? `${Math.round(t.kcal).toLocaleString()}${usual ? ` of ~${Math.round(usual).toLocaleString()}` : ''} kcal logged` : 'Log meals in a food app that writes to Apple Health'],
+    ['weight', 'Weigh-in', 'Step on the scale, or log it in BodyLab Sync'],
+    ['food', 'Food', t.kcal ? `${Math.round(t.kcal).toLocaleString()}${usual ? ` of ~${Math.round(usual).toLocaleString()}` : ''} kcal logged` : 'Log meals in BodyLab Sync or any food app'],
     ['sleep', 'Sleep', 'Wear your Watch to bed'],
     ['activity', 'Activity', 'Wear your Watch'],
   ];
@@ -427,7 +430,7 @@ function metricBlock(k, withGoal = true) {
 function partPanel(k) {
   if (k === 'genitals') {
     return `<h2>Genitals</h2>${['penis_len_soft', 'penis_girth_soft', 'penis_len_erect', 'penis_girth_erect'].map((x) => metricBlock(x, false)).join('')}
-      <p class="muted">From your tape measurements (Log → Body measurements). The 3D body shows the resting size.</p>`;
+      <p class="muted">From the tape measurements you log in BodyLab Sync. The 3D body shows the resting size.</p>`;
   }
   if (k === 'overall') {
     const m = cur();
@@ -438,19 +441,16 @@ function partPanel(k) {
         <p class="muted">Body fat uses the US Navy circumference formula. Expect ±3–4 points; tape-calibrating neck and waist (tap them) tightens it.</p>
       </details>`;
   }
-  const p = S.insights.parts[k] || {}, cal = S.profile?.calib?.[k];
+  const p = S.insights.parts[k] || {}, cal = S.calibration?.[k];
   const breasts = k === 'chest' && S.profile?.sex === 'female' ? (() => {
     const m = cur(), bust = latest('tape_bust') ?? m.chest, under = latest('tape_underbust') ?? m.underbust;
     return `${metricBlock('underbust', false)}<p>${bust && under ? `Cup size about <b>${cupLetter(bust - under)}</b>.` : 'Cup size appears once bust and underbust are measured.'}</p>`;
   })() : '';
   return `${metricBlock(k, false)}${breasts}
     ${p.workouts || p.change != null ? `<p>${p.workouts ? `${p.workouts} workouts trained this in the last 4 weeks.` : ''}</p>` : ''}
-    <details><summary>Goal and calibration</summary>${goalBlock(k)}
-      <p class="muted">Tape-measured it? Enter it once and every day (past and future) is corrected.${cal ? ` Current correction ×${cal.toFixed(3)}.` : ''}</p>
-      <form class="inline" data-cal="${k}"><input name="value" type="number" step="any" required placeholder="Tape (${uLabel('cm')})" aria-label="Tape measurement"><button>Calibrate</button>
-      ${cal ? `<button type="button" class="link" data-calreset="${k}">reset</button>` : ''}</form></details>`;
+    <details><summary>Goal</summary>${goalBlock(k)}</details>
+    <p class="muted">${cal ? `Calibrated to your tape measurements (×${cal.toFixed(3)}).` : 'Tape-measure this in BodyLab Sync to calibrate the camera.'}</p>`;
 }
-const FOCUS = ['full body', 'chest', 'back', 'shoulders', 'arms', 'core', 'legs', 'glutes', 'cardio'];
 function logItem(l) {
   const txt = l.kind === 'measure' ? '📏 ' + Object.keys(l).filter((x) => META[x]).map((x) => `${META[x].label} ${fmt(x, l[x])}`).join(' · ')
     : l.kind === 'workout'
@@ -458,35 +458,6 @@ function logItem(l) {
     : '📋 ' + [l.weight && fmt('weight', l.weight), l.kcal && `${Math.round(l.kcal)} kcal`, l.protein && `${Math.round(l.protein)} g protein`,
       l.sleep && `${l.sleep.toFixed(1)} h sleep`, l.steps && `${Math.round(l.steps)} steps`].filter(Boolean).join(' · ');
   return `<li><span>${day(l.ts)}</span> ${esc(txt)} <button class="link" data-dellog="${l.id}">delete</button></li>`;
-}
-function logPanel() {
-  const today = new Date().toLocaleDateString('en-CA');
-  return `<h2>Log</h2><p class="muted">Apple Health fills most of this in automatically. Use these for anything it doesn't.</p>
-    <details open><summary>Workout</summary><form id="fWorkout" class="stack">
-      <div class="grid2"><label>Type<select name="type">${['Strength', 'Cardio', 'HIIT', 'Sports', 'Mobility'].map((t) => `<option>${t}</option>`).join('')}</select></label>
-      <label>Minutes<input type="number" name="minutes" min="1" max="600" value="45" required></label>
-      <label>Effort (1–10)<input type="number" name="rpe" min="1" max="10" value="7" required></label>
-      <label>Date<input type="date" name="date" value="${today}"></label></div>
-      <fieldset class="chips"><legend class="muted">Worked</legend>${FOCUS.map((f) => `<label><input type="checkbox" name="focus" value="${f}">${f}</label>`).join('')}</fieldset>
-      <button>Save workout</button></form></details>
-    <details><summary>Weight, food, sleep</summary><form id="fDaily" class="stack">
-      <div class="grid2"><label>Weight (${uLabel('kg')})<input type="number" step="any" name="weight"></label>
-      <label>Calories (kcal)<input type="number" name="kcal"></label>
-      <label>Protein (g)<input type="number" name="protein"></label>
-      <label>Sleep (h)<input type="number" step="any" name="sleep"></label>
-      <label>Date<input type="date" name="date" value="${today}"></label></div><button>Save</button></form></details>
-    <details><summary>Body measurements (tape)</summary><form id="fMeasure" class="stack">
-      ${S.profile?.sex === 'female'
-    ? `<div class="grid2"><label>Bust (${uLabel('cm')})<input type="number" step="any" name="tape_bust"></label>
-         <label>Underbust (${uLabel('cm')})<input type="number" step="any" name="tape_underbust"></label></div>
-       <p class="muted">Bust: around the fullest part, tape level. Underbust: snug, right under the breasts.</p>`
-    : `<div class="grid2"><label>Length, resting (${uLabel('cm')})<input type="number" step="any" name="penis_len_soft"></label>
-         <label>Girth, resting (${uLabel('cm')})<input type="number" step="any" name="penis_girth_soft"></label>
-         <label>Length, erect (${uLabel('cm')})<input type="number" step="any" name="penis_len_erect"></label>
-         <label>Girth, erect (${uLabel('cm')})<input type="number" step="any" name="penis_girth_erect"></label></div>
-       <p class="muted">Length: bone-pressed, pubic bone to tip along the top. Girth: around mid-shaft. Same time of day each time.</p>`}
-      <button>Save</button></form></details>
-    <details><summary>Recent entries</summary><ul class="list">${S.logs.slice(-20).reverse().map(logItem).join('') || '<li class="muted">Nothing yet</li>'}</ul></details>`;
 }
 function weekChart(weeks) {
   const W = 380, H = 130, bw = W / weeks.length, maxL = Math.max(1, ...weeks.map((w) => w.load));
@@ -518,7 +489,8 @@ function progressPanel() {
     <h3>Goals</h3>${Object.keys(S.goals).map((k) => metricBlock(k)).join('') || '<p class="muted">Goals colour the body: green = moving toward them, red = away.</p>'}
     <form id="fGoal" class="inline"><select name="metric" aria-label="Metric">${free.map((k) => `<option value="${k}">${META[k].label}</option>`).join('')}</select>
       <input name="target" type="number" step="any" placeholder="Target" required aria-label="Target"><button>Add</button></form>
-    <details><summary>Training vs body fat, week by week</summary>${weekChart(I.weeks)}</details>`;
+    <details><summary>Training vs body fat, week by week</summary>${weekChart(I.weeks)}</details>
+    <details><summary>Recent entries</summary><ul class="list">${S.logs.slice(-20).reverse().map(logItem).join('') || '<li class="muted">Nothing yet</li>'}</ul></details>`;
 }
 // What if: a plan's effect on your body, simulated from your own data.
 const plan = { kcal: -300, strength: 3, protein: 1.6, weeks: 12 };
@@ -556,13 +528,9 @@ function settingsPanel() {
   const h = p.height_cm ? (imp ? p.height_cm / 2.54 : p.height_cm).toFixed(1) : '';
   const opt = (value, label, on) => `<option value="${value}" ${on ? 'selected' : ''}>${label}</option>`;
   return `<h2>${first ? 'Welcome to BodyLab' : 'Settings'}</h2>
-    ${first ? `<p>Pair your iPhone and Apple Health fills in the rest.</p>${pairBlock()}<p class="muted">Or set your height:</p>` : ''}
-    <form id="fProfile" class="stack"><div class="grid2">
-      <label><span>Height (<span id="hu">${imp ? 'in' : 'cm'}</span>)</span><input name="height" type="number" step="any" value="${h}" required></label>
-      <label>Sex<select name="sex">${opt('male', 'Male')}${opt('female', 'Female', p.sex === 'female')}</select></label>
-      <label>Units<select name="units">${opt('imperial', 'in, lb', imp)}${opt('metric', 'cm, kg', !imp)}</select></label></div>
-      <input type="hidden" name="camera_url" value="${esc(p.camera_url ?? '')}"><input type="hidden" name="rotate" value="${p.rotate ?? 0}">
-      <button>Save</button></form>
+    ${first ? `<p>Install BodyLab Sync on your iPhone and scan this code. Everything about you comes from Apple Health and the app.</p>${pairBlock()}`
+    : `<p class="muted">${[h && `${h} ${imp ? 'in' : 'cm'}`, p.sex, p.birth_date && `born ${esc(p.birth_date)}`, imp ? 'imperial units' : 'metric units'].filter(Boolean).join(' · ')}
+       — from Apple Health and your phone. Log anything else in BodyLab Sync.</p>`}
     <details><summary>Your look</summary>
       <div class="row" style="justify-content:flex-start">${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
         <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
@@ -573,8 +541,6 @@ function settingsPanel() {
         <label>Hair colour<input type="color" name="hair_color" value="${esc(p.hair_color ?? look.auto?.hair ?? '#3b2a20')}"></label>
         <label>Eyes<select name="eye_color">${opt('auto', S.face ? 'From photo' : 'Brown', !p.eye_color || p.eye_color === 'auto')}${EYES.map((e) => opt(e, e, p.eye_color === e)).join('')}</select></label>
         ${S.face ? '' : `<label>Skin tone<input type="color" name="skin" value="${esc(p.skin ?? '#c99478')}"></label>`}
-        ${p.sex === 'female' ? `<label>Breast firmness<input type="range" name="firmness" min="-1" max="1" step="0.1" value="${p.firmness ?? 0}"></label>`
-    : `<label>Testicle size<input type="range" name="testicles" min="-1" max="1" step="0.1" value="${p.testicles ?? 0}"></label>`}
       </div><button>Save look</button></form></details>
     <details><summary>Camera</summary>
       <form id="fCamera" class="stack">
@@ -591,7 +557,7 @@ function renderPanel() {
   if (!view) return ($('#panel').hidden = true);
   $('#panel').hidden = false;
   $('#pbody').innerHTML = view.part ? partPanel(view.part)
-    : { log: logPanel, progress: progressPanel, whatif: whatifPanel, settings: settingsPanel }[view.tab]();
+    : { progress: progressPanel, whatif: whatifPanel, settings: settingsPanel }[view.tab]();
   if (view.tab === 'whatif') runPlan();
   document.querySelectorAll('#nav button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.tab === view.tab));
 }
@@ -622,25 +588,17 @@ $('#panel').addEventListener('change', async (e) => {
     toast('Face photo saved ✓');
     return refresh();
   }
-  if (e.target.name !== 'units') return; // keep the typed height meaning the same thing
-  const h = e.target.form.height, imp = e.target.value === 'imperial';
-  if (h.value) h.value = (imp ? h.value / 2.54 : h.value * 2.54).toFixed(1);
-  $('#hu').textContent = imp ? 'in' : 'cm';
 });
 $('#panel').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target, fd = new FormData(f), o = Object.fromEntries(fd);
   try {
-    if (f.id === 'fWorkout') await api('POST', '/api/logs', { kind: 'workout', ...o, focus: fd.getAll('focus') });
-    else if (f.id === 'fDaily') await api('POST', '/api/logs', { kind: 'daily', ...o, weight: o.weight && fromUnit(+o.weight, 'kg') });
-    else if (f.id === 'fProfile') await api('POST', '/api/profile', { ...o, height_cm: o.units === 'imperial' ? o.height * 2.54 : +o.height });
-    else if (f.id === 'fLook') await api('POST', '/api/profile', o);
-    else if (f.id === 'fMeasure') await api('POST', '/api/logs', { kind: 'measure', ...Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v === '' ? '' : fromUnit(+v, 'cm')])) });
+    if (f.id === 'fLook') await api('POST', '/api/profile', o);
     else if (f.id === 'fCamera') await api('POST', '/api/profile', { ...o, bare_only: fd.has('bare_only') });
     else if (f.id === 'fGoal' || f.dataset.goal) {
       const k = f.dataset.goal || o.metric;
       await api('POST', '/api/goals', { metric: k, target: fromUnit(+o.target, META[k].unit) });
-    } else if (f.dataset.cal) await api('POST', '/api/calibrate', { metric: f.dataset.cal, value: fromUnit(+o.value, 'cm') });
+    }
     await refresh();
     toast('Saved ✓');
   } catch (err) { toast(err.message, true); }
@@ -651,15 +609,14 @@ $('#panel').addEventListener('click', async (e) => {
     await api('POST', '/api/clear-today', {});
     return toast("Today's measurements cleared");
   }
-  const b = e.target.closest('button[data-dellog],button[data-delscan],button[data-delgoal],button[data-calreset],button[data-delface]');
+  const b = e.target.closest('button[data-dellog],button[data-delscan],button[data-delgoal],button[data-delface]');
   if (!b) return;
-  const { dellog, delscan, delgoal, calreset, delface } = b.dataset;
+  const { dellog, delscan, delgoal, delface } = b.dataset;
   if (delscan && !confirm('Delete this scan?')) return;
   try {
     if (dellog) await api('DELETE', `/api/logs/${dellog}`);
     if (delscan) await api('DELETE', `/api/scans/${delscan}`);
     if (delgoal) await api('DELETE', `/api/goals/${encodeURIComponent(delgoal)}`);
-    if (calreset) await api('POST', '/api/calibrate', { metric: calreset, value: null });
     if (delface) await api('DELETE', '/api/face');
     await refresh();
   } catch (err) { toast(err.message, true); }

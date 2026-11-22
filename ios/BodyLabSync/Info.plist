@@ -35,6 +35,8 @@
 	<string>BodyLab uses a face photo to make your 3D body look like you. It stays on your BodyLab server.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>BodyLab reads weight, nutrition, sleep, activity and workouts to show how they change your body.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>BodyLab saves the food, weight, workouts and waist measurements you log so every app sees them.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

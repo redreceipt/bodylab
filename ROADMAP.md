@@ -4,14 +4,14 @@ The goal: an avatar that looks almost exactly like you, from scanning you barely
 
 ## Where it is now (runs on any Apple Silicon Mac)
 
-- **Scanning:** continuous. Every useful camera frame from any angle is fused into one body per day, with width and depth from ellipse fits across yaw. It only measures you (face match, one person in view) and only bare skin.
-- **Body:** MakeHuman's CC0 mesh, stretched slice by slice to your measurements. It has your photo's face, skin tone, hair and eyes; breasts sized from bust and underbust; genitals sized from tape measurements; real workout shorts and a top, or nude.
-- **Inputs:** Apple Health sync (about 20 metrics plus workouts), tape measurements, and a daily completeness checklist.
+- **Scanning:** continuous. Every useful camera frame from any angle is fused into one body per day, with width and depth from ellipse fits across yaw. It only measures you (repeated face matches, one person in view) and only bare skin. Each useful frame's outline and 3D landmarks are kept 45 days for refitting.
+- **Body:** MakeHuman's CC0 mesh, stretched slice by slice to your measurements. It has your photo's face, skin tone, hair and eyes; breasts sized from bust and underbust; genitals sized from tape measurements; draped athletic shorts and a sports bra, or nude.
+- **Inputs:** all from the iPhone app: Apple Health sync (profile, about 20 metrics, workouts) and logging (food, weight, workouts, tape measurements that auto-calibrate the camera), plus a daily completeness checklist.
 - **Predictions:** a daily energy-balance simulation (Hall energy densities, Forbes partitioning, adaptive maintenance, training and protein effects). Maintenance is learned from your food and weight once logged, and per-part fat patterns from your history.
 
 ## Next on an M4 Mac (no NVIDIA needed)
 
-1. **Your real body shape, not a stretched template.** Fit [Anny](https://github.com/naver/anny) (Apache-2.0, built on MakeHuman's mesh, so every current asset still fits) to *all* camera silhouettes: pose each frame from MediaPipe's 3D landmarks, then optimise Anny's shape so its outline matches every mask from every angle (PyTorch on the M4's GPU). Refit daily from the day's frames. This replaces the slice-by-slice stretching.
+1. **Your real body shape, not a stretched template.** Fit [Anny](https://github.com/naver/anny) (Apache-2.0, built on MakeHuman's mesh, so every current asset still fits) to *all* camera silhouettes: pose each frame from MediaPipe's 3D landmarks, then optimise Anny's shape so its outline matches every mask from every angle (PyTorch on the M4's GPU). Refit daily from the day's frames. This replaces the slice-by-slice stretching. The stored outlines are already in the shape the fitter needs. The same fit, on nude frames at close range, is the only realistic route to camera-measured genital size; a 2–3 m camera can't resolve it today.
 2. **Photoreal skin and hair.** One 60-second iPhone walk-around video, then Gaussian splats trained locally on Apple Silicon (several Metal trainers exist: splatx-metal, mpsplat, MLX3D), then baked onto your fitted mesh as a full-body texture. Hair could render as splats (three.js has a `GaussianSplat` renderer; [Spark](https://sparkjs.dev) is the full-featured option).
 3. **Your face shape.** The iPhone's TrueDepth camera (ARKit face mesh) gives true face geometry; the head morphs to match. The 478 3D landmarks from your photo are the fallback.
 4. **Anatomy.** MakeHuman has no female genital geometry, and its male helper is low-poly (smoothed now). Both need sculpted, permissively licensed assets, for example sculpted in Blender with MPFB2 and released CC0, then fitted like other MakeHuman proxies.

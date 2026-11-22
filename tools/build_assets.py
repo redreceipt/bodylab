@@ -43,7 +43,8 @@ SHAPES = {'cup+': 'breast/female-young-averagemuscle-averageweight-maxcup-averag
           'length+': 'genitals/penis-length-incr', 'length-': 'genitals/penis-length-decr',
           'girth+': 'genitals/penis-circ-incr', 'girth-': 'genitals/penis-circ-decr',
           'testicles+': 'genitals/penis-testicles-incr', 'testicles-': 'genitals/penis-testicles-decr'}
-SUIT = 'clothes/female_sportsuit01/female_sportsuit01'  # crop top + leggings, the leggings cut down to shorts
+SUIT = 'clothes/female_sportsuit01/female_sportsuit01'  # crop top + leggings: the leggings, cut down to athletic shorts
+TEE = 'clothes/female_casualsuit02/female_casualsuit02'  # fitted tee + denim shorts: the tee, cut down to a sports bra
 EYE_COLORS = ['brown', 'brownlight', 'blue', 'deepblue', 'bluegreen', 'green', 'grey', 'lightblue', 'ice']
 
 
@@ -222,6 +223,25 @@ def face_anchors(pos, src, uv, tris, eye_tris, eye_centers, skin, landmarker):
     return out
 
 
+def pieces(faces, by=0):
+    """Connected pieces, biggest first. by=0: faces sharing vertices; by=1: sharing UVs (a garment's sewn panels)."""
+    parent = {}
+
+    def root(i):
+        parent.setdefault(i, i)
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for f in faces:
+        for x in f[1:]:
+            parent[root(x[by])] = root(f[0][by])
+    out = {}
+    for f in faces:
+        out.setdefault(root(f[0][by]), []).append(f)
+    return sorted(out.values(), key=len, reverse=True)
+
+
 def subdivide(faces, levels=2):
     """Catmull-Clark subdivision as weights: each smooth vertex is a fixed mix of original vertices, so the browser
     can recompute it after fitting. faces: lists of original vertex ids. -> (rows [{orig: weight}], quads)."""
@@ -357,27 +377,13 @@ def main():
     meta['genital'] = {'base': size(vm)} | {k: size(vm + 10 * target(f'targets/{SHAPES[k]}.target')) for k in ('length+', 'length-', 'girth+', 'girth-')}
     print('genital template size (length, girth cm):', meta['genital'])
 
-    # Shorts and sports top: the sportsuit's leggings cut at mid-thigh, and its crop top. Each also lists
+    # Shorts and sports bra: the sportsuit's leggings cut at mid-thigh, and a fitted tee cut under the bust. Each also lists
     # the body skin it covers, hidden while it's worn so skin can't poke through.
     refs, w, d, scale = parse_mhclo(read(SUIT + '.mhclo').decode())
     sv, suv, sfaces = parse_obj(read(SUIT + '.obj').decode())
     vf, Jf = tmpl['female'], meta['joints']['female']
     gp = (w[:, :, None] * vf[refs]).sum(1)  # garment vertices on the template (offsets don't matter for cutting)
-    sf = [f for g in sfaces.values() for f in g]
-    parent = list(range(len(sv)))
-
-    def root(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-    for f in sf:
-        for v, _ in f[1:]:
-            parent[root(v)] = root(f[0][0])
-    pieces = {}
-    for f in sf:
-        pieces.setdefault(root(f[0][0]), []).append(f)
-    top, bottom = sorted(pieces.values(), key=lambda fs: -gp[[v for f in fs for v, _ in f], 1].mean())[:2]
+    bottom = min(pieces([f for g in sfaces.values() for f in g])[:2], key=lambda fs: gp[[v for f in fs for v, _ in f], 1].mean())
     def along(a, b):  # position of each garment vertex along its own side's limb (0 at joint a, 1 at b)
         A_, B_ = np.where(gp[:, :1] > 0, Jf[f'{a}_l'], Jf[f'{a}_r']), np.where(gp[:, :1] > 0, Jf[f'{b}_l'], Jf[f'{b}_r'])
         return ((gp - A_) * (B_ - A_)).sum(1) / ((B_ - A_) ** 2).sum(1)
@@ -390,20 +396,39 @@ def main():
         i = np.argmax(np.diff(vals))
         return (vals[i] + vals[i + 1]) / 2
     leg_cut = gap(leg, bottom, .35, .55)
-    # The top keeps its own cap sleeves: its sleeve seams don't follow one edge loop, so cutting them looks torn.
-    garments = {'shorts': [f for f in bottom if all(leg[v] < leg_cut for v, _ in f)], 'bra': top}
-    hidden, body_arm = delete_verts(read(SUIT + '.mhclo').decode()), weights[:, 2:4].sum(1)
-    for name, fs in garments.items():
+    garments = {'shorts': ([f for f in bottom if all(leg[v] < leg_cut for v, _ in f)], SUIT, (refs, w, d, scale), suv, gp)}
+    tee = parse_mhclo(read(TEE + '.mhclo').decode())
+    _, tuv, tfaces = parse_obj(read(TEE + '.obj').decode())
+    tgp = (tee[1][:, :, None] * vf[tee[0]]).sum(1)
+    panels = [f for p in pieces([f for g in tfaces.values() for f in g], by=1)[:2] for f in p]  # front + back; sleeves are their own panels
+    apex = tgp[[v for f in panels for v, _ in f]][:, 2].argmax()
+    apex_y = tgp[[v for f in panels for v, _ in f]][apex, 1]
+    bra_cut = gap(tgp[:, 1], panels, apex_y - 13, apex_y - 8)  # 8-13 cm under the bust: the band
+    garments['bra'] = ([f for f in panels if all(tgp[v, 1] > bra_cut for v, _ in f)], TEE, tee, tuv, tgp)
+    body_arm = weights[:, 2:4].sum(1)
+    for name, (fs, src_path, (refs, w, d, scale), suv, gp) in garments.items():
+        hidden = delete_verts(read(src_path + '.mhclo').decode())
         psrc, ppuv, ptris = split_uv(fs, suv)
         ys = gp[[v for f in fs for v, _ in f], 1]
-        hide = [i for i in hidden if ys.min() + 1.5 < vf[i, 1] < ys.max() - 1.5 and body_arm[i] < .5]  # inside the edges: no gaps
+        m = min(1.5, (ys.max() - ys.min()) / 5)
+        hide = [i for i in hidden if ys.min() + m < vf[i, 1] < ys.max() - m and body_arm[i] < .5]  # inside the edges: no gaps
+        print(f'{name}: {len(fs)} faces, y {ys.min():.2f}..{ys.max():.2f}, hides {len(hide)} body vertices')
         arrays |= {f'{name}.refs': refs.astype('<u2'), f'{name}.w': w.astype('<f4'), f'{name}.d': d.astype('<f4'),
                    f'{name}.src': psrc.astype('<u2'), f'{name}.uv': ppuv.astype('<f4'), f'{name}.tris': ptris.astype('<u2'),
                    f'{name}.hide': np.array(sorted(hide), '<u2')}
         meta['proxies'][name] = {'kind': 'garment', 'scale': scale}
-    for tex, out in (('diffuse', 'sportsuit.jpg'), ('normal', 'sportsuit_normal.jpg')):
-        cv2.imwrite(str(OUT / out), cv2.resize(image(f'{SUIT}_{tex}.png', cv2.IMREAD_COLOR), (1024, 1024), interpolation=cv2.INTER_AREA),
-                    [cv2.IMWRITE_JPEG_QUALITY, 88])
+    # For draping: each shorts vertex's place down the leg (0 = hip joint, 1 = hem), and the joints' vertices.
+    arrays['shorts.leg'] = (leg / leg_cut).astype('<f4')
+    for k in ('hip_l', 'hip_r', 'knee_l', 'knee_r'):
+        arrays[f'joint.{k}'] = np.array(sorted({i for f in faces[JOINTS[k]] for i, _ in f}), '<u2')
+    for name, path in (('shorts', SUIT), ('bra', TEE)):
+        diffuse = image(f'{path}_diffuse.png', cv2.IMREAD_COLOR)
+        if path == TEE:  # paint out the MakeHuman logo printed on the chest (keyed on anything that isn't shirt blue)
+            box = diffuse[330:620, 1470:1780]
+            off = (np.abs(box.astype(int) - np.median(box.reshape(-1, 3), 0)).sum(2) > 60).astype(np.uint8)
+            box[:] = cv2.inpaint(box, cv2.dilate(off, np.ones((7, 7), np.uint8)), 9, cv2.INPAINT_TELEA)
+        for tex, img in (('', diffuse), ('_normal', image(f'{path}_normal.png', cv2.IMREAD_COLOR))):
+            cv2.imwrite(str(OUT / f'{name}{tex}.jpg'), cv2.resize(img, (1024, 1024), interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 88])
 
     proxies = {f'hair/{h}/{h}': 'hair' for h in HAIRS} | {'eyebrows/eyebrow001/eyebrow001': 'eyebrows',
                                                           'eyelashes/eyelashes01/eyelashes01': 'eyelashes', 'eyes/high-poly/high-poly': 'eyes'}

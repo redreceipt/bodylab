@@ -22,7 +22,11 @@ PLAUSIBLE = {'neck_w': (.04, .1), 'shoulders_w': (.17, .36), 'chest_w': (.12, .3
 SEEN = {'neck': (.035, .11), 'chest': (.08, .31), 'underbust': (.07, .3), 'waist': (.07, .33), 'hips': (.08, .33)}  # any angle
 # Tape measurements you enter (cm): male health (resting and erect, bone-pressed length; mid-shaft girth) and bust.
 MEASURE = {'penis_len_soft': (2, 30), 'penis_girth_soft': (3, 25), 'penis_len_erect': (3, 35), 'penis_girth_erect': (4, 30),
-           'tape_bust': (50, 200), 'tape_underbust': (50, 180)}
+           'tape_bust': (50, 200), 'tape_underbust': (50, 180), 'tape_neck': (20, 70), 'tape_chest': (50, 200),
+           'tape_hips': (50, 220), 'tape_arm': (15, 70), 'tape_thigh': (25, 110), 'tape_calf': (20, 70)}
+# Which tape measurement calibrates which camera estimate (waist comes from Apple Health as tape_waist).
+TAPE = {'neck': 'tape_neck', 'chest': 'tape_chest', 'underbust': 'tape_underbust', 'waist': 'tape_waist', 'hips': 'tape_hips',
+        'arm_l': 'tape_arm', 'arm_r': 'tape_arm', 'thigh_l': 'tape_thigh', 'thigh_r': 'tape_thigh', 'calf_l': 'tape_calf', 'calf_r': 'tape_calf'}
 
 
 def implausible(raw):
@@ -178,6 +182,7 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
             obs.update(upperarm=(seg(SH_L, EL_L) + seg(SH_R, EL_R)) / 2, forearm=(seg(EL_L, WR_L) + seg(EL_R, WR_R)) / 2)
     for k in [k for k in obs if k in PLAUSIBLE and not PLAUSIBLE[k][0] <= obs[k] <= PLAUSIBLE[k][1]]:
         del obs[k]  # one misread part shouldn't cost the rest of the frame
+    out['H'], out['origin'] = H, hp  # px per standing height, hip centre: to store a scale-free silhouette
     return out if obs else fail('Nothing measurable in this frame')
 
 
@@ -370,6 +375,18 @@ def derive(raw, profile, weight=None):
     return {k: round(v, 3) for k, v in m.items()}, {k: round(v, 1) for k, v in dims.items()}
 
 
+def calibration(estimates, logs, female=False):
+    """Per-part correction from your tape measurements: the median of tape ÷ camera over every day with a body
+    estimate within 3 days of a measurement. estimates: [(ts, uncalibrated metrics)]."""
+    out = {}
+    for part, key in TAPE.items():
+        key = 'tape_bust' if part == 'chest' and female else key
+        ratios = [l[key] / m[part] for l in logs if l.get(key) for ts, m in estimates if m.get(part) and abs(ts - l['ts']) < 3 * 86400]
+        if ratios:
+            out[part] = min(1.6, max(.6, statistics.median(ratios)))
+    return out
+
+
 def nearest(points, ts, max_days=7):
     """Value of the (ts, value) point closest to ts within max_days, else None."""
     best = min(points, key=lambda p: abs(p[0] - ts), default=None)
@@ -377,8 +394,9 @@ def nearest(points, ts, max_days=7):
 
 
 def series(metric, scans, logs):
-    if metric == 'weight' or metric in MEASURE:
-        return [(l['ts'], l[metric]) for l in logs if l.get(metric)]
+    logged = [(l['ts'], l[metric]) for l in logs if l.get(metric) is not None]
+    if logged or metric == 'weight' or metric in MEASURE:
+        return logged
     return [(s['ts'], s['m'][metric]) for s in scans if metric in s['m']]
 
 

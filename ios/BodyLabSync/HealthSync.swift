@@ -6,7 +6,23 @@ import SwiftUI
 /// so every sync can resend the whole window.
 @MainActor
 final class HealthSync: ObservableObject {
-    @Published var status = "Not synced yet"
+    @Published var status = ""
+    @Published var summary: Summary?
+    @Published var today: [Check] = []
+    @Published var female = false
+    let metric = Locale.current.measurementSystem == .metric
+
+    struct Summary { let bodyFat: Double?, weight: String? }
+    struct Check { let label: String, done: Bool, hint: String }
+    struct Field { let key: String, label: String }
+    var tapeFields: [Field] {
+        [.init(key: "tape_neck", label: "Neck"), .init(key: female ? "tape_bust" : "tape_chest", label: female ? "Bust" : "Chest"),
+         .init(key: "tape_waist", label: "Waist"), .init(key: "tape_hips", label: "Hips"), .init(key: "tape_arm", label: "Upper arm"),
+         .init(key: "tape_thigh", label: "Thigh"), .init(key: "tape_calf", label: "Calf")]
+            + (female ? [.init(key: "tape_underbust", label: "Underbust")]
+                      : [.init(key: "penis_len_soft", label: "Penis length, resting"), .init(key: "penis_girth_soft", label: "Penis girth, resting"),
+                         .init(key: "penis_len_erect", label: "Penis length, erect"), .init(key: "penis_girth_erect", label: "Penis girth, erect")])
+    }
 
     private let store = HKHealthStore()
     private let windowDays = 90
@@ -63,8 +79,10 @@ final class HealthSync: ObservableObject {
         var read: Set<HKObjectType> = Set(metrics.map { HKQuantityType($0.id) })
         read.formUnion([HKQuantityType(.height), HKQuantityType(.heartRate), HKCategoryType(.sleepAnalysis),
                         HKObjectType.workoutType(), HKCharacteristicType(.biologicalSex), HKCharacteristicType(.dateOfBirth)])
+        let write: Set<HKSampleType> = [HKQuantityType(.dietaryEnergyConsumed), HKQuantityType(.dietaryProtein), HKQuantityType(.bodyMass),
+                                        HKQuantityType(.waistCircumference), HKObjectType.workoutType()]
         do {
-            try await store.requestAuthorization(toShare: [], read: read)
+            try await store.requestAuthorization(toShare: write, read: read)
             observe()
             await sync()
         } catch {
@@ -115,9 +133,82 @@ final class HealthSync: ObservableObject {
             ]
             let reply = try await post("api/sync", JSONSerialization.data(withJSONObject: body), type: "application/json")
             status = "Synced \(reply["saved"] ?? 0) records at \(Date.now.formatted(date: .omitted, time: .shortened))"
+            await refreshToday()
         } catch {
             status = "Sync failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Today's checklist and latest numbers, from BodyLab.
+    func refreshToday() async {
+        guard let state = try? await request("api/state", method: "GET") else { return }
+        let profile = state["profile"] as? [String: Any] ?? [:]
+        female = profile["sex"] as? String == "female"
+        let insights = state["insights"] as? [String: Any] ?? [:]
+        let day = (insights["days"] as? [[String: Any]])?.last ?? [:]
+        let usual = insights["usual_kcal"] as? Double, kcal = day["kcal"] as? Double, views = day["views"] as? Int ?? 0
+        today = [
+            .init(label: "Body scan", done: day["scan"] as? Bool ?? false, hint: views > 0 ? "\(views) views so far — keep walking past" : "Walk past the camera; turning helps"),
+            .init(label: "Weigh-in", done: day["weight"] as? Bool ?? false, hint: "Step on the scale, or log it here"),
+            .init(label: "Food", done: day["food"] as? Bool ?? false,
+                  hint: kcal.map { "\(Int($0)) \(usual.map { "of ~\(Int($0)) " } ?? "")kcal logged" } ?? "Log meals here or in any food app"),
+            .init(label: "Sleep", done: day["sleep"] as? Bool ?? false, hint: "Wear your Watch to bed"),
+            .init(label: "Activity", done: day["activity"] as? Bool ?? false, hint: "Wear your Watch"),
+        ]
+        let m = (state["scans"] as? [[String: Any]])?.last?["m"] as? [String: Any] ?? [:]
+        let kg = (state["logs"] as? [[String: Any]])?.last(where: { $0["weight"] != nil })?["weight"] as? Double
+        summary = .init(bodyFat: m["bf"] as? Double, weight: kg.map { metric ? String(format: "%.1f kg", $0) : String(format: "%.1f lb", $0 * 2.20462) })
+    }
+
+    // MARK: logging (Apple Health is the record; BodyLab reads it back on sync)
+
+    private func save(_ id: HKQuantityTypeIdentifier, _ value: Double, _ unit: HKUnit) async throws {
+        try await store.save(HKQuantitySample(type: HKQuantityType(id), quantity: HKQuantity(unit: unit, doubleValue: value), start: .now, end: .now))
+    }
+
+    func logFood(kcal: Double?, protein: Double?) async {
+        do {
+            if let kcal { try await save(.dietaryEnergyConsumed, kcal, .kilocalorie()) }
+            if let protein { try await save(.dietaryProtein, protein, .gram()) }
+            await sync()
+        } catch { status = "Couldn't save to Apple Health: \(error.localizedDescription)" }
+    }
+
+    func logWeight(_ value: Double) async {
+        do {
+            try await save(.bodyMass, value, metric ? .gramUnit(with: .kilo) : .pound())
+            await sync()
+        } catch { status = "Couldn't save to Apple Health: \(error.localizedDescription)" }
+    }
+
+    func logWorkout(type: String, minutes: Double, effort: Double, focus: [String]) async {
+        let config = HKWorkoutConfiguration()
+        config.activityType = ["Strength": .traditionalStrengthTraining, "Cardio": .mixedCardio, "HIIT": .highIntensityIntervalTraining,
+                               "Sports": .other, "Mobility": .flexibility][type] ?? .other
+        let builder = HKWorkoutBuilder(healthStore: store, configuration: config, device: .local())
+        let end = Date.now, start = end.addingTimeInterval(-minutes * 60)
+        do {
+            try await builder.beginCollection(at: start)
+            try await builder.addMetadata(["BodyLabFocus": focus.joined(separator: ","), "BodyLabEffort": effort])
+            try await builder.endCollection(at: end)
+            _ = try await builder.finishWorkout()
+            await sync()
+        } catch { status = "Couldn't save the workout: \(error.localizedDescription)" }
+    }
+
+    /// Waist goes to Apple Health; the rest (other body parts, genital and bust measurements) to BodyLab directly.
+    func logTape(_ values: [String: Double]) async {
+        let cm = values.mapValues { metric ? $0 : $0 * 2.54 }
+        do {
+            if let waist = cm["tape_waist"] { try await save(.waistCircumference, waist, .meterUnit(with: .centi)) }
+            let rest = cm.filter { $0.key != "tape_waist" }
+            if !rest.isEmpty {
+                var body: [String: Any] = rest
+                body["kind"] = "measure"
+                _ = try await post("api/logs", JSONSerialization.data(withJSONObject: body), type: "application/json")
+            }
+            await sync()
+        } catch { status = "Couldn't save measurements: \(error.localizedDescription)" }
     }
 
     /// Face photo for the realistic avatar. Stays on your BodyLab server.
@@ -136,14 +227,18 @@ final class HealthSync: ObservableObject {
     }
 
     private func post(_ path: String, _ body: Data, type: String) async throws -> [String: Any] {
+        try await request(path, method: "POST", body: body, type: type)
+    }
+
+    private func request(_ path: String, method: String, body: Data? = nil, type: String? = nil) async throws -> [String: Any] {
         let defaults = UserDefaults.standard
         guard let token = defaults.string(forKey: "token"), !token.isEmpty,
               let url = URL(string: defaults.string(forKey: "server") ?? "")?.appending(path: path) else {
             throw URLError(.userAuthenticationRequired, userInfo: [NSLocalizedDescriptionKey: "Pair with BodyLab first (scan the QR code)"])
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue(type, forHTTPHeaderField: "Content-Type")
+        request.httpMethod = method
+        if let type { request.setValue(type, forHTTPHeaderField: "Content-Type") }
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.httpBody = body
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -156,7 +251,7 @@ final class HealthSync: ObservableObject {
     }
 
     private func profile() async -> [String: Any] {
-        var p: [String: Any] = [:]
+        var p: [String: Any] = ["units": metric ? "metric" : "imperial"]
         let latest = HKSampleQueryDescriptor(predicates: [.quantitySample(type: HKQuantityType(.height))],
                                              sortDescriptors: [SortDescriptor(\.endDate, order: .reverse)], limit: 1)
         if let height = try? await latest.result(for: store).first {
@@ -213,6 +308,9 @@ final class HealthSync: ObservableObject {
                     out["hr"] = hr
                     out["rpe"] = min(10, max(1, (hr / maxHR - 0.5) / 0.05))  // effort from % of max heart rate
                 }
+                // Logged in this app: which areas you trained and how hard, kept in the workout's Health metadata.
+                if let areas = w.metadata?["BodyLabFocus"] as? String, !areas.isEmpty { out["focus"] = areas.split(separator: ",").map(String.init) }
+                if let effort = w.metadata?["BodyLabEffort"] as? Double { out["rpe"] = effort }
                 if let kcal = w.statistics(for: HKQuantityType(.activeEnergyBurned))?.sumQuantity()?.doubleValue(for: .kilocalorie()) {
                     out["kcal"] = kcal
                 }

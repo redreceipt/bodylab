@@ -1,9 +1,15 @@
 """BodyLab: local body-composition tracker fed by a network camera. Run: uv run app.py"""
 import hmac
 import json
-import mimetypes
 import os
+
+# Quiet the native libraries (MediaPipe, OpenCV, ffmpeg reconnect spam) so the log can't balloon.
+os.environ.setdefault('GLOG_minloglevel', '2')
+os.environ.setdefault('OPENCV_LOG_LEVEL', 'ERROR')
+os.environ.setdefault('OPENCV_FFMPEG_LOGLEVEL', '-8')
+import mimetypes
 import re
+import stat
 import secrets
 import sqlite3
 import statistics
@@ -43,6 +49,7 @@ SYNC_PORT = 8443  # `tailscale serve --bg --https=8443 http://127.0.0.1:8765` pu
 TS_HOST = TS_OWNER = None  # set at startup from `tailscale status`
 DB_PATH = Path(os.environ.get('BODYLAB_DB') or ROOT / 'data' / 'bodylab.db')
 # Daily inputs (manual or Apple Health) and their sane ranges.
+FRAMES_PER_DAY, KEEP_FRAMES_DAYS = 400, 45  # raw evidence for refits; daily body estimates are kept forever
 DAILY = {'weight': (20, 400), 'scale_bf': (2, 75), 'scale_lean': (10, 300), 'tape_waist': (30, 300),
          'kcal': (0, 15000), 'protein': (0, 1000), 'carbs': (0, 2000), 'fat': (0, 1000), 'fiber': (0, 300),
          'sugar': (0, 1000), 'water': (0, 20), 'alcohol': (0, 50),
@@ -203,15 +210,20 @@ def median(frames):
 def app_state():
     prof, logs, c = get_profile(), get_logs(), db()
     goals = {r['metric']: {'target': r['target'], 'start': r['start'], 'ts': r['ts']} for r in c.execute('select * from goals')}
-    scans, hidden = [], 0
+    scans, hidden, calib = [], 0, {}
     if prof and prof.get('height_cm'):
-        w = weights(logs)
+        w, rows = weights(logs), []
         for r in c.execute('select * from scans order by ts'):
             raw = json.loads(r['raw'])
             if measure.implausible(raw):  # misread poses saved before the plausibility check; kept, not shown
                 hidden += 1
-                continue
-            m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']))
+            else:
+                rows.append((r, raw))
+        # Tape measurements correct the camera per body part, for every day (past and future).
+        calib = measure.calibration([(r['ts'], measure.derive(raw, {**prof, 'calib': {}})[0]) for r, raw in rows], logs,
+                                    prof.get('sex') == 'female')
+        for r, raw in rows:
+            m, dims = measure.derive(raw, {**prof, 'calib': calib}, measure.nearest(w, r['ts']))
             scans.append({'id': r['id'], 'ts': r['ts'], 'side': raw.get('n_angle', 0) >= 30, 'frames': raw.get('n_frames'), 'm': m, 'dims': dims})
     face = face_files()[1]
     face = json.loads(face.read_text()) if face.exists() else None
@@ -219,8 +231,55 @@ def app_state():
         face.pop('embedding', None)  # stays server-side
     sync = f'https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else None
     return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': sync},
-            'face': face, 'hidden_scans': hidden,
+            'face': face, 'hidden_scans': hidden, 'calibration': calib,
             'insights': measure.insights(scans, logs, goals)}
+
+
+class Gate:
+    """Decides which frames are you. Nothing counts until your face matches your photo; your face is re-checked
+    whenever it's visible; a face that clearly isn't you throws away everything since your last match. A session
+    (one person continuously in view) ends when nobody's in view, and only confirmed frames survive it. Frames
+    count only within a minute of a match, so someone who never faces the camera can't slip in for long."""
+    MISSES = 3  # consecutive clear mismatches before deciding it's someone else
+    MATCHES = 2  # separate matches before trusting it's you (one lucky score in bad light isn't enough)
+    WINDOW = 60  # seconds either side of a match
+
+    def __init__(self, enrolled=True):
+        self.enrolled = enrolled
+        self.reset()
+
+    def reset(self):
+        self.me = self.other = False
+        self.misses, self.matches, self.waiting, self.last = 0, 0, [], -np.inf
+
+    def frame(self, rec):
+        """A measured frame. Returns the frames that count now."""
+        if not self.enrolled:  # no face photo yet: anyone alone in view counts
+            return [rec]
+        if not self.other:
+            self.waiting = (self.waiting + [rec])[-600:]
+        return []
+
+    def face(self, score, ts):
+        """Your face's similarity to your photo (SFace cosine) at time ts. Returns frames now confirmed as you."""
+        if score >= SAME_PERSON:
+            self.matches, self.misses = self.matches + 1, 0
+            if self.matches < self.MATCHES:
+                return []
+            ready = [r for r in self.waiting if r['ts'] - self.last <= self.WINDOW or ts - r['ts'] <= self.WINDOW]
+            self.me, self.last, self.waiting = True, ts, []
+            return ready
+        if score < .2:  # clearly someone else; in-between scores (far away, dim light) decide nothing
+            self.misses += 1
+            if self.misses >= self.MISSES:
+                self.me, self.other, self.waiting = False, True, []
+        return []
+
+    def end(self):
+        """The person left. Frames since your last match count only if it was you and nobody else showed up."""
+        ready = [r for r in self.waiting if r['ts'] - self.last <= self.WINDOW] if self.me and not self.other else []
+        self.reset()
+        return ready
 
 
 class Capture:
@@ -235,13 +294,15 @@ class Capture:
         self.status = {'state': 'starting', 'msg': 'Connecting to camera…'}
         self.want_clear, self.dirty, self.live = False, True, None
         self.prof, self.weight, self.prof_ts, self.me = {}, None, 0.0, None
-        self.end_session()
+        self.gate, self.skin, self.match, self.last_id, self.stored = Gate(), None, None, 0.0, [None, 0]
         threading.Thread(target=self.read_loop, daemon=True).start()
         threading.Thread(target=self.process_loop, daemon=True).start()
 
-    def end_session(self):
+    def end_session(self, keep=True):
         """A session = one person continuously in view. Identity and skin colour are per session."""
-        self.who, self.misses, self.skin, self.pending, self.match = None, 0, None, [], None
+        for rec in self.gate.end() if keep else self.gate.reset() or []:
+            self.keep(rec)
+        self.skin, self.match = None, None
 
     def clear_today(self):
         self.want_clear = True  # applied on the processing thread
@@ -279,6 +340,7 @@ class Capture:
                 face = face_files()[1]
                 emb = json.loads(face.read_text()).get('embedding') if face.exists() else None
                 self.me = np.array(emb) if emb else None
+                self.gate.enrolled = self.me is not None
             if self.prof.get('rotate') in ROTATE:  # camera mounted sideways / upside down
                 f = cv2.rotate(f, ROTATE[self.prof['rotate']])
             ts_ms = max(ts_ms + 1, int(time.monotonic() * 1000))
@@ -300,8 +362,8 @@ class Capture:
         people = [i for i, m in enumerate(res.segmentation_masks or []) if (m.numpy_view() > .5).mean() > .01]
         if len(people) > 1:  # whose frames are whose is no longer certain
             self.last_seen = now
-            self.end_session()
-            msg = 'Two people in view — paused until one leaves'
+            self.end_session(keep=False)  # anything not yet confirmed is dropped
+            msg = 'Two people in view — not measuring until one leaves'
             mask = res.segmentation_masks[0].numpy_view().squeeze()
         elif res.pose_landmarks:
             self.last_seen = now
@@ -319,23 +381,26 @@ class Capture:
                 patches = [ycc[int(y - eye * .15):int(y + eye * .15) + 1, int(x - eye * .15):int(x + eye * .15) + 1, 1:].reshape(-1, 2)
                            for x, y in ((pts[2] + pts[9]) / 2, (pts[5] + pts[10]) / 2)]
                 self.skin = np.median(np.vstack(patches), axis=0)
-            if facing and self.me is not None and self.who is None:
+            if facing and self.me is not None and (not self.gate.me or now - self.last_id > 2):  # re-checked every 2 s
+                self.last_id = now
                 self.identify(f, pts)
             r = measure.observe(pts, vis, world, mask, female=self.prof.get('sex') == 'female',
                                 torso_ratio=self.prof.get('torso_ratio', .29), ycc=ycc, skin=self.skin)
             msg = r['problem']
-            if self.who == 'other':
+            if f[mask > .5].mean() < 40:  # in the dark the person mask (and every width) is unreliable
+                msg, r['obs'] = 'Too dark to measure', {}
+            if self.gate.other:
                 msg, r['obs'] = 'Not you — BodyLab only measures the profile owner', {}
             elif bare and self.skin is None:
                 msg, r['obs'] = 'Face the camera for a moment so BodyLab can see your skin tone', {}
             if r['obs']:
-                rec = {'ts': now, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()}}
-                if self.me is not None and self.who != 'me':
-                    self.pending = (self.pending + [rec])[-600:]  # kept until your face is seen this session
+                rec = {'ts': now, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
+                       'sil': silhouette(mask, pts, world, r['origin'], r['H'])}
+                for x in self.gate.frame(rec):
+                    self.keep(x)
+                if self.gate.enrolled and not self.gate.me:
                     msg = msg or 'Face the camera for a moment so BodyLab knows it is you'
-                else:
-                    self.keep(rec)
-        elif now - self.last_seen > 8:
+        elif now - self.last_seen > 1.5:  # nobody in view: the next person starts a new session
             self.end_session()
         if now - self.last_fit > 5 and self.dirty:
             self.fit(now)
@@ -346,23 +411,25 @@ class Capture:
         span = max(np.linalg.norm(pts[7] - pts[8]), 20)  # ear to ear
         (x0, y0), (x1, y1) = (pts[0] - 1.6 * span).astype(int), (pts[0] + 1.6 * span).astype(int)
         crop = f[max(y0, 0):max(y1, 0), max(x0, 0):max(x1, 0)]
-        emb = self.faces.embed(cv2.resize(crop, (320, 320), interpolation=cv2.INTER_CUBIC)) if crop.size else None
+        if not crop.size or crop.mean() < 45:  # too dark to tell faces apart: decide nothing
+            return
+        emb = self.faces.embed(cv2.resize(crop, (320, 320), interpolation=cv2.INTER_CUBIC))
         if emb is None:
             return
         self.match = round(float(emb @ self.me), 2)
-        if self.match >= SAME_PERSON:
-            self.who = 'me'
-            for rec in self.pending:  # everything seen earlier this session was you too
-                self.keep(rec)
-            self.pending = []
-        elif self.match < .2:  # clearly someone else; in-between scores (distance, dim light) don't count against you
-            self.misses += 1
-            if self.misses >= 8:
-                self.who, self.pending = 'other', []
+        for rec in self.gate.face(self.match, time.time()):
+            self.keep(rec)
 
     def keep(self, rec):
-        if rec['ts'] - self.last_store < .5:
+        day = date.fromtimestamp(rec['ts'])
+        if self.stored[0] != day:
+            self.stored = [day, db().execute('select count(*) from frames where ts >= ?', (day_start(rec['ts']),)).fetchone()[0]]
+            if day != date.today():
+                return
+            tidy()  # once a day
+        if rec['ts'] - self.last_store < .5 or self.stored[1] >= FRAMES_PER_DAY:  # 2/s at most, 400/day is plenty
             return
+        self.stored[1] += 1
         self.last_store, self.dirty = rec['ts'], True
         with db() as c:
             c.execute('insert into frames(ts, data) values (?, ?)', (rec['ts'], json.dumps(rec)))
@@ -388,7 +455,7 @@ class Capture:
         st = {'state': 'idle', 'frames': today['frames'], 'angle': round(today['angle']), 'match': self.match}
         if not self.prof.get('height_cm'):
             return {**st, 'msg': 'Set your height in Settings to start'}
-        if self.live and r is not None:
+        if self.live and r is not None and not self.gate.other:
             st['live'] = self.live
         if r is None:
             return {**st, 'state': 'adjust' if msg else 'idle', 'msg': msg or 'Watching — walk past any time; every view helps'}
@@ -415,6 +482,26 @@ class Capture:
         for a, b in (r or {}).get('lines', []):
             cv2.line(f, tuple(map(int, a)), tuple(map(int, b)), (60, 255, 120), 3)
         self.jpeg = cv2.imencode('.jpg', f, [cv2.IMWRITE_JPEG_QUALITY, 70])[1].tobytes()
+
+
+def silhouette(mask, pts, world, origin, H, n=160):
+    """A scale-free outline of the body (n points along the mask's outer contour) plus the 2D and 3D landmarks,
+    relative to the hip centre in units of standing height: what fitting a full body shape needs. No image."""
+    contours = cv2.findContours((mask > .5).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0]
+    c = max(contours, key=cv2.contourArea)[:, 0].astype(float) if contours else np.zeros((1, 2))
+    seg = np.r_[0, np.cumsum(np.linalg.norm(np.diff(c, axis=0, append=c[:1]), axis=1))]
+    t = np.linspace(0, seg[-1], n, endpoint=False)
+    outline = np.stack([np.interp(t, seg, np.r_[c[:, k], c[0, k]]) for k in (0, 1)], 1)
+    return {'c': ((outline - origin) / H).round(4).tolist(), 'l': ((pts - origin) / H).round(4).tolist(), 'w': world.round(3).tolist()}
+
+
+def tidy():
+    """Keep BodyLab's disk use bounded: raw frames for 45 days, and its own log under 5 MB."""
+    with db() as c:  # freed pages are reused, so the file stops growing once it holds 45 days
+        c.execute('delete from frames where ts < ?', (time.time() - KEEP_FRAMES_DAYS * 86400,))
+    out = os.fstat(1)
+    if stat.S_ISREG(out.st_mode) and out.st_size > 5_000_000:
+        os.ftruncate(1, 0)
 
 
 def day_start(ts):
@@ -451,9 +538,6 @@ def post_profile(b):
         if not re.fullmatch(r'#[0-9a-fA-F]{6}', str(b['skin'])):
             raise ValueError('Skin tone must be a #rrggbb colour')
         prof['skin'] = b['skin']
-    for k in ('firmness', 'testicles'):  # -1..1 shape sliders
-        if k in b:
-            prof[k] = num(b[k], -1, 1, k)
     for k, pattern in (('hair', r'[a-z0-9]{1,20}'), ('hair_color', r'#[0-9a-fA-F]{6}'), ('eye_color', r'[a-z]{1,20}')):
         if k in b:
             if not re.fullmatch(pattern, str(b[k])):
@@ -500,13 +584,14 @@ def post_log(b):
 
 def post_sync(b):
     """Apple Health batch from the iOS app. Upserts by Health ID/day, so re-syncing never duplicates.
-    Health's height/sex/birth date fill profile fields the user hasn't set (that's the whole onboarding)."""
+    Height, sex, birth date (Apple Health) and units (the phone) are the source of truth for the profile."""
     hp, prof = b.get('profile') or {}, get_profile() or {}
-    fill = {'height_cm': hp.get('height_cm') and num(hp['height_cm'], 100, 250, 'height'),
-            'sex': hp.get('sex') if hp.get('sex') in ('male', 'female') else None,
-            'birth_date': hp.get('birth_date') and datetime.strptime(hp['birth_date'], '%Y-%m-%d').date().isoformat()}
-    if any(v and k not in prof for k, v in fill.items()):
-        set_profile({**{k: v for k, v in fill.items() if v}, **prof})
+    health = {'height_cm': hp.get('height_cm') and num(hp['height_cm'], 100, 250, 'height'),
+              'sex': hp.get('sex') if hp.get('sex') in ('male', 'female') else None,
+              'birth_date': hp.get('birth_date') and datetime.strptime(hp['birth_date'], '%Y-%m-%d').date().isoformat(),
+              'units': hp.get('units') if hp.get('units') in ('metric', 'imperial') else None}
+    if any(v and prof.get(k) != v for k, v in health.items()):
+        set_profile({**prof, **{k: v for k, v in health.items() if v}})
     rows = [(ts_of(d), 'daily', data, f"health:day:{d['date']}") for d in b.get('days') or [] if (data := daily_data(d))]
     rows += [(num(w['start'], 0, 1e10, 'start'), 'workout', workout_data(w), f"health:workout:{str(w['id'])[:64]}")
              for w in b.get('workouts') or []]
@@ -526,26 +611,6 @@ def post_goal(b):
     with db() as c:
         c.execute('insert or replace into goals values (?, ?, ?, ?)',
                   (metric, num(b.get('target'), -1e4, 1e4, 'Target'), pts[-1][1] if pts else None, time.time()))
-
-
-def post_calibrate(b):
-    metric, prof = b.get('metric'), get_profile()
-    if metric not in measure.CALIBRATABLE or not prof:
-        raise ValueError('Cannot calibrate that')
-    cal = prof.setdefault('calib', {})
-    if b.get('value') in (None, ''):
-        cal.pop(metric, None)
-    else:
-        raw = next((r for r in (json.loads(x[0]) for x in db().execute('select raw from scans order by ts desc'))
-                    if not measure.implausible(r)), None)
-        estimate = raw and measure.derive(raw, {**prof, 'calib': {}})[0].get(metric)
-        if not estimate:
-            raise ValueError('Need a scan with this measurement first')
-        factor = num(b['value'], 1, 300, 'Measurement') / estimate
-        if not .6 <= factor <= 1.6:
-            raise ValueError(f'That is {factor:.2f}× the camera estimate — check the units')
-        cal[metric] = factor
-    set_profile(prof)
 
 
 def post_predict(b):
@@ -576,9 +641,10 @@ def post_predict(b):
 
 
 POST = {'/api/profile': post_profile, '/api/logs': post_log, '/api/goals': post_goal,
-        '/api/calibrate': post_calibrate, '/api/clear-today': lambda b: cap.clear_today(), '/api/sync': post_sync,
+        '/api/clear-today': lambda b: cap.clear_today(), '/api/sync': post_sync,
         '/api/predict': post_predict}
 LOCAL = ('localhost', '127.0.0.1')
+TOKEN_PATHS = ('/api/sync', '/api/face', '/api/logs')  # what the paired iPhone may call
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -606,8 +672,12 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def token_ok(self):
+        auth = self.headers.get('Authorization')
+        return auth is not None and hmac.compare_digest(auth.encode(), f'Bearer {sync_token()}'.encode())
+
     def do_GET(self):
-        if not self.allowed():
+        if not (self.token_ok() or self.allowed()):  # the paired iPhone, or you in the browser
             return
         path = urlparse(self.path).path
         if path == '/':
@@ -628,7 +698,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         auth = self.headers.get('Authorization')
-        if auth is not None and path in ('/api/sync', '/api/face'):  # the iPhone, via `tailscale serve`
+        if auth is not None and path in TOKEN_PATHS:  # the iPhone, via `tailscale serve`
             if not hmac.compare_digest(auth.encode(), f'Bearer {sync_token()}'.encode()):
                 return self.reply({'error': 'bad sync token'}, 401)
         elif not self.allowed():
@@ -679,6 +749,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     init_db()
+    tidy()
     ensure_model()
     jpg, meta = face_files()
     if meta.exists() and not {'embedding', 'hair'} <= json.loads(meta.read_text()).keys():  # photo from an older version

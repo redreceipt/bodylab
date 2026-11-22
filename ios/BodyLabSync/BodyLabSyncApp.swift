@@ -7,7 +7,7 @@ struct BodyLabSyncApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView().environmentObject(health)
+            RootView().environmentObject(health)
                 .onOpenURL { url in Task { await health.pair(url) } }
         }
         .onChange(of: phase) { _, now in
@@ -16,7 +16,138 @@ struct BodyLabSyncApp: App {
     }
 }
 
-struct ContentView: View {
+struct RootView: View {
+    @AppStorage("token") private var token = ""
+
+    var body: some View {
+        if token.isEmpty {
+            PairView()
+        } else {
+            TabView {
+                TodayView().tabItem { Label("Today", systemImage: "checklist") }
+                LogView().tabItem { Label("Log", systemImage: "plus.circle") }
+                MeView().tabItem { Label("Me", systemImage: "person.crop.circle") }
+            }
+        }
+    }
+}
+
+struct PairView: View {
+    @EnvironmentObject var health: HealthSync
+    @AppStorage("server") private var server = ""
+    @AppStorage("token") private var token = ""
+    @State private var manualToken = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text("Open BodyLab on your Mac → Settings and scan the QR code with the iPhone Camera.")
+                }
+                DisclosureGroup("Pair manually") {
+                    TextField("https://your-mac.your-tailnet.ts.net:8443", text: $server)
+                        .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    SecureField("Sync token", text: $manualToken)
+                    Button("Pair") { token = manualToken; Task { await health.connect() } }.disabled(manualToken.isEmpty || server.isEmpty)
+                }
+                if !health.status.isEmpty { Text(health.status).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("BodyLab Sync")
+        }
+    }
+}
+
+/// What BodyLab has today and what's still missing.
+struct TodayView: View {
+    @EnvironmentObject var health: HealthSync
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let s = health.summary {
+                    Section {
+                        LabeledContent("Body fat", value: s.bodyFat.map { String(format: "%.1f%%", $0) } ?? "—")
+                        LabeledContent("Weight", value: s.weight ?? "—")
+                    }
+                }
+                Section("Today") {
+                    ForEach(health.today, id: \.label) { item in
+                        HStack(alignment: .top) {
+                            Image(systemName: item.done ? "checkmark.circle.fill" : "circle").foregroundStyle(item.done ? .green : .secondary)
+                            VStack(alignment: .leading) {
+                                Text(item.label)
+                                if !item.done { Text(item.hint).font(.caption).foregroundStyle(.secondary) }
+                            }
+                        }
+                    }
+                }
+                Section { Text(health.status).font(.footnote).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("Today")
+            .refreshable { await health.sync() }
+        }
+    }
+}
+
+/// Everything you'd enter by hand. Food, weight, waist and workouts go into Apple Health; the rest to BodyLab.
+struct LogView: View {
+    @EnvironmentObject var health: HealthSync
+    @State private var kcal = ""
+    @State private var protein = ""
+    @State private var weight = ""
+    @State private var workoutType = "Strength"
+    @State private var minutes = "45"
+    @State private var effort = 7.0
+    @State private var focus: Set<String> = []
+    @State private var tape: [String: String] = [:]
+    private let types = ["Strength", "Cardio", "HIIT", "Sports", "Mobility"]
+    private let areas = ["full body", "chest", "back", "shoulders", "arms", "core", "legs", "glutes", "cardio"]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Food (adds to Apple Health)") {
+                    TextField("Calories (kcal)", text: $kcal).keyboardType(.numberPad)
+                    TextField("Protein (g)", text: $protein).keyboardType(.decimalPad)
+                    Button("Add food") {
+                        Task { await health.logFood(kcal: Double(kcal), protein: Double(protein)); kcal = ""; protein = "" }
+                    }.disabled(Double(kcal) == nil && Double(protein) == nil)
+                }
+                Section("Weight") {
+                    TextField(health.metric ? "Weight (kg)" : "Weight (lb)", text: $weight).keyboardType(.decimalPad)
+                    Button("Save weight") { Task { await health.logWeight(Double(weight)!); weight = "" } }.disabled(Double(weight) == nil)
+                }
+                Section("Workout") {
+                    Picker("Type", selection: $workoutType) { ForEach(types, id: \.self) { Text($0) } }
+                    TextField("Minutes", text: $minutes).keyboardType(.numberPad)
+                    VStack(alignment: .leading) { Text("Effort \(Int(effort))/10"); Slider(value: $effort, in: 1...10, step: 1) }
+                    ForEach(areas, id: \.self) { area in
+                        Toggle(area.capitalized, isOn: Binding(get: { focus.contains(area) }, set: { on in if on { focus.insert(area) } else { focus.remove(area) } }))
+                    }
+                    Button("Save workout") {
+                        Task { await health.logWorkout(type: workoutType, minutes: Double(minutes) ?? 0, effort: effort, focus: Array(focus)); focus = [] }
+                    }.disabled((Double(minutes) ?? 0) <= 0)
+                }
+                Section {
+                    ForEach(health.tapeFields, id: \.key) { f in
+                        TextField("\(f.label) (\(health.metric ? "cm" : "in"))", text: Binding(get: { tape[f.key] ?? "" }, set: { tape[f.key] = $0 }))
+                            .keyboardType(.decimalPad)
+                    }
+                    Button("Save measurements") { Task { await health.logTape(tape.compactMapValues(Double.init)); tape = [:] } }
+                        .disabled(tape.compactMapValues(Double.init).isEmpty)
+                } header: {
+                    Text("Tape measurements")
+                } footer: {
+                    Text("Body parts calibrate the camera automatically. Fill in any; same time of day each time.")
+                }
+                Section { Text(health.status).font(.footnote).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("Log")
+        }
+    }
+}
+
+struct MeView: View {
     @EnvironmentObject var health: HealthSync
     @AppStorage("server") private var server = ""
     @AppStorage("token") private var token = ""
@@ -25,30 +156,18 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             Form {
-                if token.isEmpty {
-                    Section("1 · Pair") {
-                        Text("Open BodyLab on your Mac → Profile and scan the QR code with the iPhone Camera.")
-                    }
-                } else {
-                    Section("Paired") { Text(URL(string: server)?.host() ?? server).foregroundStyle(.secondary) }
-                }
                 Section {
                     Button("Connect Apple Health") { Task { await health.connect() } }
                     Button("Take face photo") { camera = true }
-                    Button("Sync now") { Task { await health.sync() } }
-                } header: {
-                    Text(token.isEmpty ? "2 · Then" : "Health")
                 } footer: {
-                    Text("Health fills in your height, sex and age, then sends 90 days of body, nutrition, activity, heart and sleep data plus workouts — whenever you open the app or Health gets new data. The face photo (straight on, neutral, mouth closed) makes your 3D body look like you; it stays on your BodyLab server.")
+                    Text("Height, sex, birth date and units come from Apple Health and this phone. The face photo (straight on, neutral, mouth closed) makes your 3D body look like you; it stays on your BodyLab server.")
                 }
-                Section("Status") { Text(health.status) }
-                DisclosureGroup("Pair manually") {
-                    TextField("https://your-mac.your-tailnet.ts.net:8443", text: $server)
-                        .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    SecureField("Sync token", text: $token)
+                Section("Paired with") {
+                    Text(URL(string: server)?.host() ?? server).foregroundStyle(.secondary)
+                    Button("Unpair", role: .destructive) { token = "" }
                 }
             }
-            .navigationTitle("BodyLab Sync")
+            .navigationTitle("Me")
             .sheet(isPresented: $camera) {
                 CameraPicker { image in Task { await health.uploadFace(image) } }.ignoresSafeArea()
             }

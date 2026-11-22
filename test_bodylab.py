@@ -123,12 +123,29 @@ app.post_sync(batch)
 logs = app.get_logs()
 assert len(logs) == 2 and [l['weight'] for l in logs if l['kind'] == 'daily'] == [80.1], logs
 
-# Health onboarding fills missing profile fields but never overwrites what the user set.
-app.post_sync({'profile': {'height_cm': 180.3, 'sex': 'male', 'birth_date': '1990-05-02'}})
-assert app.get_profile() == {'height_cm': 180.3, 'sex': 'male', 'birth_date': '1990-05-02'}
-app.post_profile({'height_cm': 179})
+# Apple Health and the phone are the source of truth for the profile.
+app.post_sync({'profile': {'height_cm': 180.3, 'sex': 'male', 'birth_date': '1990-05-02', 'units': 'imperial'}})
+assert app.get_profile() == {'height_cm': 180.3, 'sex': 'male', 'birth_date': '1990-05-02', 'units': 'imperial'}
 app.post_sync({'profile': {'height_cm': 182}})
-assert app.get_profile()['height_cm'] == 179
+assert app.get_profile()['height_cm'] == 182
+
+# Only your frames count: waiting until your face matches, dropped when someone else's face shows up.
+g, R = app.Gate(), lambda ts: {'ts': ts}
+a, b = R(0), R(5)
+assert g.frame(a) == [] and g.face(.8, 1) == [] and g.face(.8, 2) == [a] and g.frame(b) == [] and g.end() == [b]  # you, then you left
+g.frame(R(0))
+assert g.face(.1, 1) == [] and g.face(.1, 2) == [] and g.face(.1, 3) == [] and g.other and g.end() == []  # her: nothing kept
+d = R(0)
+g.frame(d)
+assert g.face(.9, 1) == [] and g.face(.9, 2) == [d] and g.frame(R(5)) == [] and [g.face(.05, 6 + i) for i in range(3)] and g.end() == []  # you, then her
+g.frame(R(0))
+assert g.face(.3, 1) == [] and g.end() == []  # never clearly you: nothing kept
+g.frame(R(0))
+assert g.face(.5, 1) == [] and g.end() == []  # one lucky match isn't enough
+old, new, late = R(0), R(100), R(200)
+assert [g.frame(x) for x in (old, new)] and g.face(.8, 120) == [] and g.face(.8, 130) == [new] and g.frame(late) == [] and g.end() == []
+# ^ frames over a minute from any match (her, back to the camera, just before or after you) never count
+assert app.Gate(enrolled=False).frame('x') == ['x']  # no face photo yet: anyone alone counts
 
 # Energy balance: 500 kcal/day deficit for 28 days predicts ~1.8 kg lost.
 eb = [{'kind': 'daily', 'ts': now - d * 86400, 'kcal': 2000, 'active': 600, 'basal': 1900} for d in range(1, 28)]
@@ -160,4 +177,11 @@ assert 4 < lost < 6.5 and rest['m']['bf'] < 25 and rest['m']['waist'] < 95, rest
 assert lift['m']['lean_kg'] > rest['m']['lean_kg'] and lift['m']['bf'] < rest['m']['bf'] and len(rest['path']) == 13
 crash = M.predict({'weight': 63, 'bf': 28}, 'female', 30, -800, 3, 1.8, 165)
 assert crash['warning'] and crash['m']['bf'] >= 11.5 and M.predict(start, 'male', 12, -500, 4, 2.0, 180)['warning'] is None
+# Tape calibrates the camera: a 84 cm tape waist two days after an 80 cm camera estimate -> x1.05 from then on.
+cal = M.calibration([(now - 2 * 86400, {'waist': 80, 'neck': 38})], [{'kind': 'daily', 'ts': now, 'tape_waist': 84}])
+assert cal == {'waist': 1.05}, cal
+# The stored silhouette is scale-free: same body twice the size gives the same outline.
+sil = app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0)
+big = app.silhouette(cv2.resize(img, None, fx=2, fy=2) / 255.0, pts * 2, world, pts[23:25].mean(0) * 2, 1400.0)
+assert len(sil['c']) == 160 and abs(np.array(sil['c']).min(0) - np.array(big['c']).min(0)).max() < .01
 print('sync ok')
