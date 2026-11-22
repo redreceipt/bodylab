@@ -11,17 +11,17 @@ The goal: an avatar that looks almost exactly like you, from scanning you barely
 
 ## Next on an M4 Mac (no NVIDIA needed)
 
-1. **Mirror how you're standing, live (started).** While a camera sees you, your 3D landmarks stream to the app and each limb, the spine and the head swing to match, on your fitted skeleton. Next: forearm twist and hands (MediaPipe Hands), fusing both cameras' landmarks into one 3D pose, and smoothing tuned on real motion.
-2. **Sharpen the body-shape fit (started).** Anny is fitted to all outlines now (split-half repeatability ±1–1.5 cm). Next: correct MediaPipe's mask spilling past the body (the fit's volume runs ~10 % high without a weigh-in), tape-measure limbs on the mesh, fit across several days. Fingers curl for a relaxed hand. The same fit on close nude frames is the only realistic route to camera-measured genital size.
-3. **Photoreal skin and hair.** One 60-second iPhone walk-around video, then Gaussian splats trained locally on Apple Silicon (several Metal trainers exist: splatx-metal, mpsplat, MLX3D), then baked onto your fitted mesh as a full-body texture. Hair could render as splats (three.js has a `GaussianSplat` renderer; [Spark](https://sparkjs.dev) is the full-featured option).
-4. **Your face shape.** The iPhone's TrueDepth camera (ARKit face mesh) gives true face geometry; the head morphs to match. The 478 3D landmarks from your photo are the fallback.
-5. **Anatomy.** MakeHuman has no female genital geometry, and its male helper is low-poly (smoothed now). Both need sculpted, permissively licensed assets, for example sculpted in Blender with MPFB2 and released CC0, then fitted like other MakeHuman proxies.
-6. **Predictions that learn.** Compare every past prediction with what happened, then correct the model's maintenance, lean-gain rate and fat-distribution terms per person. Show the error bars.
-7. **Scanning you don't have to watch.** Spoken or haptic cues (Mac `say`, a speaker on the Pi, or iPhone haptics) when a new angle is captured, so the screen is never needed.
+1. **Sharpen the body-shape fit (started).** Anny is fitted to all outlines now (split-half repeatability ±1–1.5 cm). Next: correct MediaPipe's mask spilling past the body (the fit's volume runs ~10 % high without a weigh-in), tape-measure limbs on the mesh, fit across several days. Fingers curl for a relaxed hand. The same fit on close nude frames is the only realistic route to camera-measured genital size.
+2. **Photoreal skin and hair.** One 60-second iPhone walk-around video, then Gaussian splats trained locally on Apple Silicon (several Metal trainers exist: splatx-metal, mpsplat, MLX3D), then baked onto your fitted mesh as a full-body texture. Hair could render as splats (three.js has a `GaussianSplat` renderer; [Spark](https://sparkjs.dev) is the full-featured option).
+3. **Your face shape.** The iPhone's TrueDepth camera (ARKit face mesh) gives true face geometry; the head morphs to match. The 478 3D landmarks from your photo are the fallback.
+4. **Anatomy.** MakeHuman has no female genital geometry, and its male helper is low-poly (smoothed now). Both need sculpted, permissively licensed assets, for example sculpted in Blender with MPFB2 and released CC0, then fitted like other MakeHuman proxies.
+5. **Predictions that learn.** Compare every past prediction with what happened, then correct the model's maintenance, lean-gain rate and fat-distribution terms per person. Show the error bars.
+6. **Scanning you don't have to watch.** Spoken or haptic cues (Mac `say`, a speaker on the Pi, or iPhone haptics) when a new angle is captured, so the screen is never needed.
 
 ## With an NVIDIA GPU later
 
 - Per-frame human mesh recovery models (e.g. Meta's [SAM 3D Body](https://github.com/facebookresearch/sam-3d-body) with MHR) as a strong starting point for shape and pose. Check the SAM license first.
+- Live pose mirroring (tried with MediaPipe landmarks: too jittery and hunched to look natural; worth revisiting with a 3D human-mesh-recovery model).
 - Animatable photoreal avatars (e.g. [LHM](https://github.com/aigc3d/LHM)-style single-image models, Gaussian avatars) that move like you.
 - Clothed-body reconstruction, so loose clothing no longer has to be excluded.
 

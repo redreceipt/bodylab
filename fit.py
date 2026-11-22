@@ -83,7 +83,8 @@ def body_vertices():
     return np.unique(np.frombuffer((ROOT / 'static/assets/body.bin').read_bytes(), {'uint16': np.uint16, 'uint32': np.uint32}[t], n, off))
 
 
-def fit(frames, prof, iters=(150, 350), plot=None, log=print):
+def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
+    """... want: indices of frames to return the posed body for, in each one's camera frame (for baking skin)."""
     import anny
     import roma
     import torch
@@ -242,8 +243,13 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
         if plot:
             draw(plot, frames, C.cpu().numpy(), out['vertices'], model, verts, project, out)
         fixed = shape(1)  # computed without gradients: the stance only moves bones
-        skeleton = (heads, out['rest_bone_tails'][0].cpu().numpy(), np.array(model.bone_parents))
-    return res, rest, stance(model, fixed, kreg, arm_directions(frames)), skeleton
+        R, kk, views = roma.rotvec_to_rotmat(turn) @ to_cam, kreg(out), {}
+        for j in want:  # every vertex as the fit posed and projected it: metres from the hip centre, z away from the camera
+            v, k3 = out['vertices'][j] @ R[j].T, kk[j] @ R[j].T
+            q = (v - k3[9:11].mean(0)) * torch.exp(cam[j, 0])
+            q[:, :2] += cam[j, 1:]
+            views[j] = q.cpu().numpy()
+    return res, rest, stance(model, fixed, kreg, arm_directions(frames)), views
 
 
 def arm_directions(frames):
@@ -431,30 +437,47 @@ def restance(db, day, frames, prof):
         lc[0, model.local_change_labels.index(k)] = v
     p = {k: torch.tensor([v]) for k, v in res['phenotypes'].items()} | {'gender': torch.tensor([1. if prof.get('sex') == 'female' else 0.])}
     G = stance(model, {'phenotype_kwargs': p, 'local_changes_kwargs': lc}, anny.KeypointsRegressor.coco(model, labels=list(KP)), arm_directions(frames))
-    out = model(pose_parameters=torch.eye(4)[None, None].repeat(1, model.bone_count, 1, 1), phenotype_kwargs=p, local_changes_kwargs=lc)
-    store(db, day, res, out['rest_vertices'][0].detach().numpy(), G,
-          skeleton=(out['rest_bone_heads'][0].detach().numpy(), out['rest_bone_tails'][0].detach().numpy(), np.array(model.bone_parents)))
+    rest = model(pose_parameters=torch.eye(4)[None, None].repeat(1, model.bone_count, 1, 1), phenotype_kwargs=p,
+                 local_changes_kwargs=lc)['rest_vertices'][0].detach().numpy()
+    store(db, day, res, rest, G)
     return f'{day}: stance updated'
 
 
-def store(db, day, res, rest, G, model_skin=None, skeleton=None):
+def bake_skin(db, prof, views):
+    """Bake your skin texture from the day's reference captures (bake.py) into skin.jpg beside the database."""
+    import cv2
+    import bake
+    H = prof['height_cm'] / 100
+    src, uv, tris = bake.assets()
+    vs = []
+    for ts, (path, cam3) in views.items():
+        if not path.exists():  # replaced by a better capture meanwhile
+            continue
+        rec, img = json.loads(path.read_text()), cv2.imread(str(path.with_suffix('.jpg')))
+        info = rec.get('ref')
+        if img is None or not info:  # older captures don't record where their crop sits
+            continue
+        px = (np.array(info['origin']) + cam3[:, :2] / H * info['H'] - info['box'][::-1]) * info['k']
+        vs.append({'img': img, 'px': px, 'cam': cam3, 'skin': bake.skin_mask(img), 'weight': info.get('score', 1)})
+    if not vs:
+        return
+    tex, cover = bake.bake(vs, src, uv, tris, base=cv2.imread(str(ROOT / f"static/assets/skin_{prof.get('sex', 'male')}.jpg")))
+    cv2.imwrite(str(Path(db).parent / 'skin.jpg'), tex, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    print(f'skin baked from {len(vs)} captures, {cover.mean() * 100:.0f} % of the texture seen')
+
+
+def store(db, day, res, rest, G, model_skin=None):
     """Save the fit: its parameters and measurements; the rest-pose mesh in the web template's frame (y up, front +z,
-    feet at 0, int16 mm); the stance's bone transforms in that frame (float32, 3×4 per bone); the skeleton for live
-    posing (bone heads, then tails, float32 cm; parents, int16). The skin weights the transforms apply with (8 bones
-    per vertex, uint8 index + weight) go once into skin.bin."""
+    feet at 0, int16 mm); the stance's bone transforms in that frame (float32, 3×4 per bone). The skin weights the
+    transforms apply with (8 bones per vertex, uint8 index + weight) go once into skin.bin."""
     import sqlite3 as sq
     F = assets()[0]
     zmin = rest[np.unique(F), 2].min()
     mesh = np.round(np.stack([rest[:, 0], rest[:, 2] - zmin, -rest[:, 1]], 1) * 1000).astype('<i2')
     C = np.array([[100., 0, 0, 0], [0, 0, 100, -100 * zmin], [0, -100, 0, 0], [0, 0, 0, 1]])  # Anny m -> template cm
     Gt = (C @ G @ np.linalg.inv(C))[:, :3].astype('<f4')
-    blob = mesh.tobytes() + Gt.tobytes()
-    if skeleton is not None:
-        heads, tails, parents = skeleton
-        cm = lambda p: (np.c_[p, np.ones(len(p))] @ C.T)[:, :3].astype('<f4').tobytes()  # noqa: E731
-        blob += cm(heads) + cm(tails) + parents.astype('<i2').tobytes()
     with sq.connect(db, timeout=30) as c:
-        c.execute('insert or replace into fits(day, ts, params, mesh) values (?, ?, ?, ?)', (day, time.time(), json.dumps(res), blob))
+        c.execute('insert or replace into fits(day, ts, params, mesh) values (?, ?, ?, ?)', (day, time.time(), json.dumps(res), mesh.tobytes() + Gt.tobytes()))
     skin = Path(db).parent / 'skin.bin'
     if model_skin is not None and not skin.exists():
         idx, w = model_skin
@@ -493,12 +516,16 @@ if __name__ == '__main__':
         raise SystemExit(restance(a.db, day, frames, prof))
     if len(frames) < MIN_FRAMES:
         raise SystemExit(f'need {MIN_FRAMES} frames')
-    res, rest, G, skeleton = fit(frames, prof, plot=a.plot)
+    refs = {json.loads(p.read_text())['ts']: p for p in (Path(a.db).parent / 'reference').glob(f'{day}_*.json')}
+    want = [j for j, f in enumerate(frames) if f['ts'] in refs]
+    res, rest, G, views = fit(frames, prof, plot=a.plot, want=want)
     res |= {'tape': tape(rest, res['neck_axis'], res['limb_axes']), 'frames': len(frames)}
     if a.save:
         np.save(a.save, rest)
     if a.store:
         import anny
         m = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default')
-        store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()), skeleton)
+        store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()))
+        if views:
+            bake_skin(a.db, prof, {frames[j]['ts']: (refs[frames[j]['ts']], v) for j, v in views.items()})
     print(json.dumps(res, indent=1))
