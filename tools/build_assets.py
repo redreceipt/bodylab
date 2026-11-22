@@ -2,7 +2,8 @@
 
 - base mesh + default young male/female shapes (base + 1/3 each ethnicity target, as MakeHuman does)
 - per-vertex rig region weights and joint positions (cm, feet at y=0, facing +z, character's left at +x)
-- skin textures, hair styles, eyebrows, eyelashes and eyes (proxies anchored to the base mesh, so they follow the fit)
+- skin textures, hair styles, eyebrows, eyelashes, eyes and workout clothes (proxies anchored to the base mesh,
+  so they follow the fit); breast and genital morphs; MakeHuman's genital helper mesh
 - face anchors: the template head is rendered front-on and run through MediaPipe's face landmarker, giving each
   of the 478 face landmarks a UV on the skin texture. A selfie's landmarks then map the photo onto the skin.
 
@@ -34,6 +35,15 @@ JOINTS = {'neck': 'joint-neck', 'head': 'joint-head', 'eye_l': 'joint-l-eye', 'e
 SKINS = {'male': 'skins/young_caucasian_male/young_lightskinned_male_diffuse.png',
          'female': 'skins/young_caucasian_female/young_lightskinned_female_diffuse.png'}
 HAIRS = ['short02', 'short04', 'bob02', 'long01', 'ponytail01', 'afro01', 'braid01']
+# Sparse morphs the browser blends from your measurements (deltas from the default young male/female).
+SHAPES = {'cup+': 'breast/female-young-averagemuscle-averageweight-maxcup-averagefirmness',
+          'cup-': 'breast/female-young-averagemuscle-averageweight-mincup-averagefirmness',
+          'firm+': 'breast/female-young-averagemuscle-averageweight-averagecup-maxfirmness',
+          'firm-': 'breast/female-young-averagemuscle-averageweight-averagecup-minfirmness',
+          'length+': 'genitals/penis-length-incr', 'length-': 'genitals/penis-length-decr',
+          'girth+': 'genitals/penis-circ-incr', 'girth-': 'genitals/penis-circ-decr',
+          'testicles+': 'genitals/penis-testicles-incr', 'testicles-': 'genitals/penis-testicles-decr'}
+SUIT = 'clothes/female_sportsuit01/female_sportsuit01'  # crop top + leggings, the leggings cut down to shorts
 EYE_COLORS = ['brown', 'brownlight', 'blue', 'deepblue', 'bluegreen', 'green', 'grey', 'lightblue', 'ice']
 
 
@@ -109,6 +119,20 @@ def parse_mhclo(text):
             refs.append([int(p[0])] * 3 + [1, 0, 0, 0, 0, 0] if len(p) == 1 else [int(x) for x in p[:3]] + [float(x) for x in p[3:]])
     r = np.array(refs, dtype=float)
     return r[:, :3].astype(int), r[:, 3:6], r[:, 6:9], [scale[k] for k in 'xyz']
+
+
+def delete_verts(text):
+    """Body vertices a garment hides ('a - b' ranges and single indices after `delete_verts`)."""
+    tokens, out = ' '.join(text.split('delete_verts', 1)[1].split('\n')).split(), set()
+    i = 0
+    while i < len(tokens):
+        if i + 2 < len(tokens) and tokens[i + 1] == '-':
+            out.update(range(int(tokens[i]), int(tokens[i + 2]) + 1))
+            i += 3
+        else:
+            out.add(int(tokens[i]))
+            i += 1
+    return out
 
 
 def rasterize(P, Z, tris, W, H):
@@ -198,6 +222,52 @@ def face_anchors(pos, src, uv, tris, eye_tris, eye_centers, skin, landmarker):
     return out
 
 
+def subdivide(faces, levels=2):
+    """Catmull-Clark subdivision as weights: each smooth vertex is a fixed mix of original vertices, so the browser
+    can recompute it after fitting. faces: lists of original vertex ids. -> (rows [{orig: weight}], quads)."""
+    rows = {v: {v: 1.0} for f in faces for v in f}
+    mix = lambda parts: {k: sum(w * r.get(k, 0) for w, r in parts) for k in {k for _, r in parts for k in r}}  # noqa: E731
+    for _ in range(levels):
+        edges, around = {}, {}
+        for fi, f in enumerate(faces):
+            for i, v in enumerate(f):
+                e = tuple(sorted((v, f[(i + 1) % len(f)])))
+                edges.setdefault(e, []).append(fi)
+                around.setdefault(v, set()).add(fi)
+        fp = {fi: mix([(1 / len(f), rows[v]) for v in f]) for fi, f in enumerate(faces)}
+        ep, boundary = {}, {}
+        for (a, b), fs in edges.items():
+            if len(fs) == 2:
+                ep[a, b] = mix([(.25, rows[a]), (.25, rows[b]), (.25, fp[fs[0]]), (.25, fp[fs[1]])])
+            else:
+                ep[a, b] = mix([(.5, rows[a]), (.5, rows[b])])
+                boundary.setdefault(a, []).append(b)
+                boundary.setdefault(b, []).append(a)
+        vp = {}
+        for v, fs in around.items():
+            if v in boundary:  # open edge (where it meets the body): cubic B-spline along the border
+                vp[v] = mix([(.75, rows[v])] + [(.125, rows[u]) for u in boundary[v][:2]])
+            else:  # (F + 2R + (n-3)P) / n: F = mean face point, R = mean edge midpoint, n = valence
+                nb = [e for e in edges if v in e]
+                n = len(nb)
+                vp[v] = mix([(1 / n / len(fs), fp[f]) for f in fs] + [(1 / n / n, rows[a]) for e in nb for a in e] + [((n - 3) / n, rows[v])])
+        ids, new_rows, quads = {}, [], []
+
+        def key(k, r):
+            if k not in ids:
+                ids[k] = len(new_rows)
+                new_rows.append(r)
+            return ids[k]
+        for fi, f in enumerate(faces):
+            c = key(('f', fi), fp[fi])
+            for i, v in enumerate(f):
+                prev, nxt_ = f[i - 1], f[(i + 1) % len(f)]
+                quads.append([key(('v', v), vp[v]), key(('e', *sorted((v, nxt_))), ep[tuple(sorted((v, nxt_)))]), c,
+                              key(('e', *sorted((prev, v))), ep[tuple(sorted((prev, v)))])])
+        rows, faces = dict(enumerate(new_rows)), quads
+    return [rows[i] for i in range(len(rows))], faces
+
+
 def gray_rgba(rgba, size):
     """Hair/brow textures -> neutral grey (mean ~0.55) + alpha, so the material colour sets the hair colour."""
     rgba = cv2.resize(rgba, (size, size), interpolation=cv2.INTER_AREA)
@@ -234,6 +304,7 @@ def main():
     arrays = {'weights': np.rint(weights * 255).astype('u1'), 'body.src': src.astype('<u2'),
               'body.uv': uv.astype('<f4'), 'body.tris': tris.astype('<u2')}
     meta = {'n': n, 'joints': {}, 'proxies': {}, 'license': 'Derived from MakeHuman hm08 assets (CC0 1.0)'}
+    tmpl = {}
     eye_tris = np.array([[f[0][0], f[k][0], f[k + 1][0]] for g in ('helper-l-eye', 'helper-r-eye') for f in faces[g] for k in range(1, len(f) - 1)])
     group_center = lambda v, g: v[sorted({i for f in faces[g] for i, _ in f})].mean(0)  # noqa: E731
     landmarker = vision.FaceLandmarker.create_from_options(vision.FaceLandmarkerOptions(
@@ -243,7 +314,7 @@ def main():
         v = base + sum(target(f'targets/macrodetails/{race}-{sex}-young.target') for race in ('african', 'asian', 'caucasian')) / 3
         v = (v - [0, group_center(v, 'joint-ground')[1], 0]) * 10  # decimetres -> cm, feet on the floor
         meta['joints'][sex] = {k: group_center(v, g).round(2).tolist() for k, g in JOINTS.items()}
-        arrays[sex] = v.astype('<f4')
+        arrays[sex], tmpl[sex] = v.astype('<f4'), v
         skin = image(SKINS[sex], cv2.IMREAD_COLOR)
         cv2.imwrite(str(OUT / f'skin_{sex}.jpg'), skin, [cv2.IMWRITE_JPEG_QUALITY, 85])
         eyes = np.array([meta['joints'][sex]['eye_l'], meta['joints'][sex]['eye_r']])
@@ -258,6 +329,81 @@ def main():
     while edges[oval[-1]] != oval[0]:
         oval.append(edges[oval[-1]])
     meta['face_oval'] = oval
+
+    # Breast and genital shape morphs, sparse, in cm.
+    for name, path in SHAPES.items():
+        t = target(f'targets/{path}.target') * 10
+        idx = np.flatnonzero(np.abs(t).sum(1))
+        arrays[f'morph.{name}.idx'], arrays[f'morph.{name}.d'] = idx.astype('<u2'), t[idx].astype('<f4')
+
+    # Genitals: MakeHuman's helper geometry, plus the template's size and what each full morph does to it,
+    # so a length or girth in cm maps to morph weights.
+    rows, quads = subdivide([[v for v, _ in f] for f in faces['helper-genital']])  # the helper is low-poly; smooth it
+    arrays |= {'genital.ptr': np.cumsum([0] + [len(r) for r in rows]).astype('<u4'),
+               'genital.idx': np.array([k for r in rows for k in r], '<u2'), 'genital.w': np.array([w for r in rows for w in r.values()], '<f4'),
+               'genital.tris': np.array([[q[0], q[k], q[k + 1]] for q in quads for k in (1, 2)], '<u2')}
+    shaft = np.flatnonzero(np.abs(target('targets/genitals/penis-circ-incr.target')).sum(1))
+    axis = (target('targets/genitals/penis-length-incr.target')[shaft]).sum(0)
+    axis /= np.linalg.norm(axis)
+
+    def size(v):
+        p = v[shaft]
+        t = p @ axis
+        length = t.max() - t.min()
+        mid = np.abs(t - (t.min() + t.max()) / 2) < .15 * length
+        q = p[mid] - np.outer(t[mid], axis)
+        return [round(float(length), 2), round(float(2 * np.pi * np.linalg.norm(q - q.mean(0), axis=1).mean()), 2)]
+    vm = tmpl['male']
+    meta['genital'] = {'base': size(vm)} | {k: size(vm + 10 * target(f'targets/{SHAPES[k]}.target')) for k in ('length+', 'length-', 'girth+', 'girth-')}
+    print('genital template size (length, girth cm):', meta['genital'])
+
+    # Shorts and sports top: the sportsuit's leggings cut at mid-thigh, and its crop top. Each also lists
+    # the body skin it covers, hidden while it's worn so skin can't poke through.
+    refs, w, d, scale = parse_mhclo(read(SUIT + '.mhclo').decode())
+    sv, suv, sfaces = parse_obj(read(SUIT + '.obj').decode())
+    vf, Jf = tmpl['female'], meta['joints']['female']
+    gp = (w[:, :, None] * vf[refs]).sum(1)  # garment vertices on the template (offsets don't matter for cutting)
+    sf = [f for g in sfaces.values() for f in g]
+    parent = list(range(len(sv)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for f in sf:
+        for v, _ in f[1:]:
+            parent[root(v)] = root(f[0][0])
+    pieces = {}
+    for f in sf:
+        pieces.setdefault(root(f[0][0]), []).append(f)
+    top, bottom = sorted(pieces.values(), key=lambda fs: -gp[[v for f in fs for v, _ in f], 1].mean())[:2]
+    def along(a, b):  # position of each garment vertex along its own side's limb (0 at joint a, 1 at b)
+        A_, B_ = np.where(gp[:, :1] > 0, Jf[f'{a}_l'], Jf[f'{a}_r']), np.where(gp[:, :1] > 0, Jf[f'{b}_l'], Jf[f'{b}_r'])
+        return ((gp - A_) * (B_ - A_)).sum(1) / ((B_ - A_) ** 2).sum(1)
+    # Cut across each limb, not horizontally, so the hems follow the garment's own edge loops (clean, not ragged).
+    leg = along('hip', 'knee')
+
+    def gap(t, piece, lo, hi):  # the widest gap between edge loops in [lo, hi]: a cut there crosses no faces raggedly
+        vals = np.unique(np.round(t[[v for f in piece for v, _ in f]], 3))
+        vals = vals[(vals > lo) & (vals < hi)]
+        i = np.argmax(np.diff(vals))
+        return (vals[i] + vals[i + 1]) / 2
+    leg_cut = gap(leg, bottom, .35, .55)
+    # The top keeps its own cap sleeves: its sleeve seams don't follow one edge loop, so cutting them looks torn.
+    garments = {'shorts': [f for f in bottom if all(leg[v] < leg_cut for v, _ in f)], 'bra': top}
+    hidden, body_arm = delete_verts(read(SUIT + '.mhclo').decode()), weights[:, 2:4].sum(1)
+    for name, fs in garments.items():
+        psrc, ppuv, ptris = split_uv(fs, suv)
+        ys = gp[[v for f in fs for v, _ in f], 1]
+        hide = [i for i in hidden if ys.min() + 1.5 < vf[i, 1] < ys.max() - 1.5 and body_arm[i] < .5]  # inside the edges: no gaps
+        arrays |= {f'{name}.refs': refs.astype('<u2'), f'{name}.w': w.astype('<f4'), f'{name}.d': d.astype('<f4'),
+                   f'{name}.src': psrc.astype('<u2'), f'{name}.uv': ppuv.astype('<f4'), f'{name}.tris': ptris.astype('<u2'),
+                   f'{name}.hide': np.array(sorted(hide), '<u2')}
+        meta['proxies'][name] = {'kind': 'garment', 'scale': scale}
+    for tex, out in (('diffuse', 'sportsuit.jpg'), ('normal', 'sportsuit_normal.jpg')):
+        cv2.imwrite(str(OUT / out), cv2.resize(image(f'{SUIT}_{tex}.png', cv2.IMREAD_COLOR), (1024, 1024), interpolation=cv2.INTER_AREA),
+                    [cv2.IMWRITE_JPEG_QUALITY, 88])
 
     proxies = {f'hair/{h}/{h}': 'hair' for h in HAIRS} | {'eyebrows/eyebrow001/eyebrow001': 'eyebrows',
                                                           'eyelashes/eyelashes01/eyelashes01': 'eyelashes', 'eyes/high-poly/high-poly': 'eyes'}

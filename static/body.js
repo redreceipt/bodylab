@@ -68,6 +68,7 @@ function template(pos, J, sex) {
     shoulders: slab(sh, () => true),
     chest: slab(yAt(0.3)),
     waist: sex === 'female' ? pick(range(yAt(0.5), yAt(0.8), 7), (a, b) => a < b) : slab(yAt(0.73)),
+    underbust: slab(yAt(0.42)),
     hips: pick(range(yAt(0.95), yAt(1.1), 6), (a, b) => a > b),
   };
   for (const s of ['l', 'r']) {
@@ -75,13 +76,9 @@ function template(pos, J, sex) {
     t[`thigh_${s}`] = limbWidth(J[`hip_${s}`], J[`knee_${s}`], [0.4], REG[`leg_${s}`]);
     t[`calf_${s}`] = limbWidth(J[`knee_${s}`], J[`ankle_${s}`], range(0.2, 0.45, 6), REG[`leg_${s}`]);
   }
-  // Per-vertex labels for picking/highlighting, and workout clothes (shorts; sports top for women).
+  // Per-vertex labels for picking/highlighting.
   t.parts = new Array(n);
-  t.cloth = new Float32Array(n); // 0 = skin, 1 = fabric, soft edges
   t.scalp = new Uint8Array(n); // head skin a haircut covers: above the forehead, and the back of the head to the nape
-  const smooth = (a, b, x) => { const k = clamp((x - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
-  const band = (y, lo, hi) => smooth(lo - 1.5, lo + 1.5, y) * (1 - smooth(hi - 1.5, hi + 1.5, y));
-  const kneeY = (J.knee_l[1] + J.knee_r[1]) / 2;
   for (let i = 0; i < n; i++) {
     let r = 0;
     for (let k = 1; k < 6; k++) if (reg[i * 6 + k] > reg[i * 6 + r]) r = k;
@@ -91,21 +88,50 @@ function template(pos, J, sex) {
       : r <= REG.arm_r ? `arm_${side}` : (y > J[`knee_${side}`][1] ? `thigh_${side}` : `calf_${side}`);
     const eyeY = J.eye_l[1];
     t.scalp[i] = r === REG.head && (y > eyeY + 0.045 * H || (pos[i * 3 + 2] < J.head[2] - 3 && y > eyeY - 0.035 * H)) ? 1 : 0;
-    const top = sex === 'female' ? band(y, sh - 0.42 * len, sh - 0.1 * len) : 0;
-    t.cloth[i] = Math.max(band(y, hip - 0.38 * (hip - kneeY), sh - 0.84 * len), top) * clamp(1 - w(i, REG.arm_l) - w(i, REG.arm_r), 0, 1);
   }
   return t;
 }
 
-// dims: scan sizes in cm (from /api/state). Returns fitted positions of every base-mesh vertex for height H.
-export function fitBody(dims, H, sex) {
+// Breast and genital morph weights from sizes: cup = bust minus underbust (cm), penis length/girth (cm),
+// firmness and testicles -1..1. Lengths are converted to the template's scale first.
+function morphWeights(sex, shape, s) {
+  const w = {}, set = (k, v) => { if (v > 0) w[`${k}+`] = Math.min(v, 1.5); else if (v < 0) w[`${k}-`] = Math.min(-v, 1.5); };
+  if (sex === 'female') {
+    // shortcut: MakeHuman's "average cup" taken as ~2.5 in of difference, min ~0 in, max ~6 in; refine against tape fits
+    if (shape.cup != null) { const inch = shape.cup / 2.54; set('cup', inch >= 2.5 ? (inch - 2.5) / 3.5 : (inch - 2.5) / 2.5); }
+    set('firm', shape.firmness ?? 0);
+  } else {
+    const g = T.meta.genital, toward = (v, base, up, down) => (v >= base ? (v - base) / (up - base) : (v - base) / (base - down));
+    if (shape.length) set('length', toward(shape.length / s, g.base[0], g['length+'][0], g['length-'][0]));
+    if (shape.girth) set('girth', toward(shape.girth / s, g.base[1], g['girth+'][1], g['girth-'][1]));
+    set('testicles', shape.testicles ?? 0);
+  }
+  return w;
+}
+
+// dims: scan sizes in cm (from /api/state); shape: see morphWeights. Returns fitted positions of every
+// base-mesh vertex for height H.
+export function fitBody(dims, H, sex, shape = {}) {
   const t = T[sex === 'female' ? 'female' : 'male'], d = dims || {}, s = H / t.H, n = T.n;
   const ratio = (scan, tmpl) => (scan ? clamp(scan / (tmpl * s), 0.6, 1.8) : 1);
-  // torso knots by f (0 = shoulders, 1 = hip joints): [f, x scale, z scale, z centre]
+  let pos = t.pos;
+  const morphs = Object.entries(morphWeights(sex, shape, s));
+  if (morphs.length) {
+    pos = Float32Array.from(t.pos);
+    for (const [name, wt] of morphs) {
+      const idx = T.arr(`morph.${name}.idx`), dd = T.arr(`morph.${name}.d`);
+      for (let j = 0; j < idx.length; j++) for (let k = 0; k < 3; k++) pos[idx[j] * 3 + k] += wt * dd[j * 3 + k];
+    }
+  }
+  // torso knots by f (0 = shoulders, 1 = hip joints): [f, x scale, z scale, z centre]. With breasts, the fit
+  // follows the ribcage under them (underbust) and the cup morph supplies the bust.
+  const chest = sex === 'female' && d.underbust_w
+    ? [t.underbust.f, ratio(d.underbust_w, t.underbust.w), ratio(d.underbust_d, t.underbust.d), t.underbust.cz]
+    : [0.3, ratio(d.chest_w, t.chest.w), ratio(d.chest_d, t.chest.d), t.chest.cz];
   const torso = [
     [t.neck.f, ratio(d.neck_w, t.neck.w), ratio(d.neck_d, t.neck.d), t.neck.cz],
-    [0, ratio(d.shoulders_w, t.shoulders.w), ratio(d.chest_d, t.chest.d), t.shoulders.cz],
-    [0.3, ratio(d.chest_w, t.chest.w), ratio(d.chest_d, t.chest.d), t.chest.cz],
+    [0, ratio(d.shoulders_w, t.shoulders.w), chest[2], t.shoulders.cz],
+    chest,
     [t.waist.f, ratio(d.waist_w, t.waist.w), ratio(d.waist_d, t.waist.d), t.waist.cz],
     [t.hips.f, ratio(d.hips_w, t.hips.w), ratio(d.hips_d, t.hips.d), t.hips.cz],
   ];
@@ -133,13 +159,13 @@ export function fitBody(dims, H, sex) {
 
   const out = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
-    const x = t.pos[i * 3] * s, y = t.pos[i * 3 + 1] * s, z = t.pos[i * 3 + 2] * s;
+    const x = pos[i * 3] * s, y = pos[i * 3 + 1] * s, z = pos[i * 3 + 2] * s;
     const wt = (r) => T.reg[i * 6 + r] / 255;
     let X = 0, Y = 0, Z = 0;
     const add = (wgt, px, py, pz) => { X += wgt * px; Y += wgt * py; Z += wgt * pz; };
     add(wt(REG.head), x, y, z);
     if (wt(REG.torso)) {
-      const [rx, rz, cz] = interp(torso, (t.sh - t.pos[i * 3 + 1]) / t.len);
+      const [rx, rz, cz] = interp(torso, (t.sh - pos[i * 3 + 1]) / t.len);
       add(wt(REG.torso), x * rx, y, cz * s + (z - cz * s) * rz);
     }
     for (const L of limbs) {
@@ -162,7 +188,7 @@ export function fitBody(dims, H, sex) {
     sum /= 255;
     out[i * 3] = X / sum; out[i * 3 + 1] = interp(remap, Y / sum)[0]; out[i * 3 + 2] = Z / sum;
   }
-  return { pos: out, parts: t.parts, cloth: t.cloth };
+  return { pos: out, parts: t.parts };
 }
 
 // MakeHuman proxy (hair, brows, lashes, eyes): each vertex = weighted 3 base vertices + offset scaled by body size.
@@ -195,6 +221,13 @@ export function mesh(pos, src, tris) {
     for (let k = 0; k < 3; k++) { P[r * 3 + k] = pos[i + k]; N[r * 3 + k] = normal[i + k] / l; }
   }
   return { position: P, normal: N };
+}
+
+// Smoothed genital mesh: each vertex is a fixed mix of helper vertices (Catmull-Clark weights from the build).
+export function genitalPositions(pos) {
+  const ptr = T.arr('genital.ptr'), idx = T.arr('genital.idx'), w = T.arr('genital.w'), out = new Float32Array((ptr.length - 1) * 3);
+  for (let r = 0; r < ptr.length - 1; r++) for (let j = ptr[r]; j < ptr[r + 1]; j++) for (let k = 0; k < 3; k++) out[r * 3 + k] += w[j] * pos[idx[j] * 3 + k];
+  return out;
 }
 
 export const assets = () => T;

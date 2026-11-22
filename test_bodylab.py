@@ -145,4 +145,10 @@ assert M.insights([], eb[:10], {}, now)['summary']['balance'] is None  # 9 logge
 # Weight change uses the trend, not the last noisy reading.
 wl = [{'kind': 'daily', 'ts': now - d * 86400, 'weight': 80 - (27 - d) * .05 + (1.5 if d == 0 else 0)} for d in range(27, -1, -3)]
 assert abs(M.insights([], wl, {}, now)['summary']['changes']['weight'] + 1.35) < .1  # true -1.35; last-minus-first says +0.15
+# Today's checklist: a weigh-in and a short food log show as done / incomplete.
+d = [{'kind': 'daily', 'ts': now - k * 86400, 'kcal': 2200, 'steps': 8000} for k in range(1, 8)]
+d += [{'kind': 'daily', 'ts': now, 'kcal': 600, 'weight': 80}, {'kind': 'measure', 'ts': now, 'penis_len_soft': 9.5}]
+day = M.insights([], d, {}, now)['days'][-1]
+assert day['weight'] and not day['food'] and not day['sleep'] and not day['scan'] and day['kcal'] == 600, day
+assert M.series('penis_len_soft', [], d) == [(now, 9.5)]
 print('sync ok')

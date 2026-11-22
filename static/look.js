@@ -180,7 +180,7 @@ export async function skinCanvas(sex, { face, photo, tone, hairColor }) {
     ctx.drawImage(sc, 0, 0);
     ctx.globalAlpha = 1;
   }
-  return c;
+  return { canvas: c, tone: target ?? base };
 }
 
 // Eye colour from the photo: the nearest MakeHuman iris. (Hair is analysed on the server.)

@@ -241,7 +241,7 @@ class Capture:
 
     def end_session(self):
         """A session = one person continuously in view. Identity and skin colour are per session."""
-        self.who, self.misses, self.skin, self.pending = None, 0, None, []
+        self.who, self.misses, self.skin, self.pending, self.match = None, 0, None, [], None
 
     def clear_today(self):
         self.want_clear = True  # applied on the processing thread
@@ -349,15 +349,16 @@ class Capture:
         emb = self.faces.embed(cv2.resize(crop, (320, 320), interpolation=cv2.INTER_CUBIC)) if crop.size else None
         if emb is None:
             return
-        if float(emb @ self.me) >= SAME_PERSON:
+        self.match = round(float(emb @ self.me), 2)
+        if self.match >= SAME_PERSON:
             self.who = 'me'
             for rec in self.pending:  # everything seen earlier this session was you too
                 self.keep(rec)
             self.pending = []
-        elif (misses := self.misses + 1) >= 8:
-            self.who, self.pending = 'other', []
-        else:
-            self.misses = misses
+        elif self.match < .2:  # clearly someone else; in-between scores (distance, dim light) don't count against you
+            self.misses += 1
+            if self.misses >= 8:
+                self.who, self.pending = 'other', []
 
     def keep(self, rec):
         if rec['ts'] - self.last_store < .5:
@@ -384,7 +385,7 @@ class Capture:
 
     def next_status(self, r, msg):
         today = getattr(self, 'today', {'frames': 0, 'angle': 0})
-        st = {'state': 'idle', 'frames': today['frames'], 'angle': round(today['angle'])}
+        st = {'state': 'idle', 'frames': today['frames'], 'angle': round(today['angle']), 'match': self.match}
         if not self.prof.get('height_cm'):
             return {**st, 'msg': 'Set your height in Profile to start'}
         if self.live and r is not None:
@@ -450,6 +451,9 @@ def post_profile(b):
         if not re.fullmatch(r'#[0-9a-fA-F]{6}', str(b['skin'])):
             raise ValueError('Skin tone must be a #rrggbb colour')
         prof['skin'] = b['skin']
+    for k in ('firmness', 'testicles'):  # -1..1 shape sliders
+        if k in b:
+            prof[k] = num(b[k], -1, 1, k)
     for k, pattern in (('hair', r'[a-z0-9]{1,20}'), ('hair_color', r'#[0-9a-fA-F]{6}'), ('eye_color', r'[a-z]{1,20}')):
         if k in b:
             if not re.fullmatch(pattern, str(b[k])):
@@ -483,8 +487,9 @@ def post_log(b):
     kind = b.get('kind')
     if kind == 'workout':
         data = workout_data(b)
-    elif kind == 'daily':
-        data = daily_data(b)
+    elif kind in ('daily', 'measure'):
+        data = daily_data(b) if kind == 'daily' else {k: num(b[k], lo, hi, k) for k, (lo, hi) in measure.MEASURE.items()
+                                                       if b.get(k) not in (None, '')}
         if not data:
             raise ValueError('Enter at least one value')
     else:

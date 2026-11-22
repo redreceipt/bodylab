@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
-import { fitBody, fitProxy, initBody, mesh } from './body.js';
+import { fitBody, fitProxy, genitalPositions, initBody, mesh } from './body.js';
 import { loadImage, photoColors, skinCanvas } from './look.js';
 import { renderSVG } from './vendor/uqr.mjs';
 
@@ -34,7 +34,13 @@ const HEALTH = {
   resp: ['Respiratory rate', '/min', 1], sleep: ['Sleep', 'h', 1], sleep_deep: ['Deep sleep', 'h', 1], sleep_rem: ['REM sleep', 'h', 1],
   balance: ['Energy balance', 'kcal', 0],
 };
+Object.assign(HEALTH, { underbust: ['Underbust', 'cm', 1], penis_len_soft: ['Length, resting', 'cm', 1], penis_girth_soft: ['Girth, resting', 'cm', 1],
+  penis_len_erect: ['Length, erect', 'cm', 1], penis_girth_erect: ['Girth, erect', 'cm', 1], tape_bust: ['Bust (tape)', 'cm', 1],
+  tape_underbust: ['Underbust (tape)', 'cm', 1] });
 for (const [k, [label, unit, dec]] of Object.entries(HEALTH)) META[k] ??= { label, unit, dec };
+META.genitals = { label: 'Genitals' };
+// US cup letter from bust minus underbust (one letter per inch).
+const cupLetter = (cm) => ['AA', 'A', 'B', 'C', 'D', 'DD', 'DDD/F', 'G', 'H'][Math.max(0, Math.min(8, Math.round(cm / 2.54)))];
 const GROUPS = [['Body', ['weight', 'scale_bf', 'scale_lean', 'tape_waist']], ['Fuel', ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'water', 'alcohol']],
   ['Activity', ['active', 'basal', 'steps', 'exercise']], ['Heart & recovery', ['rhr', 'hrv', 'vo2max', 'walk_hr', 'resp']], ['Sleep', ['sleep', 'sleep_deep', 'sleep_rem']]];
 function healthTable() {
@@ -149,6 +155,9 @@ const mats = {
   hair: strands(null, '#3b2a20'), brows: strands(texture('/static/assets/eyebrow001.webp'), '#3b2a20'),
   lashes: strands(texture('/static/assets/eyelashes01.webp'), '#ffffff'),
   eyes: new THREE.MeshPhysicalMaterial({ roughness: 0.05, clearcoat: 1 }),
+  garment: new THREE.MeshStandardMaterial({ map: texture('/static/assets/sportsuit.jpg'), normalMap: new THREE.TextureLoader().load('/static/assets/sportsuit_normal.jpg'),
+    roughness: 0.85, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+  genitals: new THREE.MeshPhysicalMaterial({ roughness: 0.6, sheen: 0.3, sheenRoughness: 0.7, sheenColor: '#ffcfb8' }),
   ghost: new THREE.MeshBasicMaterial({ color: '#3ef0ff', transparent: true, opacity: 0.22, depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 8 }),
 };
@@ -157,14 +166,16 @@ let look = { hair: 'short02', brows: true, clothes: true }, lookKey = '';
 async function updateLook() {
   const p = S.profile || {}, sex = p.sex === 'female' ? 'female' : 'male', face = S.face;
   look.clothes = p.clothes !== false;
-  $('#clothes').checked = look.clothes;
+  $('#nude').checked = !look.clothes;
   const key = JSON.stringify([sex, p.skin, p.hair, p.hair_color, p.eye_color, face?.ts]);
   if (key === lookKey) return;
   lookKey = key;
   const photo = face && await loadImage(`/api/face.jpg?${face.ts}`);
   const auto = { ...(face ? photoColors(photo, face) : {}), hair: face?.hair?.color };
   const hair = p.hair ?? face?.hair?.style ?? (sex === 'female' ? 'long01' : 'short02'), hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
-  const skin = new THREE.CanvasTexture(await skinCanvas(sex, { face, photo, tone: p.skin, hairColor: HAIRS[hair] ? hairColor : null }));
+  const { canvas: skinTex, tone } = await skinCanvas(sex, { face, photo, tone: p.skin, hairColor: HAIRS[hair] ? hairColor : null });
+  mats.genitals.color.set(`rgb(${tone.map(Math.round).join(',')})`).multiplyScalar(0.93); // a touch darker than the face's tone
+  const skin = new THREE.CanvasTexture(skinTex);
   Object.assign(skin, { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 });
   mats.skin.map?.dispose();
   mats.skin.map = skin;
@@ -177,24 +188,42 @@ async function updateLook() {
   rebuildAvatar(true);
 }
 
-const COLORS = { cloth: new THREE.Color('#262b36'), good: new THREE.Color('#4cff9a'), bad: new THREE.Color('#ff6b6b'), sel: new THREE.Color('#3ef0ff'), white: new THREE.Color('#ffffff') };
-function partColor(p, cloth) { // multiplies the skin texture: white = true skin colour
-  const c = cloth ? COLORS.cloth.clone() : COLORS.white.clone(), t = S && p !== 'overall' && tone(p, S.insights.parts[p]?.change);
-  return t ? c.lerp(COLORS[t], 0.35) : c;
+const COLORS = { good: new THREE.Color('#4cff9a'), bad: new THREE.Color('#ff6b6b'), white: new THREE.Color('#ffffff') };
+function partColor(p) { // multiplies the skin texture: white = true skin colour
+  const t = S && p !== 'overall' && tone(p, S.insights.parts[p]?.change);
+  return t ? COLORS.white.clone().lerp(COLORS[t], 0.35) : COLORS.white;
+}
+
+// Breast / genital shape: your latest tape measurements, else the camera's bust and underbust.
+const latest = (k) => S.logs.findLast((l) => l[k] != null)?.[k];
+function shape(m) {
+  const p = S.profile || {}, bust = latest('tape_bust') ?? m.chest, under = latest('tape_underbust') ?? m.underbust;
+  return { length: latest('penis_len_soft'), girth: latest('penis_girth_soft'), testicles: p.testicles ?? 0,
+    firmness: p.firmness ?? 0, cup: bust && under ? bust - under : null };
+}
+// Body triangles under the worn garments are dropped so skin can't poke through.
+const dressed = {};
+function bodyTris(garments) {
+  if (!garments.length) return A.tris;
+  return (dressed[garments] ??= (() => {
+    const hide = new Set(garments.flatMap((g) => Array.from(A.arr(`${g}.hide`))));
+    return A.tris.filter((_, t) => { const b = t - (t % 3); return ![0, 1, 2].every((k) => hide.has(A.src[A.tris[b + k]])); });
+  })());
 }
 
 function buildAvatar(dims, sex, isGhost) {
   // Ghost = first scan as a translucent shell that loses depth ties, so it only shows where the body has shrunk.
   // Shrinking it 6 mm per side hides noise-level differences (and z-fighting).
   const d = isGhost ? Object.fromEntries(Object.entries(dims || {}).map(([k, v]) => [k, /_[wd]$/.test(k) ? v - 1.2 : v])) : dims;
-  const fit = fitBody(d, S.profile?.height_cm ?? 175, sex);
-  const body = geometry(fit.pos, A.src, A.uv, A.tris);
+  const garments = look.clothes && !isGhost ? (sex === 'female' ? ['shorts', 'bra'] : ['shorts']) : [];
+  const fit = fitBody(d, S.profile?.height_cm ?? 175, sex, shape(live?.m ?? S.scans[idx]?.m ?? {}));
+  const body = geometry(fit.pos, A.src, A.uv, bodyTris(garments));
   const group = new THREE.Group();
   if (isGhost) {
     group.add(new THREE.Mesh(body, mats.ghost));
   } else {
     body.setAttribute('color', new THREE.BufferAttribute(new Float32Array(A.src.length * 3), 3));
-    body.userData = { parts: fit.parts, cloth: fit.cloth };
+    body.userData = { parts: fit.parts };
     const skin = new THREE.Mesh(body, mats.skin), glow = (m) => {
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', body.attributes.position);
@@ -205,6 +234,16 @@ function buildAvatar(dims, sex, isGhost) {
     group.userData.glow = { selected: glow(mats.selected), hovered: glow(mats.hovered) };
     group.add(skin, group.userData.glow.selected, group.userData.glow.hovered, new THREE.Mesh(proxy('high-poly', fit.pos), mats.eyes), new THREE.Mesh(proxy('eyelashes01', fit.pos), mats.lashes));
     if (look.brows) group.add(new THREE.Mesh(proxy('eyebrow001', fit.pos), mats.brows));
+    for (const g of garments) group.add(Object.assign(new THREE.Mesh(proxy(g, fit.pos), mats.garment), { castShadow: true }));
+    if (!look.clothes && sex !== 'female') {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(genitalPositions(fit.pos), 3));
+      g.setIndex(new THREE.BufferAttribute(A.arr('genital.tris'), 1));
+      g.computeVertexNormals();
+      const genitals = new THREE.Mesh(g, mats.genitals);
+      genitals.userData.part = 'genitals';
+      group.add(genitals);
+    }
     if (HAIRS[look.hair]) {
       const hair = new THREE.Mesh(proxy(look.hair, fit.pos), mats.hair);
       hair.castShadow = true;
@@ -218,10 +257,10 @@ function buildAvatar(dims, sex, isGhost) {
 function paint() {
   const g = avatar?.children[0].geometry, col = g?.attributes.color;
   if (!col) return;
-  const { parts, cloth } = g.userData, cache = {};
+  const { parts } = g.userData, cache = {};
   for (let r = 0; r < A.src.length; r++) {
-    const i = A.src[r], [a, b] = (cache[parts[i]] ??= [partColor(parts[i], false), partColor(parts[i], true)]), k = look.clothes ? cloth[i] : 0;
-    col.setXYZ(r, a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k, a.b + (b.b - a.b) * k);
+    const c = (cache[parts[A.src[r]]] ??= partColor(parts[A.src[r]]));
+    col.setXYZ(r, c.r, c.g, c.b);
   }
   col.needsUpdate = true;
   for (const [which, part] of [['selected', selectedPart], ['hovered', hovered !== selectedPart && hovered]]) {
@@ -236,7 +275,7 @@ function paint() {
 
 function rebuildAvatar(force = false) {
   const sex = S.profile?.sex, dims = live?.dims ?? S.scans[idx]?.dims ?? {};
-  const key = JSON.stringify([dims, sex, S.profile?.height_cm]);
+  const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(live?.m ?? S.scans[idx]?.m ?? {})]);
   if (!force && key === lastDimsKey) return paint();
   lastDimsKey = key;
   for (const g of [avatar, ghost]) if (g) { scene.remove(g); g.traverse((o) => o.geometry?.dispose()); }
@@ -295,7 +334,7 @@ function pick(e) {
   ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(ndc, camera);
   const hit = ray.intersectObjects(avatar.children, false)[0];
-  return hit ? hit.object.geometry.userData.parts?.[A.src[hit.face.a]] ?? 'overall' : null;
+  return hit ? hit.object.userData.part ?? hit.object.geometry.userData.parts?.[A.src[hit.face.a]] ?? 'overall' : null;
 }
 const canvas = renderer.domElement;
 let downAt = null;
@@ -334,9 +373,9 @@ function renderTimeline() {
 }
 $('#scrub').addEventListener('input', (e) => { idx = +e.target.value; renderAll(); });
 $('#ghost').addEventListener('change', () => rebuildAvatar(true));
-$('#clothes').addEventListener('change', async (e) => {
-  look.clothes = e.target.checked;
-  paint();
+$('#nude').addEventListener('change', async (e) => {
+  look.clothes = !e.target.checked;
+  rebuildAvatar(true);
   await api('POST', '/api/profile', { clothes: look.clothes });
 });
 $('#stats').addEventListener('click', (e) => { const b = e.target.closest('[data-part]'); if (b) open({ part: b.dataset.part }); });
@@ -371,6 +410,12 @@ function metricBlock(k) {
     ${spark(k)}${goalBlock(k)}</div>`;
 }
 function partPanel(k) {
+  if (k === 'genitals') {
+    return `<h2>Genitals</h2>${['penis_len_soft', 'penis_girth_soft', 'penis_len_erect', 'penis_girth_erect'].map(metricBlock).join('')}
+      <p class="muted">Tracked from your tape measurements (Log inputs → Body measurements); the camera can't measure these reliably.
+      The 3D body shows the resting size. Length: bone-pressed, from the pubic bone along the top to the tip. Girth: around the middle of the shaft.
+      Measure at the same time of day and room temperature for clean trends.</p>`;
+  }
   if (k === 'overall') {
     const m = cur();
     return `<h2>Overall</h2>${['bf', 'weight', 'lean_kg'].map(metricBlock).join('')}
@@ -380,7 +425,12 @@ function partPanel(k) {
   }
   const p = S.insights.parts[k] || {}, cal = S.profile?.calib?.[k], dims = (live?.dims ?? S.scans[idx]?.dims) || {};
   const torso = ['neck', 'chest', 'waist', 'hips'].includes(k) && dims[`${k}_w`] ? `<p class="muted">Measured width ${fmt('neck', dims[`${k}_w`])}, depth ${fmt('neck', dims[`${k}_d`])} ${S.scans[idx]?.side && !live ? '(side view)' : '(estimated — turn sideways during a scan to measure it)'}.</p>` : '';
-  return `${metricBlock(k)}${torso}
+  const breasts = k === 'chest' && S.profile?.sex === 'female' ? (() => {
+    const m = cur(), bust = latest('tape_bust') ?? m.chest, under = latest('tape_underbust') ?? m.underbust;
+    return `${metricBlock('underbust')}<p>${bust && under ? `Cup size about <b>${cupLetter(bust - under)}</b> (bust ${fmt('chest', bust)}, underbust ${fmt('chest', under)}${latest('tape_bust') ? ', from your tape' : ', from the camera'}).` : 'Cup size appears once bust and underbust are measured.'}
+      The 3D breasts are shaped from this; firmness is under Profile → Look.</p>`;
+  })() : '';
+  return `${metricBlock(k)}${breasts}${torso}
     <h4>Training → result · last 28 days</h4>
     <p>${p.workouts ? `<b>${p.workouts}</b> workouts targeted this area (load ${p.load}).` : 'No logged workouts targeted this area.'}
     ${p.change != null ? ` Measured change <b class="${tone(k, p.change)}">${fmt(k, p.change, true)}</b>.` : ''}</p>
@@ -390,7 +440,8 @@ function partPanel(k) {
 }
 const FOCUS = ['full body', 'chest', 'back', 'shoulders', 'arms', 'core', 'legs', 'glutes', 'cardio'];
 function logItem(l) {
-  const txt = l.kind === 'workout'
+  const txt = l.kind === 'measure' ? '📏 ' + Object.keys(l).filter((x) => META[x]).map((x) => `${META[x].label} ${fmt(x, l[x])}`).join(' · ')
+    : l.kind === 'workout'
     ? `🏋️ ${l.type} · ${l.minutes} min · RPE ${l.rpe}${l.focus?.length ? ' · ' + l.focus.join(', ') : ''}${l.notes ? ' · ' + l.notes : ''}`
     : '📋 ' + [l.weight && fmt('weight', l.weight), l.kcal && `${Math.round(l.kcal)} kcal`, l.protein && `${Math.round(l.protein)} g protein`,
       l.sleep && `${l.sleep.toFixed(1)} h sleep`, l.steps && `${Math.round(l.steps)} steps`, l.active && `${Math.round(l.active)} active kcal`].filter(Boolean).join(' · ');
@@ -412,6 +463,17 @@ function logPanel() {
       <label>Calories (kcal)<input type="number" name="kcal"></label>
       <label>Protein (g)<input type="number" name="protein"></label>
       <label>Sleep (h)<input type="number" step="any" name="sleep"></label></div><button>Save check-in</button></form>
+    <form id="fMeasure" class="stack"><h3>Body measurements (tape)</h3>
+      ${S.profile?.sex === 'female'
+    ? `<div class="grid2"><label>Bust (${uLabel('cm')})<input type="number" step="any" name="tape_bust"></label>
+         <label>Underbust (${uLabel('cm')})<input type="number" step="any" name="tape_underbust"></label></div>
+       <p class="muted">Bust: around the fullest part, tape level, no padding. Underbust: snug, right under the breasts.</p>`
+    : `<div class="grid2"><label>Length, resting (${uLabel('cm')})<input type="number" step="any" name="penis_len_soft"></label>
+         <label>Girth, resting (${uLabel('cm')})<input type="number" step="any" name="penis_girth_soft"></label>
+         <label>Length, erect (${uLabel('cm')})<input type="number" step="any" name="penis_len_erect"></label>
+         <label>Girth, erect (${uLabel('cm')})<input type="number" step="any" name="penis_girth_erect"></label></div>
+       <p class="muted">Men's health tracking (fill in any). Length: bone-pressed, pubic bone to tip along the top. Girth: around mid-shaft. Same time of day each time.</p>`}
+      <button>Save measurements</button></form>
     <h3>Recent</h3><ul class="list">${S.logs.slice(-15).reverse().map(logItem).join('') || '<li class="muted">Nothing logged yet</li>'}</ul>
     <h3>Scans</h3>${S.hidden_scans ? `<p class="muted">${S.hidden_scans} scan${S.hidden_scans > 1 ? 's' : ''} hidden: the proportions weren't human (a misread pose).</p>` : ''}<ul class="list">${S.scans.slice(-10).reverse().map((s) => `<li><span>${new Date(s.ts * 1000).toLocaleString()}</span> · body fat ${fmt('bf', s.m.bf)}${s.side ? ' · front+side' : ''} <button class="link" data-delscan="${s.id}">delete</button></li>`).join('') || '<li class="muted">No scans yet</li>'}</ul>`;
 }
@@ -487,6 +549,8 @@ function profilePanel() {
       <label>Hair colour<input type="color" name="hair_color" value="${esc(p.hair_color ?? look.auto?.hair ?? '#3b2a20')}"></label>
       <label>Eyes<select name="eye_color">${opt('auto', S.face ? 'From photo' : 'Brown', !p.eye_color || p.eye_color === 'auto')}${EYES.map((e) => opt(e, e, p.eye_color === e)).join('')}</select></label>
       <label>Skin tone${S.face ? ' (from photo)' : ''}<input type="color" name="skin" value="${esc(p.skin ?? '#c99478')}" ${S.face ? 'disabled' : ''}></label>
+      ${p.sex === 'female' ? `<label>Breast firmness<input type="range" name="firmness" min="-1" max="1" step="0.1" value="${p.firmness ?? 0}"></label>`
+    : `<label>Testicle size<input type="range" name="testicles" min="-1" max="1" step="0.1" value="${p.testicles ?? 0}"></label>`}
     </div><button>Save look</button></form>
     ${first ? '' : `<h3>iPhone · Apple Health</h3>${pairBlock()}`}
     <h3>Scanning tips</h3><ul class="tips"><li>Camera ~chest height, 2.5–3.5 m away, whole body in frame.</li>
@@ -533,6 +597,7 @@ $('#panel').addEventListener('submit', async (e) => {
     else if (f.id === 'fDaily') await api('POST', '/api/logs', { kind: 'daily', ...o, weight: o.weight && fromUnit(+o.weight, 'kg') });
     else if (f.id === 'fProfile') await api('POST', '/api/profile', { ...o, height_cm: o.units === 'imperial' ? o.height * 2.54 : +o.height });
     else if (f.id === 'fLook') await api('POST', '/api/profile', o);
+    else if (f.id === 'fMeasure') await api('POST', '/api/logs', { kind: 'measure', ...Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v === '' ? '' : fromUnit(+v, 'cm')])) });
     else if (f.id === 'fScan') await api('POST', '/api/profile', { bare_only: fd.has('bare_only'), preview: o.preview });
     else if (f.id === 'fGoal' || f.dataset.goal) {
       const k = f.dataset.goal || o.metric;

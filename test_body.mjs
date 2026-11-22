@@ -5,7 +5,8 @@ import { fitBody, fitProxy, initBody } from './static/body.js';
 
 const file = (f) => readFileSync(new URL(`./static/assets/${f}`, import.meta.url));
 const bin = file('body.bin');
-const { male: t } = initBody(JSON.parse(file('body.json')), bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.length));
+const A = initBody(JSON.parse(file('body.json')), bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.length));
+const t = A.male;
 
 // x-extent of vertices whose part passes `use`, within ±1.2 cm of height y
 function width(fit, y, use) {
@@ -42,4 +43,20 @@ const centreY = (p) => { let y = 0; for (let i = 1; i < p.length; i += 3) y += p
 const hair = centreY(fitProxy('short02', same.pos));
 assert.ok(hair > t.J.eye_l[1], 'hair sits above the eyes');
 near(centreY(fitProxy('short02', tall.pos)), hair * 1.1, 0.01);
+// Genitals come out at the measured size (absolute cm), whatever the body's height.
+const shaft = A.arr('morph.girth+.idx'), grow = A.arr('morph.length+.d'), ax = [0, 0, 0];
+const at = Object.fromEntries(Array.from(A.arr('morph.length+.idx'), (v, j) => [v, j]));
+for (const v of shaft) if (at[v] != null) for (let k = 0; k < 3; k++) ax[k] += grow[at[v] * 3 + k];
+const al = Math.hypot(...ax);
+function penis(pos) { // length along the shaft axis, girth around its middle (as the build measures the template)
+  const p = Array.from(shaft, (v) => [pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]]), t = p.map((q) => (q[0] * ax[0] + q[1] * ax[1] + q[2] * ax[2]) / al);
+  const lo = Math.min(...t), hi = Math.max(...t), mid = p.filter((_, i) => Math.abs(t[i] - (lo + hi) / 2) < 0.15 * (hi - lo));
+  const ring = mid.map((q, i) => q.map((c, k) => c - t[p.indexOf(q)] * ax[k] / al)), c = [0, 1, 2].map((k) => ring.reduce((a, q) => a + q[k], 0) / ring.length);
+  return [hi - lo, 2 * Math.PI * ring.reduce((a, q) => a + Math.hypot(q[0] - c[0], q[1] - c[1], q[2] - c[2]), 0) / ring.length];
+}
+for (const H of [t.H, t.H * 1.1]) {
+  const [len, girth] = penis(fitBody({}, H, 'male', { length: 13, girth: 11 }).pos);
+  near(len, 13, 0.05);
+  near(girth, 11, 0.07);
+}
 console.log('body ok');

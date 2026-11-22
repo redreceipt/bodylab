@@ -19,7 +19,10 @@ PLAUSIBLE = {'neck_w': (.04, .1), 'shoulders_w': (.17, .36), 'chest_w': (.12, .3
              'neck_d': (.04, .1), 'chest_d': (.08, .25), 'waist_d': (.07, .28), 'hips_d': (.08, .26),
              'arm_l_w': (.035, .1), 'arm_r_w': (.035, .1), 'thigh_l_w': (.06, .16), 'thigh_r_w': (.06, .16),
              'calf_l_w': (.045, .11), 'calf_r_w': (.045, .11), 'lv_shoulder': (.75, .87), 'lv_hip': (.43, .58), 'lv_knee': (.22, .33)}
-SEEN = {'neck': (.035, .11), 'chest': (.08, .31), 'waist': (.07, .33), 'hips': (.08, .33)}  # widths a frame may show, any angle
+SEEN = {'neck': (.035, .11), 'chest': (.08, .31), 'underbust': (.07, .3), 'waist': (.07, .33), 'hips': (.08, .33)}  # any angle
+# Tape measurements you enter (cm): male health (resting and erect, bone-pressed length; mid-shaft girth) and bust.
+MEASURE = {'penis_len_soft': (2, 30), 'penis_girth_soft': (3, 25), 'penis_len_erect': (3, 35), 'penis_girth_erect': (4, 30),
+           'tape_bust': (50, 200), 'tape_underbust': (50, 180)}
 
 
 def implausible(raw):
@@ -29,10 +32,10 @@ def implausible(raw):
         bad.append('hips_w')
     return list(dict.fromkeys(bad)) or None
 
-TORSO = {'neck': 1.0, 'chest': .72, 'waist': .78, 'hips': .75}  # typical depth/width, used until a side view exists
+TORSO = {'neck': 1.0, 'chest': .72, 'underbust': .72, 'waist': .78, 'hips': .75}  # typical depth/width until turned views exist
 LIMBS = ['arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'calf_l', 'calf_r']
 CALIBRATABLE = [*TORSO, 'shoulders', *LIMBS]
-METRICS = ['bf', 'weight', 'lean_kg', 'fat_kg', 'ffmi', 'whtr', 'whr', *CALIBRATABLE]
+METRICS = ['bf', 'weight', 'lean_kg', 'fat_kg', 'ffmi', 'whtr', 'whr', *CALIBRATABLE, *MEASURE]
 # Workout focus -> body parts it trains (cardio only counts toward overall load).
 FOCUS = {'full body': CALIBRATABLE, 'chest': ['chest'], 'back': ['chest', 'shoulders'], 'shoulders': ['shoulders'],
          'arms': ['arm_l', 'arm_r'], 'core': ['waist'], 'legs': ['thigh_l', 'thigh_r', 'calf_l', 'calf_r'],
@@ -126,6 +129,8 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
     at = lambda f: sh + axis * f  # noqa: E731
     p_neck = slice_('neck', [sh + (head - sh) * t for t in np.linspace(.2, .55, 8)], cap=.5 * torso, bare=False)
     p_chest = slice_('chest', [at(.30)], bare=not female)  # a sports bra is fine
+    if female:  # under the breasts: with the bust, gives cup size; and it's the ribcage the avatar fits to
+        slice_('underbust', [at(.42)], bare=False)
     p_waist = slice_('waist', [at(f) for f in (np.linspace(.5, .8, 7) if female else [.73])])  # Navy: men at the navel
     p_hips = slice_('hips', [at(f) for f in np.linspace(.95, 1.15, 6)], pick=max, bare=False)  # underwear is fine
 
@@ -292,8 +297,8 @@ def nearest(points, ts, max_days=7):
 
 
 def series(metric, scans, logs):
-    if metric == 'weight':
-        return [(l['ts'], l['weight']) for l in logs if l.get('weight')]
+    if metric == 'weight' or metric in MEASURE:
+        return [(l['ts'], l[metric]) for l in logs if l.get(metric)]
     return [(s['ts'], s['m'][metric]) for s in scans if metric in s['m']]
 
 
@@ -430,4 +435,16 @@ def insights(scans, logs, goals, now=None):
     recent_scans = sum(1 for s in scans if s['ts'] >= since)
     if recent_scans < 4:
         gaps.append(f"{recent_scans} body scan{'s' * (recent_scans != 1)} in 28 days — walk past the camera a few times a week.")
-    return {'weeks': weeks, 'summary': summary, 'parts': parts, 'goals': goal_out, 'notes': notes, 'health': health, 'gaps': gaps}
+    # Each day's inputs, so a missing one shows on the day it can still be fixed.
+    kcals = [d['kcal'] for d in raw_daily if 'kcal' in d and date.fromtimestamp(d['ts']) != today]
+    usual = statistics.median(kcals) if len(kcals) >= 5 else None
+
+    def checks(d0):
+        rec = {k: v for r in raw_daily if date.fromtimestamp(r['ts']) == d0 for k, v in r.items()}
+        scan = next((s for s in scans if date.fromtimestamp(s['ts']) == d0), None)
+        return {'date': d0.isoformat(), 'weight': 'weight' in rec, 'sleep': 'sleep' in rec, 'activity': 'steps' in rec or 'active' in rec,
+                'food': 'kcal' in rec and (usual is None or rec['kcal'] >= .6 * usual), 'kcal': rec.get('kcal'),
+                'scan': bool(scan and (scan.get('frames') or 0) >= 40), 'views': (scan or {}).get('frames') or 0}
+    days = [checks(today - timedelta(days=i)) for i in range(13, -1, -1)]
+    return {'weeks': weeks, 'summary': summary, 'parts': parts, 'goals': goal_out, 'notes': notes, 'health': health, 'gaps': gaps,
+            'days': days, 'usual_kcal': usual}
