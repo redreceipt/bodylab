@@ -1,0 +1,13 @@
+# User service: install to ~/.config/systemd/user/, then `systemctl --user enable --now bodylab-cam`
+# and `loginctl enable-linger` so it starts at boot without a login.
+[Unit]
+Description=BodyLab camera stream
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/bodylab-cam/camstream.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
