@@ -409,9 +409,10 @@ class Capture:
             skin = cat = None
             if r['obs'] and bare:  # clothes inflate every outline: the torso must be bare (underwear is fine)
                 skin, cat, box = bare_skin(self.clothes, f, mask, pts)
-                if skin['torso'] < .6:
+                if (skin['torso'] or 0) < .6:  # unseen isn't bare
                     msg, r['obs'] = 'Clothes on — BodyLab measures bare skin (underwear is fine)', {}
-                covered = (['hips', 'thigh_l_w', 'thigh_r_w'] if skin['thighs'] < .5 else []) + (['calf_l_w', 'calf_r_w'] if skin['shins'] < .5 else [])
+                clothed = lambda k: skin[k] is not None and skin[k] < .5  # noqa: E731  legs: only when clothes are clearly seen
+                covered = (['hips', 'thigh_l_w', 'thigh_r_w'] if clothed('thighs') else []) + (['calf_l_w', 'calf_r_w'] if clothed('shins') else [])
                 for k in covered:  # shorts or trousers: those widths would be the clothes'
                     r['obs'].pop(k, None)
             if r['obs']:  # a standing frame: its torso says where up is for this camera (if it's tilted)
@@ -577,13 +578,14 @@ def bare_skin(segmenter, f, mask, pts):
         cv2.fillConvexPoly(region, np.round(quad).astype(np.int32), 1)
         c = cat[region > 0]
         skin, cloth = (c == 2).sum(), (c == 4).sum()  # 2 = body skin, 4 = clothes
-        return round(float(skin / (skin + cloth)), 2) if skin + cloth > .3 * len(c) else 0.0  # unseen isn't bare
+        return round(float(skin / (skin + cloth)), 2) if skin + cloth > .3 * len(c) else None  # too little seen to say
     def limb(a, b, half):  # a band along a bone, `half` its length to each side
         d = p[b] - p[a]
         n = np.array([-d[1], d[0]]) * half
         return share([p[a] + n, p[b] + n, p[b] - n, p[a] - n])
-    return {'torso': share(p[[11, 12, 24, 23]]), 'thighs': min(limb(23, 25, .15), limb(24, 26, .15)),
-            'shins': min(limb(25, 27, .08), limb(26, 28, .08))}, cat, box
+    legs = lambda a: min((x for x in a if x is not None), default=None)  # noqa: E731
+    return {'torso': share(p[[11, 12, 24, 23]]), 'thighs': legs([limb(23, 25, .15), limb(24, 26, .15)]),
+            'shins': legs([limb(25, 27, .08), limb(26, 28, .08)])}, cat, box
 
 
 def reference_crop(f, mask):

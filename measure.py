@@ -92,7 +92,8 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
     perp = np.array([-down[1], down[0]])
     if abs(down[0]) > .25:
         return fail('Leaning — only upright frames are measured')
-    if bent(world):
+    knees = pts[[KN_L, KN_R]].mean(0)
+    if bent(world) or (vis[[KN_L, KN_R]].min() > .5 and np.dot(knees - hp, down) < .55 * torso):  # thighs not hanging down
         return fail('Sitting, crouching or bending — only standing frames are measured')
     quad = np.zeros(m.shape, np.uint8)
     cv2.fillConvexPoly(quad, np.round(pts[[SH_L, SH_R, HIP_R, HIP_L]]).astype(np.int32), 1)

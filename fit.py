@@ -118,7 +118,8 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
     # (4 % of height below the hip centre) to the knees, or to the feet.
     bd = torch.tensor(np.array([borders(np.array(f['sil']['c'])) for f in frames]), dtype=torch.float32, device=dev) * H
     knee = [float(np.mean(np.array(f['sil']['l'])[[25, 26], 1])) for f in frames]
-    band = torch.tensor([[.04, np.inf if f.get('skin', {}).get('shins', 1) < .5 else kn if f.get('skin', {}).get('thighs', 1) < .5 else .04]
+    covered = lambda f, k: (f.get('skin', {}).get(k) if f.get('skin', {}).get(k) is not None else 1) < .5  # noqa: E731
+    band = torch.tensor([[.04, np.inf if covered(f, 'shins') else kn if covered(f, 'thighs') else .04]
                          for f, kn in zip(frames, knee)], dtype=torch.float32, device=dev) * H
     in_view = lambda p: ((p[..., 0] > bd[:, None, 0] + .01) & (p[..., 0] < bd[:, None, 1] - .01)  # noqa: E731
                          & (p[..., 1] > bd[:, None, 2] + .01) & (p[..., 1] < bd[:, None, 3] - .01)

@@ -205,7 +205,7 @@ class Seg:
         return type('R', (), {'category_mask': type('M', (), {'numpy_view': lambda self: cat})()})()
 frame = np.zeros((1000, 800, 3), np.uint8)
 skin, cat, box = app.bare_skin(Seg(), frame, img / 255.0, pts)
-assert skin['thighs'] == skin['shins'] == 0 and 0 < skin['torso'] < 1 and cat.shape == (box[1] - box[0], box[3] - box[2]), (skin, cat.shape, box)
+assert skin['thighs'] == 0 and skin['shins'] in (0, None) and 0 < skin['torso'] < 1 and cat.shape == (box[1] - box[0], box[3] - box[2]), (skin, cat.shape, box)
 assert cv2.imdecode(np.frombuffer(app.reference_crop(frame, img / 255.0), np.uint8), cv2.IMREAD_COLOR) is not None
 bent_over = world.copy()
 bent_over[[11, 12], 2] = -.45  # shoulders forward over the hips
