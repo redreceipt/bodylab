@@ -224,12 +224,12 @@ function fitted(scan) {
   return fits[scan.day];
 }
 
-function buildAvatar(dims, sex, isGhost, m = {}, mesh = null) {
+function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
   // Ghost = first scan as a translucent shell that loses depth ties, so it only shows where the body has shrunk.
   // Shrinking it 6 mm per side hides noise-level differences (and z-fighting).
   const d = isGhost ? Object.fromEntries(Object.entries(dims || {}).map(([k, v]) => [k, /_[wd]$/.test(k) ? v - 1.2 : v])) : dims;
   const garments = look.clothes && !isGhost ? (sex === 'female' ? ['shorts', 'bra'] : ['shorts']) : [];
-  const fit = fitBody(d, S.profile?.height_cm ?? 175, sex, shape(m), mesh);
+  const fit = fitBody(d, S.profile?.height_cm ?? 175, sex, shape(m), mesh, ref);
   const body = geometry(fit.pos, A.src, A.uv, bodyTris(garments));
   const group = new THREE.Group();
   if (isGhost) {
@@ -292,15 +292,16 @@ function paint() {
 function rebuildAvatar(force = false) {
   const sex = S.profile?.sex, today = live?.dims ?? S.scans[idx]?.dims ?? {}, dims = predicted?.dims ?? today;
   const m = predicted?.m ?? live?.m ?? S.scans[idx]?.m ?? {};
-  const mesh = predicted ? null : fitted(live ? S.scans.at(-1) : S.scans[idx]); // shortcut: predictions still stretch the template
+  const mesh = fitted(predicted || live ? S.scans.at(-1) : S.scans[idx]); // predictions reshape today's fit
   const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(m), !!predicted, !!mesh]);
   if (!force && key === lastDimsKey) return paint();
   lastDimsKey = key;
   for (const g of [avatar, ghost]) if (g) { scene.remove(g); g.traverse((o) => o.geometry?.dispose()); }
-  avatar = buildAvatar(dims, sex, false, m, mesh);
+  avatar = buildAvatar(dims, sex, false, m, mesh, predicted ? today : dims);
   scene.add(avatar);
   const showGhost = predicted || ($('#ghost').checked && S.scans.length > 1 && (live || idx > 0));
-  ghost = showGhost ? buildAvatar(predicted ? today : S.scans[0].dims, sex, true, {}, predicted ? null : fitted(S.scans[0])) : null; // predicted: outline = today
+  ghost = showGhost ? (predicted ? buildAvatar(today, sex, true, {}, mesh, today) // predicted: outline = today
+    : buildAvatar(S.scans[0].dims, sex, true, {}, fitted(S.scans[0]), S.scans[0].dims)) : null;
   if (ghost) scene.add(ghost);
   paint();
 }

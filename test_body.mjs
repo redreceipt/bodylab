@@ -62,3 +62,9 @@ for (const H of [t.H, t.H * 1.1]) {
 }
 console.log('body ok');
 assert(genitalPositions(same.pos).every(Number.isFinite)); // nude mode builds
+// A fitted mesh is used as is, and a prediction reshapes it by predicted ÷ today.
+const base = fitBody({}, t.H, 'male').pos, today = { waist_w: 30, waist_d: 22 };
+const asIs = fitBody(today, t.H, 'male', {}, base, today).pos;
+assert(asIs.every((v, i) => Math.abs(v - base[i]) < 1e-3));
+const thinner = fitBody({ waist_w: 27, waist_d: 22 }, t.H, 'male', {}, base, today);
+near(width(thinner, t.waist.y, notArm), width({ pos: base, parts: same.parts }, t.waist.y, notArm) * 0.9, 0.03);

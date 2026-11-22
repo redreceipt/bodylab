@@ -89,6 +89,9 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
     import torch
     dev = 'mps' if torch.backends.mps.is_available() else 'cpu'
     model = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default').to(dtype=torch.float32, device=dev)
+    for f in Path(os.environ['ANNY_CACHE_DIR']).glob('*/*.safetensors'):
+        if f.name.startswith(('load_data_', 'build_model_data_')):
+            f.unlink()  # one-time build steps (~1 GB); only the compact model is read after that
     kreg = anny.KeypointsRegressor.coco(model, labels=list(KP))
     to_cam = torch.tensor(TO_CAM, device=dev)
     B, H = len(frames), prof['height_cm'] / 100

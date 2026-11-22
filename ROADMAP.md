@@ -11,7 +11,7 @@ The goal: an avatar that looks almost exactly like you, from scanning you barely
 
 ## Next on an M4 Mac (no NVIDIA needed)
 
-1. **Sharpen the body-shape fit (started).** Anny is fitted to all outlines now (split-half repeatability ±1–1.5 cm). Next: correct MediaPipe's mask spilling past the body (the fit's volume runs ~10 % high without a weigh-in), tape-measure limbs on the mesh, fit across several days, and let What if… change the fitted mesh instead of the stretched template. The same fit on close nude frames is the only realistic route to camera-measured genital size.
+1. **Sharpen the body-shape fit (started).** Anny is fitted to all outlines now (split-half repeatability ±1–1.5 cm). Next: correct MediaPipe's mask spilling past the body (the fit's volume runs ~10 % high without a weigh-in), tape-measure limbs on the mesh, and fit across several days. The same fit on close nude frames is the only realistic route to camera-measured genital size.
 2. **Photoreal skin and hair.** One 60-second iPhone walk-around video, then Gaussian splats trained locally on Apple Silicon (several Metal trainers exist: splatx-metal, mpsplat, MLX3D), then baked onto your fitted mesh as a full-body texture. Hair could render as splats (three.js has a `GaussianSplat` renderer; [Spark](https://sparkjs.dev) is the full-featured option).
 3. **Your face shape.** The iPhone's TrueDepth camera (ARKit face mesh) gives true face geometry; the head morphs to match. The 478 3D landmarks from your photo are the fallback.
 4. **Anatomy.** MakeHuman has no female genital geometry, and its male helper is low-poly (smoothed now). Both need sculpted, permissively licensed assets, for example sculpted in Blender with MPFB2 and released CC0, then fitted like other MakeHuman proxies.

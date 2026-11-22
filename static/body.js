@@ -110,23 +110,16 @@ function morphWeights(sex, shape, s) {
 }
 
 // dims: scan sizes in cm (from /api/state); shape: see morphWeights. Returns fitted positions of every
-// base-mesh vertex for height H. fitted: the day's body-shape fit (same vertices, cm), used as is.
-export function fitBody(dims, H, sex, shape = {}, fitted = null) {
+// base-mesh vertex for height H. fitted: a day's body-shape fit (same vertices, cm) to start from instead of the
+// template, with ref = the dims it was seen at: dims then reshape it by dims ÷ ref (a prediction), not by the template.
+export function fitBody(dims, H, sex, shape = {}, fitted = null, ref = {}) {
   const t = T[sex === 'female' ? 'female' : 'male'], d = dims || {}, s = H / t.H, n = T.n;
-  const ratio = (scan, tmpl) => (scan ? clamp(scan / (tmpl * s), 0.6, 1.8) : 1);
-  if (fitted) {  // the fit already shaped the bust; genital size still comes from tape
-    const pos = Float32Array.from(fitted);
-    for (const [name, wt] of Object.entries(morphWeights(sex, shape, s))) {
-      if (/^(cup|firm)/.test(name)) continue;
-      const idx = T.arr(`morph.${name}.idx`), dd = T.arr(`morph.${name}.d`);
-      for (let j = 0; j < idx.length; j++) for (let k = 0; k < 3; k++) pos[idx[j] * 3 + k] += wt * s * dd[j * 3 + k];
-    }
-    return { pos, parts: t.parts };
-  }
-  let pos = t.pos;
-  const morphs = Object.entries(morphWeights(sex, shape, s));
+  const ratio = (scan, tmpl) => (scan && tmpl ? clamp(scan / (tmpl * s), 0.6, 1.8) : 1);
+  const size = (k, tmpl) => (fitted ? ref[k] / s : tmpl);
+  let pos = fitted ? Float32Array.from(fitted, (v) => v / s) : t.pos;
+  const morphs = Object.entries(morphWeights(sex, shape, s)).filter(([k]) => !(fitted && /^(cup|firm)/.test(k))); // fit has the bust
   if (morphs.length) {
-    pos = Float32Array.from(t.pos);
+    pos = Float32Array.from(pos);
     for (const [name, wt] of morphs) {
       const idx = T.arr(`morph.${name}.idx`), dd = T.arr(`morph.${name}.d`);
       for (let j = 0; j < idx.length; j++) for (let k = 0; k < 3; k++) pos[idx[j] * 3 + k] += wt * dd[j * 3 + k];
@@ -134,20 +127,22 @@ export function fitBody(dims, H, sex, shape = {}, fitted = null) {
   }
   // torso knots by f (0 = shoulders, 1 = hip joints): [f, x scale, z scale, z centre]. With breasts, the fit
   // follows the ribcage under them (underbust) and the cup morph supplies the bust.
+  const r = (k, slab, wd) => ratio(d[`${k}_${wd}`], size(`${k}_${wd}`, slab[wd]));
   const chest = sex === 'female' && d.underbust_w
-    ? [t.underbust.f, ratio(d.underbust_w, t.underbust.w), ratio(d.underbust_d, t.underbust.d), t.underbust.cz]
-    : [0.3, ratio(d.chest_w, t.chest.w), ratio(d.chest_d, t.chest.d), t.chest.cz];
+    ? [t.underbust.f, r('underbust', t.underbust, 'w'), r('underbust', t.underbust, 'd'), t.underbust.cz]
+    : [0.3, r('chest', t.chest, 'w'), r('chest', t.chest, 'd'), t.chest.cz];
   const torso = [
-    [t.neck.f, ratio(d.neck_w, t.neck.w), ratio(d.neck_d, t.neck.d), t.neck.cz],
-    [0, ratio(d.shoulders_w, t.shoulders.w), chest[2], t.shoulders.cz],
+    [t.neck.f, r('neck', t.neck, 'w'), r('neck', t.neck, 'd'), t.neck.cz],
+    [0, r('shoulders', t.shoulders, 'w'), chest[2], t.shoulders.cz],
     chest,
-    [t.waist.f, ratio(d.waist_w, t.waist.w), ratio(d.waist_d, t.waist.d), t.waist.cz],
-    [t.hips.f, ratio(d.hips_w, t.hips.w), ratio(d.hips_d, t.hips.d), t.hips.cz],
+    [t.waist.f, r('waist', t.waist, 'w'), r('waist', t.waist, 'd'), t.waist.cz],
+    [t.hips.f, r('hips', t.hips, 'w'), r('hips', t.hips, 'd'), t.hips.cz],
   ];
   const J = (k) => t.J[k].map((v) => v * s);
   const limbs = ['l', 'r'].flatMap((side) => {
-    const rArm = ratio(d[`arm_${side}_w`], t[`arm_${side}`]), rFore = 1 + (rArm - 1) * 0.5;
-    const rThigh = ratio(d[`thigh_${side}_w`], t[`thigh_${side}`]), rCalf = ratio(d[`calf_${side}_w`], t[`calf_${side}`]);
+    const rArm = ratio(d[`arm_${side}_w`], size(`arm_${side}_w`, t[`arm_${side}`])), rFore = 1 + (rArm - 1) * 0.5;
+    const rThigh = ratio(d[`thigh_${side}_w`], size(`thigh_${side}_w`, t[`thigh_${side}`]));
+    const rCalf = ratio(d[`calf_${side}_w`], size(`calf_${side}_w`, t[`calf_${side}`]));
     const shift = (torso[1][1] - 1) * t.J[`shoulder_${side}`][0] * s; // arms ride out with the shoulders
     return [
       { r: REG[`arm_${side}`], joints: [J(`shoulder_${side}`), J(`elbow_${side}`), J(`wrist_${side}`)], shift,
@@ -158,7 +153,7 @@ export function fitBody(dims, H, sex, shape = {}, fitted = null) {
   });
   // Vertical proportions: follow the scan's landmark heights, each segment within ±15 % of the template's.
   const tmplY = [0, t.J.ankle_l[1], t.J.knee_l[1], t.hip, t.sh, t.H].map((v) => v * s);
-  const scanY = [0, d.lv_ankle, d.lv_knee, d.lv_hip, d.lv_shoulder, H];
+  const scanY = fitted ? tmplY : [0, d.lv_ankle, d.lv_knee, d.lv_hip, d.lv_shoulder, H]; // a fit has its own heights
   const outY = [0];
   for (let k = 1; k < tmplY.length; k++) {
     const seg = tmplY[k] - tmplY[k - 1], want = scanY[k] != null && scanY[k - 1] != null ? (scanY[k] - scanY[k - 1]) / seg : 1;
