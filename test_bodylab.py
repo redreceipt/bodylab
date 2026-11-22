@@ -159,6 +159,11 @@ assert [g.frame(x) for x in (old, new)] and g.face(.8, 120) == [] and g.face(.8,
 # ^ frames over a minute from any match (her, back to the camera, just before or after you) never count
 g.frame(R(0))
 assert [g.face(.05, 1 + i, frontal=False) for i in range(5)] and not g.other  # a turned face never counts against you
+g.end()
+g.frame(R(0))
+[g.face(.05, 1 + i) for i in range(3)]
+assert g.other and g.frame(R(5)) == [] and g.face(.8, 6) == [] and g.face(.8, 7) == [] and not g.other  # looking down, then clearly you
+assert g.frame(R(8)) == [] and g.end() == [R(8)]  # counts from then on
 assert app.Gate(enrolled=False).frame('x') == ['x']  # no face photo yet: anyone alone counts
 
 # Energy balance: 500 kcal/day deficit for 28 days predicts ~1.8 kg lost.

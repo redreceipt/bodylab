@@ -270,7 +270,7 @@ class Gate:
             if self.matches < self.MATCHES:
                 return []
             ready = [r for r in self.waiting if r['ts'] - self.last <= self.WINDOW or ts - r['ts'] <= self.WINDOW]
-            self.me, self.last, self.waiting = True, ts, []
+            self.me, self.other, self.last, self.waiting = True, False, ts, []  # clear matches end a false alarm (from now on)
             return ready
         if score < .2 and frontal:  # clearly someone else; turned faces, distance and dim light decide nothing
             self.misses += 1
