@@ -234,8 +234,10 @@ function fitted(scan) {
       skin ?? fetch('/api/skin').then((r) => (r.ok ? r.arrayBuffer() : null))]).then(([b, s]) => {
       if (!b) return;
       skin = s && new Uint8Array(s);
-      const n = A.n * 3;
-      fits[scan.day] = { rest: Float32Array.from(new Int16Array(b, 0, n), (v) => v / 10), G: b.byteLength > n * 2 ? new Float32Array(b.slice(n * 2)) : null };
+      const n = A.n * 3, more = b.byteLength - n * 2, B = more % 74 === 0 ? more / 74 : more / 48; // bones: stance only, or + skeleton
+      const f32 = (at, len) => new Float32Array(b.slice(at, at + len * 4)), at = n * 2 + B * 48;
+      fits[scan.day] = { rest: Float32Array.from(new Int16Array(b, 0, n), (v) => v / 10), G: more ? f32(n * 2, B * 12) : null,
+        skel: more % 74 === 0 && more ? { B, heads: f32(at, B * 3), tails: f32(at + B * 12, B * 3), parents: new Int16Array(b.slice(at + B * 24, at + B * 26)) } : null };
       rebuildAvatar(true);
     });
   }
@@ -248,7 +250,8 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
   const d = isGhost ? Object.fromEntries(Object.entries(dims || {}).map(([k, v]) => [k, /_[wd]$/.test(k) ? v - 1.2 : v])) : dims;
   const garments = look.clothes && !isGhost ? (sex === 'female' ? ['briefs', 'bra'] : ['trunks']) : [];
   const fit = fitBody(d, S.profile?.height_cm ?? 175, sex, shape(m), mesh?.rest, ref);
-  if (mesh?.G && skin) fit.pos = pose(fit.pos, mesh.G, skin); // relaxed stance instead of the rest pose's spread arms
+  const G = !isGhost && live?.mesh === mesh ? live.G : mesh?.G; // live: how you're standing now; else your relaxed stance
+  if (G && skin) fit.pos = pose(fit.pos, G, skin);
   const body = geometry(fit.pos, A.src, A.uv, bodyTris(garments));
   const group = new THREE.Group();
   if (isGhost) {
@@ -289,6 +292,7 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
     }
   }
   group.scale.setScalar(0.01); // cm → m
+  group.userData.floor = A.src.reduce((lo, i) => Math.min(lo, fit.pos[i * 3 + 1]), Infinity) * 0.01; // lowest point of the body
   return group;
 }
 
@@ -322,6 +326,45 @@ function paint() {
   }
 }
 
+// Live posing: the cameras stream your 3D landmarks (MediaPipe, y down) while you're in view; each driven bone of
+// your fitted skeleton swings to point where your limb points, in a gravity-up frame that turns with your hips.
+const DRIVEN = { 'upperarm01.L': [11, 13], 'lowerarm01.L': [13, 15], 'upperarm01.R': [12, 14], 'lowerarm01.R': [14, 16],
+  'upperleg01.L': [23, 25], 'lowerleg01.L': [25, 27], 'upperleg01.R': [24, 26], 'lowerleg01.R': [26, 28], spine05: ['hips', 'shoulders'], neck01: ['shoulders', 'ears'] };
+let live = null, smooth = null, liveTimer = null, lastLive = 0;
+function livePose(p) {
+  if (!S?.scans.length) return; // still loading
+  const scan = S.scans.at(-1), mesh = fitted(scan);
+  if (!mesh?.skel || predicted || idx !== S.scans.length - 1 || !BONE_IDS) return;
+  smooth = smooth ? smooth.map((v, i) => v.map((c, k) => c + 0.5 * (p.w[i][k] - c))) : p.w;
+  const V = (i) => new THREE.Vector3(...smooth[i]), mid = (a, b) => V(a).add(V(b)).multiplyScalar(0.5);
+  const at = (k) => (k === 'hips' ? mid(23, 24) : k === 'shoulders' ? mid(11, 12) : k === 'ears' ? mid(7, 8) : V(k));
+  const up = new THREE.Vector3(...(p.up ?? [0, -1, 0])).normalize(); // the camera's up (it may be tilted)
+  const left = V(23).sub(V(24)), back = up.clone().cross(left.sub(up.clone().multiplyScalar(left.dot(up))).normalize());
+  const toT = (v) => new THREE.Vector3(v.dot(left), v.dot(up), -v.dot(back)).normalize(); // template: x left, y up, z front
+  const { B, heads, tails, parents } = mesh.skel, q = [], G = new Float32Array(B * 12), head = (b) => new THREE.Vector3(heads[b * 3], heads[b * 3 + 1], heads[b * 3 + 2]);
+  for (let b = 0; b < B; b++) {
+    const par = parents[b], d = BONE_DRIVEN[b];
+    q[b] = d ? new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(tails[b * 3] - heads[b * 3], tails[b * 3 + 1] - heads[b * 3 + 1], tails[b * 3 + 2] - heads[b * 3 + 2]).normalize(),
+      toT(at(d[1]).sub(at(d[0])))) : par >= 0 ? q[par] : new THREE.Quaternion();
+    const H = head(b), P = par >= 0 ? new THREE.Vector3(H.x * G[par * 12] + H.y * G[par * 12 + 1] + H.z * G[par * 12 + 2] + G[par * 12 + 3],
+      H.x * G[par * 12 + 4] + H.y * G[par * 12 + 5] + H.z * G[par * 12 + 6] + G[par * 12 + 7], H.x * G[par * 12 + 8] + H.y * G[par * 12 + 9] + H.z * G[par * 12 + 10] + G[par * 12 + 11]) : H;
+    const R = new THREE.Matrix4().makeRotationFromQuaternion(q[b]).elements, t = P.clone().sub(H.applyQuaternion(q[b])); // x -> P + R (x - H)
+    G.set([R[0], R[4], R[8], t.x, R[1], R[5], R[9], t.y, R[2], R[6], R[10], t.z], b * 12);
+  }
+  const yaw = p.cam === 0 ? Math.atan2(left.z, left.x) : live?.yaw ?? 0; // only the first camera says which way you face
+  live = { mesh, G, yaw };
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => { live = smooth = null; rebuildAvatar(true); }, 3000); // you left: back to your stance
+  if (performance.now() - lastLive > 140) { lastLive = performance.now(); rebuildAvatar(true); }
+}
+let BONE_IDS = null, BONE_DRIVEN = [];
+fetch('/static/assets/bones.json').then((r) => (r.ok ? r.json() : null)).then((names) => {
+  if (!names) return;
+  BONE_IDS = names;
+  BONE_DRIVEN = names.map((n) => DRIVEN[n]);
+});
+new EventSource('/api/pose').onmessage = (e) => livePose(JSON.parse(e.data));
+
 function rebuildAvatar(force = false) {
   const sex = S.profile?.sex, today = S.scans[idx]?.dims ?? {}, dims = predicted?.dims ?? today;
   const m = predicted?.m ?? S.scans[idx]?.m ?? {};
@@ -331,6 +374,10 @@ function rebuildAvatar(force = false) {
   lastDimsKey = key;
   for (const g of [avatar, ghost]) if (g) { scene.remove(g); g.traverse((o) => o.geometry?.dispose()); }
   avatar = buildAvatar(dims, sex, false, m, mesh, predicted ? today : dims);
+  if (live?.mesh === mesh) { // turning as you turn, feet on the floor
+    avatar.rotation.y = live.yaw;
+    avatar.position.y = -avatar.userData.floor;
+  }
   scene.add(avatar);
   const showGhost = predicted || ($('#ghost').checked && S.scans.length > 1 && idx > 0);
   ghost = showGhost ? (predicted ? buildAvatar(today, sex, true, {}, mesh, today) // predicted: outline = today

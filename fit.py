@@ -241,7 +241,8 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
         if plot:
             draw(plot, frames, C.cpu().numpy(), out['vertices'], model, verts, project, out)
         fixed = shape(1)  # computed without gradients: the stance only moves bones
-    return res, rest, stance(model, fixed, kreg, arm_directions(frames))
+        skeleton = (heads, out['rest_bone_tails'][0].cpu().numpy(), np.array(model.bone_parents))
+    return res, rest, stance(model, fixed, kreg, arm_directions(frames)), skeleton
 
 
 def arm_directions(frames):
@@ -429,25 +430,30 @@ def restance(db, day, frames, prof):
         lc[0, model.local_change_labels.index(k)] = v
     p = {k: torch.tensor([v]) for k, v in res['phenotypes'].items()} | {'gender': torch.tensor([1. if prof.get('sex') == 'female' else 0.])}
     G = stance(model, {'phenotype_kwargs': p, 'local_changes_kwargs': lc}, anny.KeypointsRegressor.coco(model, labels=list(KP)), arm_directions(frames))
-    rest = model(pose_parameters=torch.eye(4)[None, None].repeat(1, model.bone_count, 1, 1), phenotype_kwargs=p,
-                 local_changes_kwargs=lc)['rest_vertices'][0].detach().numpy()
-    store(db, day, res, rest, G)
+    out = model(pose_parameters=torch.eye(4)[None, None].repeat(1, model.bone_count, 1, 1), phenotype_kwargs=p, local_changes_kwargs=lc)
+    store(db, day, res, out['rest_vertices'][0].detach().numpy(), G,
+          skeleton=(out['rest_bone_heads'][0].detach().numpy(), out['rest_bone_tails'][0].detach().numpy(), np.array(model.bone_parents)))
     return f'{day}: stance updated'
 
 
-def store(db, day, res, rest, G, model_skin=None):
+def store(db, day, res, rest, G, model_skin=None, skeleton=None):
     """Save the fit: its parameters and measurements; the rest-pose mesh in the web template's frame (y up, front +z,
-    feet at 0, int16 mm) followed by the stance's bone transforms in that frame (float32, 3×4 per bone). The skin
-    weights the transforms apply with (8 bones per vertex, uint8 index + weight) go once into skin.bin."""
+    feet at 0, int16 mm); the stance's bone transforms in that frame (float32, 3×4 per bone); the skeleton for live
+    posing (bone heads, then tails, float32 cm; parents, int16). The skin weights the transforms apply with (8 bones
+    per vertex, uint8 index + weight) go once into skin.bin."""
     import sqlite3 as sq
     F = assets()[0]
     zmin = rest[np.unique(F), 2].min()
     mesh = np.round(np.stack([rest[:, 0], rest[:, 2] - zmin, -rest[:, 1]], 1) * 1000).astype('<i2')
     C = np.array([[100., 0, 0, 0], [0, 0, 100, -100 * zmin], [0, -100, 0, 0], [0, 0, 0, 1]])  # Anny m -> template cm
     Gt = (C @ G @ np.linalg.inv(C))[:, :3].astype('<f4')
+    blob = mesh.tobytes() + Gt.tobytes()
+    if skeleton is not None:
+        heads, tails, parents = skeleton
+        cm = lambda p: (np.c_[p, np.ones(len(p))] @ C.T)[:, :3].astype('<f4').tobytes()  # noqa: E731
+        blob += cm(heads) + cm(tails) + parents.astype('<i2').tobytes()
     with sq.connect(db, timeout=30) as c:
-        c.execute('insert or replace into fits(day, ts, params, mesh) values (?, ?, ?, ?)',
-                  (day, time.time(), json.dumps(res), mesh.tobytes() + Gt.tobytes()))
+        c.execute('insert or replace into fits(day, ts, params, mesh) values (?, ?, ?, ?)', (day, time.time(), json.dumps(res), blob))
     skin = Path(db).parent / 'skin.bin'
     if model_skin is not None and not skin.exists():
         idx, w = model_skin
@@ -486,12 +492,12 @@ if __name__ == '__main__':
         raise SystemExit(restance(a.db, day, frames, prof))
     if len(frames) < MIN_FRAMES:
         raise SystemExit(f'need {MIN_FRAMES} frames')
-    res, rest, G = fit(frames, prof, plot=a.plot)
+    res, rest, G, skeleton = fit(frames, prof, plot=a.plot)
     res |= {'tape': tape(rest, res['neck_axis'], res['limb_axes']), 'frames': len(frames)}
     if a.save:
         np.save(a.save, rest)
     if a.store:
         import anny
         m = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default')
-        store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()))
+        store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()), skeleton)
     print(json.dumps(res, indent=1))

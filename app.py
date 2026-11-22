@@ -293,7 +293,8 @@ class Capture:
 
     def __init__(self, cam=0):
         self.cam, self.key = cam, '' if cam == 0 else str(cam + 1)  # profile keys camera_url/rotate, camera2_url/rotate2
-        self.frame = self.jpeg = self.url = None
+        self.frame = self.jpeg = self.url = self.pose = None
+        self.up = np.array([0, -1., 0])  # this camera's 'up' in MediaPipe's camera-aligned 3D frame: your standing torso, averaged
         self.frame_ts = self.last_seen = self.last_store = self.last_fit = 0.0
         self.status = {'state': 'starting', 'msg': 'Connecting to camera…'}
         self.want_clear, self.dirty = False, True
@@ -389,6 +390,9 @@ class Capture:
                 patches = [ycc[int(y - eye * .15):int(y + eye * .15) + 1, int(x - eye * .15):int(x + eye * .15) + 1, 1:].reshape(-1, 2)
                            for x, y in ((pts[2] + pts[9]) / 2, (pts[5] + pts[10]) / 2)]
                 self.skin = np.median(np.vstack(patches), axis=0)
+            if not self.gate.enrolled or (self.gate.me and not self.gate.other):  # you, live: how you're standing, for the avatar
+                self.pose = {'t': round(now, 2), 'cam': self.cam, 'w': np.round(world, 3).tolist(), 'v': np.round(vis, 2).tolist(),
+                             'up': np.round(self.up, 3).tolist()}
             if facing and self.me is not None and (not self.gate.me or now - self.last_id > 2):  # re-checked every 2 s
                 self.last_id = now
                 eyes = np.linalg.norm(pts[2] - pts[5])  # a face seen near head-on: both ears, nose between the eyes
@@ -410,7 +414,10 @@ class Capture:
                 covered = (['hips', 'thigh_l_w', 'thigh_r_w'] if skin['thighs'] < .5 else []) + (['calf_l_w', 'calf_r_w'] if skin['shins'] < .5 else [])
                 for k in covered:  # shorts or trousers: those widths would be the clothes'
                     r['obs'].pop(k, None)
-            if r['obs']:
+            if r['obs']:  # a standing frame: its torso says where up is for this camera (if it's tilted)
+                torso = world[[11, 12]].mean(0) - world[[23, 24]].mean(0)
+                self.up = self.up * .98 + .02 * torso / np.linalg.norm(torso)
+                self.up /= np.linalg.norm(self.up)
                 rec = {'ts': now, 'cam': self.cam, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
                        'sil': silhouette(mask, pts, world, r['origin'], r['H'])} | ({'skin': skin} if skin else {})
                 if self.prof.get('reference') and now - self.last_ref > 2 and reference_wanted(rec):
@@ -804,6 +811,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.stream(cap2 if parse_qs(urlparse(self.path).query).get('cam') == ['2'] else cap)
         if path == '/api/skin' and (DB_PATH.parent / 'skin.bin').exists():  # bone weights for posing fitted bodies (fit.py)
             return self.send(200, (DB_PATH.parent / 'skin.bin').read_bytes(), 'application/octet-stream')
+        if path == '/api/pose':
+            return self.pose_stream()
         if path.startswith('/api/fit/'):  # a day's fitted body: rest mesh (int16 mm) + stance bone transforms (fit.py)
             r = db().execute('select mesh from fits where day = ?', (path.rsplit('/', 1)[1],)).fetchone()
             return self.send(200, r[0], 'application/octet-stream') if r else self.send(404, b'no fit', 'text/plain')
@@ -847,6 +856,24 @@ class Handler(BaseHTTPRequestHandler):
         with db() as c:
             c.execute(f"delete from {parts[1]} where {'metric' if parts[1] == 'goals' else 'id'} = ?", (parts[2],))
         self.reply({'ok': True})
+
+    def pose_stream(self):
+        """Server-sent events: your 3D pose landmarks whenever a camera sees (and has confirmed) you."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        last = None
+        try:
+            while True:
+                p = max((c.pose for c in (cap, cap2) if c.pose), key=lambda p: p['t'], default=None)
+                if p and p is not last and time.time() - p['t'] < 1:
+                    last = p
+                    self.wfile.write(b'data: ' + json.dumps(p).encode() + b'\n\n')
+                    self.wfile.flush()
+                time.sleep(.05)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def stream(self, c):
         self.send_response(200)
