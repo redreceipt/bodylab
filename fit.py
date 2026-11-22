@@ -38,7 +38,7 @@ def load(db, day=None):
     prof = json.loads(c.execute("select v from settings where k = 'profile'").fetchone()[0])
     noon = time.mktime(time.strptime(day + ' 12', '%Y-%m-%d %H'))
     w = c.execute("select json_extract(data, '$.weight'), abs(ts - ?) / 86400 from logs where kind = 'daily' "
-                  "and json_extract(data, '$.weight') > 0 and abs(ts - ?) < 30 * 86400 order by abs(ts - ?) limit 1", (noon,) * 3).fetchone()
+                  "and json_extract(data, '$.weight') > 0 and abs(ts - ?) < 180 * 86400 order by abs(ts - ?) limit 1", (noon,) * 3).fetchone()
     return day, [f for f in rows if f.get('sil')], prof | ({'weight': w[0], 'weight_age': w[1]} if w else {})
 
 
@@ -97,13 +97,17 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
     B, H = len(frames), prof['height_cm'] / 100
     female = prof.get('sex') == 'female'
     age = (date.today() - date.fromisoformat(prof['birth_date'])).days / 365.25 if prof.get('birth_date') else 30
-    # MakeHuman's age axis: 0 = 1 y, 0.1875 = 11 y, 0.5 = 25 y, 1 = 90 y
-    age_p = .5 + (age - 25) / 130 if age >= 25 else .1875 + (age - 11) / 14 * .3125
+    # Anny's age axis: 0 = baby (1 y), 1/3 = child (11 y), 2/3 = young adult (25 y), 1 = old (90 y)
+    age_p = (2 + (age - 25) / 65) / 3 if age >= 25 else (1 + (age - 11) / 14) / 3 if age >= 11 else (age - 1) / 30
 
     rng = np.random.default_rng(0)
     body = torch.tensor(body_vertices().astype(np.int64), device=dev)
     verts = body[torch.tensor(rng.choice(len(body), 2500, replace=False), device=dev)]
-    local_on = torch.tensor([not any(t in k for t in FACE) for k in model.local_change_labels], device=dev)
+    labels = model.local_change_labels
+    # Body-shape changes only; no breast changes on a man (outlines can't tell pecs from breasts).
+    local_on = torch.tensor([not any(t in k for t in FACE) and not (not female and k.startswith('breast')) for k in labels], device=dev)
+    mirror = torch.tensor([labels.index('r' + k[1:]) if k.startswith('l-') and 'r' + k[1:] in labels else
+                           labels.index('l' + k[1:]) if k.startswith('r-') and 'l' + k[1:] in labels else i for i, k in enumerate(labels)], device=dev)
     posed = torch.tensor([model.bone_labels.index(b) for b in POSED], device=dev)
 
     # Targets, in metres in the image plane (relative to the hip centre).
@@ -124,12 +128,12 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
 
     def run(pose_only=False):
         p = {k: torch.sigmoid(v).expand(B) for k, v in phen.items()}
-        p |= {'gender': torch.full((B,), 0. if female else 1., device=dev), 'age': torch.full((B,), age_p, device=dev),
+        p |= {'gender': torch.full((B,), 1. if female else 0., device=dev), 'age': torch.full((B,), age_p, device=dev),  # Anny: 0 = male
               'cupsize': torch.full((B,), .5, device=dev), 'firmness': torch.full((B,), .5, device=dev)}
         p = {k: v for k, v in p.items() if k in model.phenotype_labels}
         pose = torch.eye(4, device=dev).repeat(B, model.bone_count, 1, 1)
         pose[:, posed, :3, :3] = roma.rotvec_to_rotmat(rot)
-        lc = (torch.tanh(local) * local_on).expand(B, -1)
+        lc = (torch.tanh((local + local[mirror]) / 2) * local_on).expand(B, -1)  # left = right
         return model(pose_parameters=pose, phenotype_kwargs=p, local_changes_kwargs=lc)
 
     # Each frame's turn, from its 3D landmarks against the rest pose's shoulders, hips and head.
@@ -172,10 +176,12 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
         rest = out['rest_vertices'][0]
         l_h = (rest[body, 2].max() - rest[body, 2].min() - H) ** 2
         mass = volume(rest) * DENSITY
-        l_reg = (rot ** 2).mean() * .01 + (cam[:, 0] ** 2).mean() * .1 + (torch.tanh(local) ** 2).mean() * .003
+        # Outlines can't separate muscle from fat; lean toward a fit adult unless they insist.
+        l_reg = (rot ** 2).mean() * .01 + (cam[:, 0] ** 2).mean() * .1 + (torch.tanh(local) ** 2).mean() * .02 \
+            + .002 * ((torch.sigmoid(phen['muscle']) - .6) ** 2 + (torch.sigmoid(phen['weight']) - .45) ** 2)
         total = l_kp + .3 * l_3d + 10 * l_h + l_reg
-        if prof.get('weight') and stage:  # outlines leave volume loose (±10 %); a weigh-in pins it, fading over 30 days
-            trust = min(1, max(0, (30 - prof.get('weight_age', 0)) / 26))
+        if prof.get('weight') and stage:  # outlines leave volume loose (±10 %); a weigh-in pins it, trusted less with age
+            trust = min(1, max(0, 1 - (prof.get('weight_age', 0) - 4) / 180))
             total = total + .3 * trust * ((mass - prof['weight']) / prof['weight']) ** 2
         parts = {'kp': l_kp.item() ** .5 * 100, '3d': l_3d.item() ** .5 * 100, 'kg': mass.item()}
         if stage:
@@ -209,9 +215,11 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print):
         out = run()
         k3, v3 = project(out)
         rest = out['rest_vertices'][0].cpu().numpy()
+        heads = out['rest_bone_heads'][0].cpu().numpy()
+        neck = heads[model.bone_labels.index('neck01')].tolist(), heads[model.bone_labels.index('head')].tolist()
         res = {'phenotypes': {k: round(torch.sigmoid(v).item(), 4) for k, v in phen.items()} | {'age': round(age_p, 4)},
-               'local': {k: round(v, 4) for k, v in zip(model.local_change_labels, (torch.tanh(local) * local_on).tolist()) if abs(v) > 1e-3},
-               'fit': {k: round(v, 2) for k, v in parts.items()}}
+               'local': {k: round(v, 4) for k, v in zip(labels, (torch.tanh((local + local[mirror]) / 2) * local_on).tolist()) if abs(v) > 1e-3},
+               'fit': {k: round(v, 2) for k, v in parts.items()}, 'neck_axis': neck}
         if plot:
             draw(plot, frames, C.cpu().numpy(), out['vertices'], model, verts, project, out)
     return res, rest
@@ -234,26 +242,39 @@ def assets():
     return F[~arm[F].any(1)], int(navel), F
 
 
-def tape(rest):
+def tape(rest, neck=None):
     """Tape-style circumferences (cm) of the rest-pose body: the convex hull of horizontal slices of the body
     without its arms, like a tape bridging hollows. Neck: narrowest below the jaw; chest: widest; waist: at the
-    navel; hips: widest round the seat."""
+    navel; hips: widest round the seat. neck: (base, top) of the neck's bones; the neck is taped across its own
+    axis (it leans forward, so a level slice catches the chin)."""
     import cv2
     F, navel, _ = assets()
     V = rest * 100
     z0, H = V[np.unique(F), 2].min(), np.ptp(V[np.unique(F), 2])
     a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
 
-    def ring(z):
+    def ring(z, at=None, n=np.array([0, 0, 1.])):
+        """Tape length round the slice through point `at` (or height z) across direction n."""
+        at = np.array([0, 0, z]) if at is None else at
+        da, db, dc = (a - at) @ n, (b - at) @ n, (c - at) @ n
         pts = []
-        for p, q in ((a, b), (b, c), (c, a)):
-            s = (p[:, 2] - z) * (q[:, 2] - z) < 0
-            pts.append(p[s] + (q[s] - p[s]) * ((z - p[s, 2]) / (q[s, 2] - p[s, 2]))[:, None])
-        P = np.concatenate(pts)[:, :2].astype(np.float32)
-        return cv2.arcLength(cv2.convexHull(P), True) if len(P) > 2 else 0
+        for p, q, dp, dq in ((a, b, da, db), (b, c, db, dc), (c, a, dc, da)):
+            s = dp * dq < 0
+            pts.append(p[s] + (q[s] - p[s]) * (dp[s] / (dp[s] - dq[s]))[:, None])
+        P = np.concatenate(pts) - at
+        u = np.cross(n, [1, 0, 0] if abs(n[0]) < .9 else [0, 1, 0])
+        u /= np.linalg.norm(u)
+        P2 = np.stack([P @ u, P @ np.cross(n, u)], 1).astype(np.float32)
+        return cv2.arcLength(cv2.convexHull(P2), True) if len(P2) > 2 else 0
 
     at = lambda lo, hi: [ring(z0 + f * H) for f in np.arange(lo, hi, .005)]  # noqa: E731
-    return {'neck': round(min(at(.83, .88)), 1), 'chest': round(max(at(.68, .76)), 1), 'waist': round(ring(V[navel, 2]), 1),
+    if neck is not None:
+        b0, b1 = np.asarray(neck[0]) * 100, np.asarray(neck[1]) * 100
+        ax = (b1 - b0) / np.linalg.norm(b1 - b0)
+        neck_c = min(ring(0, b0 + (b1 - b0) * t, ax) for t in np.linspace(.2, .8, 13))
+    else:
+        neck_c = min(at(.83, .88))
+    return {'neck': round(neck_c, 1), 'chest': round(max(at(.68, .76)), 1), 'waist': round(ring(V[navel, 2]), 1),
             'hips': round(max(at(.46, .56)), 1), 'navel_h': round(float((V[navel, 2] - z0) / H), 3), 'height': round(float(H), 1)}
 
 
@@ -296,7 +317,7 @@ if __name__ == '__main__':
     if len(frames) < MIN_FRAMES:
         raise SystemExit(f'need {MIN_FRAMES} frames')
     res, rest = fit(frames, prof, plot=a.plot)
-    res |= {'tape': tape(rest), 'frames': len(frames)}
+    res |= {'tape': tape(rest, res['neck_axis']), 'frames': len(frames)}
     if a.save:
         np.save(a.save, rest)
     if a.store:
