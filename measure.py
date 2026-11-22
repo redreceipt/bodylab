@@ -1,5 +1,5 @@
-"""Turn one MediaPipe pose (pixel landmarks + person mask) into body measurements,
-then derive circumferences, body-fat %, and progress insights.
+"""Turn camera frames (MediaPipe landmarks + person mask) into body measurements — any frame, any angle —
+fuse them into one body per day, then derive circumferences, body-fat %, and progress insights.
 
 Raw measurements are stored as fractions of standing height, so correcting the
 profile height later rescales every past scan."""
@@ -13,13 +13,13 @@ import numpy as np
 EAR_L, EAR_R = 7, 8
 SH_L, SH_R, EL_L, EL_R, WR_L, WR_R = 11, 12, 13, 14, 15, 16
 HIP_L, HIP_R, KN_L, KN_R, AN_L, AN_R = 23, 24, 25, 26, 27, 28
-FRONT_NEEDS = [SH_L, SH_R, EL_L, EL_R, WR_L, WR_R, HIP_L, HIP_R, KN_L, KN_R, AN_L, AN_R]
 # Plausible adult sizes as fractions of standing height. Frames and saved scans outside these are rejected:
 # they come from a misread pose (sitting, partly hidden, someone else's limbs) rather than a real body.
 PLAUSIBLE = {'neck_w': (.04, .1), 'shoulders_w': (.17, .36), 'chest_w': (.12, .3), 'waist_w': (.1, .32), 'hips_w': (.13, .32),
              'neck_d': (.04, .1), 'chest_d': (.08, .25), 'waist_d': (.07, .28), 'hips_d': (.08, .26),
              'arm_l_w': (.035, .1), 'arm_r_w': (.035, .1), 'thigh_l_w': (.06, .16), 'thigh_r_w': (.06, .16),
              'calf_l_w': (.045, .11), 'calf_r_w': (.045, .11), 'lv_shoulder': (.75, .87), 'lv_hip': (.43, .58), 'lv_knee': (.22, .33)}
+SEEN = {'neck': (.035, .11), 'chest': (.08, .31), 'waist': (.07, .33), 'hips': (.08, .33)}  # widths a frame may show, any angle
 
 
 def implausible(raw):
@@ -32,7 +32,6 @@ def implausible(raw):
 TORSO = {'neck': 1.0, 'chest': .72, 'waist': .78, 'hips': .75}  # typical depth/width, used until a side view exists
 LIMBS = ['arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'calf_l', 'calf_r']
 CALIBRATABLE = [*TORSO, 'shoulders', *LIMBS]
-DONT_LOOK = 'Those proportions look off — stand tall, facing the camera, whole body in view'
 METRICS = ['bf', 'weight', 'lean_kg', 'fat_kg', 'ffmi', 'whtr', 'whr', *CALIBRATABLE]
 # Workout focus -> body parts it trains (cardio only counts toward overall load).
 FOCUS = {'full body': CALIBRATABLE, 'chest': ['chest'], 'back': ['chest', 'shoulders'], 'shoulders': ['shoulders'],
@@ -53,10 +52,21 @@ def _run(m, p, d, cap):
     return (float(out[0]), True) if len(out) else (float(n), False)
 
 
-def measure(pts, vis, mask, female=False):
-    """pts: (33,2) pixel landmarks, vis: (33,) visibility, mask: HxW person probability.
-    Returns {'view': 'front'|'side'|None, 'raw': {...}, 'lines': [(p, q)], 'problem': str|None}."""
-    out = {'view': None, 'raw': {}, 'lines': [], 'cuts': {}, 'problem': None}
+def yaw(world, a, b):
+    """How far a left/right landmark pair is turned from the camera, in degrees: 0 = facing it, 90 = side on."""
+    v = world[a] - world[b]
+    return math.degrees(math.atan2(abs(v[2]), abs(v[0])))
+
+
+def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin=None):
+    """Everything one frame can tell about the body, from any angle or distance — no special pose needed.
+
+    pts: (33,2) pixel landmarks; vis: visibility; world: (33,3) MediaPipe world landmarks; mask: person
+    probability; ycc + skin (Cr, Cb of your face): when given, slices that aren't bare skin are skipped.
+    Returns {'theta': yaw°, 'full': head-to-toe in view, 'obs': {key: fraction of standing height},
+    'lines': [(p, q)], 'problem': str|None}. Torso keys ('neck', 'chest', 'waist', 'hips') are the widths
+    seen at yaw theta; estimate() turns many of them into width and depth."""
+    out = {'theta': None, 'full': False, 'obs': {}, 'lines': [], 'problem': None}
 
     def fail(msg):
         out['problem'] = msg
@@ -64,76 +74,69 @@ def measure(pts, vis, mask, female=False):
 
     m = mask > .5
     h, w = m.shape
+    if max(vis[SH_L], vis[SH_R]) < .5 or max(vis[HIP_L], vis[HIP_R]) < .5:
+        return fail('Waiting for a clear view of your torso')
     sh, hp = (pts[SH_L] + pts[SH_R]) / 2, (pts[HIP_L] + pts[HIP_R]) / 2
     axis = hp - sh
     torso = np.linalg.norm(axis)
     if torso < 40:
-        return fail('Step closer to the camera')
+        return fail('Too far from the camera')
     down = axis / torso
     perp = np.array([-down[1], down[0]])
-    if abs(down[0]) > .15:
-        return fail('Stand up straight')
-    ratio = np.linalg.norm(pts[SH_L] - pts[SH_R]) / torso
-    view = out['view'] = 'front' if ratio > .55 else 'side' if ratio < .3 else None
-    if not view:
-        return fail('Face the camera, or turn fully sideways')
-    hidden = {j for j in FRONT_NEEDS if vis[j] < .5}
-    if view == 'front' and hidden:
-        return fail('Hold your arms out where the camera can see your hands' if hidden <= {EL_L, EL_R, WR_L, WR_R}
-                    else 'Keep your whole body visible')
-    if view == 'side' and min(vis[[SH_L, SH_R]].max(), vis[[HIP_L, HIP_R]].max(), vis[[AN_L, AN_R]].max()) < .5:
-        return fail('Keep your whole body visible')
+    if abs(down[0]) > .25:
+        return fail('Leaning — only upright frames are measured')
+    theta = out['theta'] = (yaw(world, SH_L, SH_R) + yaw(world, HIP_L, HIP_R)) / 2
+    obs = out['obs']
 
-    def rows_in(x0, x1):
-        return np.flatnonzero(m[:, max(int(x0), 0):min(int(x1) + 1, w)].any(1))
+    # Scale: standing height in px when head-to-toe is in view, otherwise from your torso length.
+    H, head = torso / torso_ratio, (pts[EAR_L] + pts[EAR_R]) / 2
+    if vis[[AN_L, AN_R]].max() > .5 and vis[[EAR_L, EAR_R]].max() > .5:
+        rows_in = lambda x0, x1: np.flatnonzero(m[:, max(int(x0), 0):min(int(x1) + 1, w)].any(1))  # noqa: E731
+        ax = pts[[AN_L, AN_R], 0]
+        head_rows, foot_rows = rows_in(head[0] - .15 * torso, head[0] + .15 * torso), rows_in(ax.min() - .3 * torso, ax.max() + .3 * torso)
+        if len(head_rows) and len(foot_rows) and head_rows[0] > 2 and foot_rows[-1] < h - 3:
+            top, bottom = head_rows[0], foot_rows[-1]
+            if .22 < torso / (bottom - top) < .36:
+                H, out['full'] = float(bottom - top), True
+                obs['torso_ratio'] = torso / H
 
-    head = (pts[EAR_L] + pts[EAR_R]) / 2
-    ax = pts[[AN_L, AN_R], 0]
-    head_rows, foot_rows = rows_in(head[0] - .15 * torso, head[0] + .15 * torso), rows_in(ax.min() - .3 * torso, ax.max() + .3 * torso)
-    if not len(head_rows) or not len(foot_rows):
-        return fail('Keep your whole body visible')
-    top, bottom = head_rows[0], foot_rows[-1]
-    if top <= 2 or bottom >= h - 3:
-        return fail('Step back so your head and feet are in view')
-    H = float(bottom - top)  # standing height in px; everything is stored relative to it
+    def arm_clash(p, a, b):
+        """An arm at the edge of this slice would widen it (in front of the torso or well clear is fine)."""
+        tp = np.dot(p - sh, down)
+        for chain in ((SH_L, EL_L, WR_L), (SH_R, EL_R, WR_R)):
+            for j0, j1 in zip(chain, chain[1:]):
+                t0, t1 = np.dot(pts[j0] - sh, down), np.dot(pts[j1] - sh, down)
+                if min(vis[j0], vis[j1]) < .3 or (t0 - tp) * (t1 - tp) > 0 or t0 == t1:
+                    continue  # hidden behind the body, or not at this height
+                off = np.dot(pts[j0] + (pts[j1] - pts[j0]) * (tp - t0) / (t1 - t0) - p, perp)
+                if abs(abs(off) - (a if off > 0 else b)) < .035 * H:
+                    return True
+        return False
 
-    def lv(p):
-        return (bottom - p[1]) / H
-
-    def at(f):
-        return sh + axis * f
-
-    def slice_(name, points, pick=min, cap=torso):
+    def slice_(name, points, pick=min, cap=torso, bare=True):
         cuts = [(p, _run(m, p, perp, cap)[0], _run(m, p, -perp, cap)[0]) for p in points]
         p, a, b = pick(cuts, key=lambda c: c[1] + c[2])
-        out['lines'].append(out['cuts'].setdefault(name, (p + perp * a, p - perp * b)))
-        return p, a, b
+        line, width = (p + perp * a, p - perp * b), (a + b) / H
+        lo, hi = SEEN[name]
+        if lo <= width <= hi and not arm_clash(p, a, b) and not (bare and skin is not None and skin_share(ycc, skin, *line) < .5):
+            obs[name] = width
+            out['lines'].append(line)
+        return p
 
-    sfx = '_w' if view == 'front' else '_d'
-    raw = out['raw']
-    p, a, b = slice_('neck', [sh + (head - sh) * t for t in np.linspace(.2, .55, 8)], cap=.5 * torso)
-    raw['neck' + sfx], lv_neck = (a + b) / H, lv(p)
-    p, a, b = slice_('chest', [at(.30)])
-    raw['chest' + sfx], lv_chest = (a + b) / H, lv(p)
-    # Navy method: men at the navel, women at the narrowest point.
-    p, wa, wb = slice_('waist', [at(f) for f in (np.linspace(.5, .8, 7) if female else [.73])])
-    raw['waist' + sfx], lv_waist = (wa + wb) / H, lv(p)
-    p, ha, hb = slice_('hips', [at(f) for f in np.linspace(.95, 1.15, 6)], pick=max)
-    raw['hips' + sfx], lv_hips = (ha + hb) / H, lv(p)
-    if view == 'side':
-        return fail(DONT_LOOK) if implausible(raw) else out
+    at = lambda f: sh + axis * f  # noqa: E731
+    p_neck = slice_('neck', [sh + (head - sh) * t for t in np.linspace(.2, .55, 8)], cap=.5 * torso, bare=False)
+    p_chest = slice_('chest', [at(.30)], bare=not female)  # a sports bra is fine
+    p_waist = slice_('waist', [at(f) for f in (np.linspace(.5, .8, 7) if female else [.73])])  # Navy: men at the navel
+    p_hips = slice_('hips', [at(f) for f in np.linspace(.95, 1.15, 6)], pick=max, bare=False)  # underwear is fine
 
-    # Arms touching the torso would inflate waist/hip widths.
-    for j, (ra, rb) in ((EL_L, (wa, wb)), (EL_R, (wa, wb)), (WR_L, (ha, hb)), (WR_R, (ha, hb))):
-        off = np.dot(pts[j] - sh, perp)
-        if abs(off) < (ra if off > 0 else rb) + .03 * H:
-            out['lines'].clear()
-            return fail('Hold your arms slightly away from your body')
+    if theta < 25:
+        a, b = _run(m, sh, perp, torso)[0], _run(m, sh, -perp, torso)[0]
+        if PLAUSIBLE['shoulders_w'][0] <= (a + b) / H <= PLAUSIBLE['shoulders_w'][1]:
+            obs['shoulders_w'] = (a + b) / H
 
-    _, a, b = slice_('shoulders', [at(0)])
-    raw['shoulders_w'] = (a + b) / H
-
-    def limb(j0, j1, ts, cap, inner_ok):
+    def limb(j0, j1, ts, cap, inner_ok, bare=True):
+        if min(vis[j0], vis[j1]) < .5:
+            return None
         seg = pts[j1] - pts[j0]
         L = np.linalg.norm(seg)
         d = seg / L
@@ -150,20 +153,62 @@ def measure(pts, vis, mask, female=False):
                 best = (p, a, b, n)
         if best:
             p, a, b, n = best
-            out['lines'].append((p + n * a, p - n * b))
-            return (a + b) / H
+            line = (p + n * a, p - n * b)
+            if not (bare and skin is not None and skin_share(ycc, skin, *line) < .5):
+                out['lines'].append(line)
+                return (a + b) / H
 
-    for s, (S, E, HIP, K, A) in {'l': (SH_L, EL_L, HIP_L, KN_L, AN_L), 'r': (SH_R, EL_R, HIP_R, KN_R, AN_R)}.items():
-        raw[f'arm_{s}_w'] = limb(S, E, [.5], .3, False)
-        raw[f'thigh_{s}_w'] = limb(HIP, K, [.4], .35, True)
-        raw[f'calf_{s}_w'] = limb(K, A, np.linspace(.2, .45, 6), .3, True)
+    if theta < 45:  # limbs side by side only when roughly facing toward or away from the camera
+        for s, (S, E, HIP, K, A) in {'l': (SH_L, EL_L, HIP_L, KN_L, AN_L), 'r': (SH_R, EL_R, HIP_R, KN_R, AN_R)}.items():
+            for key, v in ((f'arm_{s}_w', limb(S, E, [.5], .3, False)), (f'thigh_{s}_w', limb(HIP, K, [.4], .35, True, bare=False)),
+                           (f'calf_{s}_w', limb(K, A, np.linspace(.2, .45, 6), .3, True))):
+                if v is not None:
+                    obs[key] = v
+    if out['full']:
+        lv = lambda p: (bottom - p[1]) / H  # noqa: E731
+        obs.update(lv_neck=lv(p_neck), lv_shoulder=lv(sh), lv_chest=lv(p_chest), lv_waist=lv(p_waist), lv_hips=lv(p_hips),
+                   lv_hip=lv(hp), lv_knee=(lv(pts[KN_L]) + lv(pts[KN_R])) / 2, lv_ankle=(lv(pts[AN_L]) + lv(pts[AN_R])) / 2)
+        if theta < 45 and vis[[EL_L, EL_R, WR_L, WR_R]].min() > .5:
+            seg = lambda i, j: np.linalg.norm(pts[i] - pts[j]) / H  # noqa: E731
+            obs.update(upperarm=(seg(SH_L, EL_L) + seg(SH_R, EL_R)) / 2, forearm=(seg(EL_L, WR_L) + seg(EL_R, WR_R)) / 2)
+    for k in [k for k in obs if k in PLAUSIBLE and not PLAUSIBLE[k][0] <= obs[k] <= PLAUSIBLE[k][1]]:
+        del obs[k]  # one misread part shouldn't cost the rest of the frame
+    return out if obs else fail('Nothing measurable in this frame')
 
-    seg = lambda i, j: np.linalg.norm(pts[i] - pts[j]) / H  # noqa: E731
-    raw.update(lv_neck=lv_neck, lv_shoulder=lv(sh), lv_chest=lv_chest, lv_waist=lv_waist,
-               lv_hips=lv_hips, lv_hip=lv(hp), lv_knee=(lv(pts[KN_L]) + lv(pts[KN_R])) / 2,
-               lv_ankle=(lv(pts[AN_L]) + lv(pts[AN_R])) / 2,
-               upperarm=(seg(SH_L, EL_L) + seg(SH_R, EL_R)) / 2, forearm=(seg(EL_L, WR_L) + seg(EL_R, WR_R)) / 2)
-    return fail(DONT_LOOK) if implausible(raw) else out
+
+def fit_ellipse(seen, ratio):
+    """Semi-axes (a = half width, b = half depth) of a body cross-section from widths w seen at yaw θ:
+    (w/2)² = a²cos²θ + b²sin²θ. Robust least squares once there are views both near front-on and turned
+    past 30°; until then depth is assumed to be `ratio` × width."""
+    th = np.radians([t for t, _ in seen])
+    y = (np.array([v for _, v in seen]) / 2) ** 2
+    c, s = np.cos(th) ** 2, np.sin(th) ** 2
+    if (s > .25).sum() >= 5 and (s <= .25).sum() >= 5:
+        X, wt = np.stack([c, s], 1), np.ones(len(y))
+        for _ in range(5):  # iteratively reweighted (Huber), so stray frames can't drag the fit
+            A, B = np.linalg.lstsq(X * wt[:, None], y * wt, rcond=None)[0]
+            r = np.abs(y - X @ [A, B])
+            wt = np.sqrt(np.minimum(1, 1.5 * (np.median(r) * 1.4826 + 1e-12) / np.maximum(r, 1e-12)))
+        if A > 0 and B > 0:
+            return math.sqrt(A), math.sqrt(B)
+    a = math.sqrt(float(np.median(y / (c + ratio ** 2 * s))))
+    return a, ratio * a
+
+
+def estimate(frames):
+    """Fuse frames from any angle into one body (fractions of standing height): torso cross-sections are
+    ellipses fitted to the widths seen at each yaw; everything else is a median. None if too little to go on."""
+    raw = {'n_frames': len(frames), 'n_angle': round(max((f['theta'] for f in frames), default=0))}
+    for level, ratio in TORSO.items():
+        seen = [(f['theta'], f['obs'][level]) for f in frames if level in f['obs']]
+        if len(seen) >= 8:
+            a, b = fit_ellipse(seen, ratio)
+            raw[level + '_w'], raw[level + '_d'] = 2 * a, 2 * b
+    for k in {k for f in frames for k in f['obs']} - set(TORSO):
+        vals = [f['obs'][k] for f in frames if k in f['obs']]
+        if len(vals) >= 5:
+            raw[k] = float(np.median(vals))
+    return raw if {'neck_w', 'waist_w', 'hips_w'} <= raw.keys() else None
 
 
 def skin_share(ycc, skin, a, b, tol=14):
@@ -172,6 +217,29 @@ def skin_share(ycc, skin, a, b, tol=14):
     t = np.linspace(.15, .85, 40)[:, None]
     xy = np.rint(np.asarray(a) + (np.asarray(b) - np.asarray(a)) * t).astype(int).clip(0, [ycc.shape[1] - 1, ycc.shape[0] - 1])
     return float((np.abs(ycc[xy[:, 1], xy[:, 0], 1:].astype(int) - np.asarray(skin)) < tol).all(1).mean())
+
+
+def hair_style(hair, img, face):
+    """Hair colour and the closest avatar haircut from a hair mask (HxW, 0..1) of a front-on photo.
+    face: (478, 2) face landmarks in px. Ponytails and braids can't be seen from the front; pick those by hand."""
+    hair = hair > .5
+    top, chin = face[10][1], face[152][1]
+    left, right = face[:, 0].min(), face[:, 0].max()
+    fh, fw = chin - top, right - left
+    ys, xs = np.nonzero(hair)
+    if len(ys) < .05 * fw * fh:
+        return {'style': 'none', 'color': None}
+    px = img[ys, xs][:, ::-1].astype(float)  # BGR -> RGB
+    lum = px @ [.299, .587, .114]
+    lo, hi = np.percentile(lum, [50, 90])
+    rgb = px[(lum >= lo) & (lum <= hi)].mean(0)  # the lit strands you'd call the colour, not the shadows
+    near = np.abs(xs - (left + right) / 2) < fw  # hair beside the face, not the background's
+    length = (ys[near].max() - chin) / fh  # how far below the chin it reaches
+    width = (xs.max() - xs.min()) / fw
+    crown = (top - ys.min()) / fh  # thickness above the forehead
+    style = ('long01' if length > .35 else 'bob02' if length > -.15 else 'afro01' if width > 1.7 or crown > .45
+             else 'short04' if crown < .12 else 'short02')
+    return {'style': style, 'color': '#' + ''.join(f'{int(v):02x}' for v in rgb)}
 
 
 def ellipse(w, d):

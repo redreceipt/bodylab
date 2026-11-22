@@ -12,7 +12,7 @@ import threading
 import time
 import urllib.request
 from collections import deque
-from datetime import datetime
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -30,6 +30,8 @@ MODEL_URL = ('https://storage.googleapis.com/mediapipe-models/pose_landmarker/'
              'pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task')
 FACE_MODEL = ROOT / 'models' / 'face_landmarker.task'
 FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task'
+HAIR_MODEL = (ROOT / 'models' / 'hair_segmenter.tflite',
+              'https://storage.googleapis.com/mediapipe-models/image_segmenter/hair_segmenter/float32/latest/hair_segmenter.tflite')
 ZOO = 'https://github.com/opencv/opencv_zoo/raw/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/'
 FACE_DET = (ROOT / 'models' / 'face_detection_yunet_2023mar.onnx', ZOO + 'face_detection_yunet/face_detection_yunet_2023mar.onnx')
 FACE_REC = (ROOT / 'models' / 'face_recognition_sface_2021dec.onnx', ZOO + 'face_recognition_sface/face_recognition_sface_2021dec.onnx')
@@ -39,8 +41,6 @@ ROTATE = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_C
 PORT = int(os.environ.get('PORT', '8765'))
 SYNC_PORT = 8443  # `tailscale serve --bg --https=8443 http://127.0.0.1:8765` puts BodyLab on your tailnet
 TS_HOST = TS_OWNER = None  # set at startup from `tailscale status`
-COOLDOWN_S = float(os.environ.get('COOLDOWN_MIN', '10')) * 60
-FRONT_FRAMES, SIDE_FRAMES, LIVE_FRAMES = 40, 20, 12
 DB_PATH = Path(os.environ.get('BODYLAB_DB') or ROOT / 'data' / 'bodylab.db')
 # Daily inputs (manual or Apple Health) and their sane ranges.
 DAILY = {'weight': (20, 400), 'scale_bf': (2, 75), 'scale_lean': (10, 300), 'tape_waist': (30, 300),
@@ -62,9 +62,14 @@ def init_db():
     with db() as c:
         c.executescript('''
             create table if not exists scans(id integer primary key, ts real, raw text);
+            create table if not exists frames(id integer primary key, ts real, data text);
+            create index if not exists frames_ts on frames(ts);
             create table if not exists logs(id integer primary key, ts real, kind text, data text, ext_id text unique);
             create table if not exists goals(metric text primary key, target real, start real, ts real);
             create table if not exists settings(k text primary key, v text);''')
+        if 'day' not in [r[1] for r in c.execute('pragma table_info(scans)')]:  # one fused estimate per day
+            c.execute('alter table scans add column day text')
+        c.execute('create unique index if not exists scans_day on scans(day)')
 
 
 def get_profile():
@@ -165,7 +170,14 @@ def post_face(raw):
     jpg, meta = face_files()
     cv2.imwrite(str(jpg), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
     emb = Faces().embed(img)  # enrols you, so scans are only saved for you
-    meta.write_text(json.dumps({'w': w, 'h': h, 'ts': time.time(), 'landmarks': (pts / [w, h]).round(5).tolist(),
+    ensure_model(*HAIR_MODEL)
+    seg = vision.ImageSegmenter.create_from_options(vision.ImageSegmenterOptions(base_options=BaseOptions(model_asset_path=str(HAIR_MODEL[0]))))
+    try:
+        masks = seg.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(img, cv2.COLOR_BGR2RGB))).confidence_masks
+    finally:
+        seg.close()
+    hair = measure.hair_style(masks[-1].numpy_view().squeeze(), img, pts)  # last mask = hair
+    meta.write_text(json.dumps({'w': w, 'h': h, 'ts': time.time(), 'landmarks': (pts / [w, h]).round(5).tolist(), 'hair': hair,
                                 'embedding': None if emb is None else emb.round(5).tolist()}))
 
 
@@ -200,7 +212,7 @@ def app_state():
                 hidden += 1
                 continue
             m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']))
-            scans.append({'id': r['id'], 'ts': r['ts'], 'side': 'neck_d' in raw, 'm': m, 'dims': dims})
+            scans.append({'id': r['id'], 'ts': r['ts'], 'side': raw.get('n_angle', 0) >= 30, 'frames': raw.get('n_frames'), 'm': m, 'dims': dims})
     face = face_files()[1]
     face = json.loads(face.read_text()) if face.exists() else None
     if face:
@@ -212,28 +224,27 @@ def app_state():
 
 
 class Capture:
-    """Reads the camera, runs pose + segmentation, and turns good frames into saved scans."""
+    """Watches the camera all the time and turns every useful frame into evidence about your body.
+
+    No special pose: each frame contributes whatever it shows (a waist width at some angle, a calf, your
+    torso length). Frames are stored (twice a second at most) and fused into one body estimate per day."""
 
     def __init__(self):
         self.frame = self.jpeg = self.url = None
-        self.frame_ts = 0.0
+        self.frame_ts = self.last_seen = self.last_store = self.last_fit = 0.0
         self.status = {'state': 'starting', 'msg': 'Connecting to camera…'}
-        self.front, self.side = deque(maxlen=FRONT_FRAMES), deque(maxlen=SIDE_FRAMES)
-        self.scan_id, self.side_saved, self.last_seen, self.last_scan = None, False, 0.0, 0.0
-        self.want_rescan = False
+        self.want_clear, self.dirty, self.live = False, True, None
         self.prof, self.weight, self.prof_ts, self.me = {}, None, 0.0, None
-        self.who, self.misses, self.skin = None, 0, None  # per session: 'me' / 'other', and your skin chroma
+        self.end_session()
         threading.Thread(target=self.read_loop, daemon=True).start()
         threading.Thread(target=self.process_loop, daemon=True).start()
 
-    def rescan(self):
-        self.want_rescan = True  # applied on the processing thread, which owns the frame buffers
+    def end_session(self):
+        """A session = one person continuously in view. Identity and skin colour are per session."""
+        self.who, self.misses, self.skin, self.pending = None, 0, None, []
 
-    def reset(self):
-        self.front.clear()
-        self.side.clear()
-        self.scan_id, self.side_saved = None, False
-        self.who, self.misses, self.skin = None, 0, None
+    def clear_today(self):
+        self.want_clear = True  # applied on the processing thread
 
     def read_loop(self):
         while True:
@@ -280,15 +291,17 @@ class Capture:
 
     def step(self, f, res):
         now = time.time()
-        if self.want_rescan:
-            self.reset()
-            self.want_rescan, self.last_scan = False, 0.0
-        r, mask = None, None
+        if self.want_clear:
+            with db() as c:
+                c.execute('delete from frames where ts >= ?', (day_start(now),))
+                c.execute('delete from scans where day = ?', (date.today().isoformat(),))
+            self.want_clear, self.live, self.dirty = False, None, False
+        r, mask, msg = None, None, None
         people = [i for i, m in enumerate(res.segmentation_masks or []) if (m.numpy_view() > .5).mean() > .01]
-        if len(people) > 1:  # someone else walked in: whose frames are whose is no longer certain
+        if len(people) > 1:  # whose frames are whose is no longer certain
             self.last_seen = now
-            self.reset()
-            r = {'problem': 'Only one person in the frame, please', 'lines': [], 'view': None}
+            self.end_session()
+            msg = 'Two people in view — paused until one leaves'
             mask = res.segmentation_masks[0].numpy_view().squeeze()
         elif res.pose_landmarks:
             self.last_seen = now
@@ -296,84 +309,100 @@ class Capture:
             lms = res.pose_landmarks[0]
             pts = np.array([[l.x * w, l.y * h] for l in lms])
             vis = np.array([l.visibility or 0 for l in lms])
+            world = np.array([[l.x, l.y, l.z] for l in res.pose_world_landmarks[0]])
             mask = res.segmentation_masks[0].numpy_view().squeeze()
-            r = measure.measure(pts, vis, mask, female=self.prof.get('sex') == 'female')
-            if not r['problem']:
-                r['problem'] = self.check_person(f, pts, vis, r)
-            if not r['problem']:
-                (self.front if r['view'] == 'front' else self.side).append(r['raw'])
-        elif now - self.last_seen > 8:
-            self.reset()
-        self.status = self.next_status(now, r)
-        self.publish(f, res, mask, r)
-
-    def check_person(self, f, pts, vis, r):
-        """Is this you (face matches your photo) and in minimal clothing? Returns a problem or None."""
-        if self.who == 'other':
-            return 'Not you — BodyLab only saves scans for the profile owner'
-        if self.me is not None and self.who != 'me':
-            if r['view'] == 'side':
-                return 'Face the camera first so BodyLab can check it is you'
-            span = max(np.linalg.norm(pts[7] - pts[8]), 20)  # ear to ear
-            (x0, y0), (x1, y1) = (pts[0] - 1.6 * span).astype(int), (pts[0] + 1.6 * span).astype(int)
-            crop = f[max(y0, 0):max(y1, 0), max(x0, 0):max(x1, 0)]
-            emb = self.faces.embed(cv2.resize(crop, (320, 320), interpolation=cv2.INTER_CUBIC)) if crop.size else None
-            if emb is None:
-                return 'Face the camera so BodyLab can check it is you'
-            if float(emb @ self.me) >= SAME_PERSON:
-                self.who = 'me'
-            else:
-                self.misses += 1
-                if self.misses >= 8:
-                    self.who = 'other'
-                return 'Checking it is you…'
-        if self.prof.get('bare_only', True):
-            ycc = cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb)
-            if vis[0] > .5 and r['view'] == 'front':  # skin chroma from your cheeks, in this frame's lighting
+            bare = self.prof.get('bare_only', True)
+            ycc = cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb) if bare else None
+            facing = vis[[0, 2, 5, 9, 10]].min() > .5
+            if facing and bare:  # your skin chroma, from your cheeks in this frame's light
                 eye = np.linalg.norm(pts[2] - pts[5])
                 patches = [ycc[int(y - eye * .15):int(y + eye * .15) + 1, int(x - eye * .15):int(x + eye * .15) + 1, 1:].reshape(-1, 2)
                            for x, y in ((pts[2] + pts[9]) / 2, (pts[5] + pts[10]) / 2)]
                 self.skin = np.median(np.vstack(patches), axis=0)
-            if self.skin is not None:
-                for name in ('waist',) if self.prof.get('sex') == 'female' or r['view'] == 'side' else ('chest', 'waist'):
-                    if measure.skin_share(ycc, self.skin, *r['cuts'][name], SKIN_TOLERANCE) < .5:
-                        return f'Clothing on your {name} — scans only count in minimal clothing (underwear is fine)'
-        return None
+            if facing and self.me is not None and self.who is None:
+                self.identify(f, pts)
+            r = measure.observe(pts, vis, world, mask, female=self.prof.get('sex') == 'female',
+                                torso_ratio=self.prof.get('torso_ratio', .29), ycc=ycc, skin=self.skin)
+            msg = r['problem']
+            if self.who == 'other':
+                msg, r['obs'] = 'Not you — BodyLab only measures the profile owner', {}
+            elif bare and self.skin is None:
+                msg, r['obs'] = 'Face the camera for a moment so BodyLab can see your skin tone', {}
+            if r['obs']:
+                rec = {'ts': now, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()}}
+                if self.me is not None and self.who != 'me':
+                    self.pending = (self.pending + [rec])[-600:]  # kept until your face is seen this session
+                    msg = msg or 'Face the camera for a moment so BodyLab knows it is you'
+                else:
+                    self.keep(rec)
+        elif now - self.last_seen > 8:
+            self.end_session()
+        if now - self.last_fit > 5 and self.dirty:
+            self.fit(now)
+        self.status = self.next_status(r, msg)
+        self.publish(f, res, mask, r)
 
-    def next_status(self, now, r):
-        st = {'state': 'idle', 'front': len(self.front) / FRONT_FRAMES, 'side': len(self.side) / SIDE_FRAMES}
+    def identify(self, f, pts):
+        span = max(np.linalg.norm(pts[7] - pts[8]), 20)  # ear to ear
+        (x0, y0), (x1, y1) = (pts[0] - 1.6 * span).astype(int), (pts[0] + 1.6 * span).astype(int)
+        crop = f[max(y0, 0):max(y1, 0), max(x0, 0):max(x1, 0)]
+        emb = self.faces.embed(cv2.resize(crop, (320, 320), interpolation=cv2.INTER_CUBIC)) if crop.size else None
+        if emb is None:
+            return
+        if float(emb @ self.me) >= SAME_PERSON:
+            self.who = 'me'
+            for rec in self.pending:  # everything seen earlier this session was you too
+                self.keep(rec)
+            self.pending = []
+        elif (misses := self.misses + 1) >= 8:
+            self.who, self.pending = 'other', []
+        else:
+            self.misses = misses
+
+    def keep(self, rec):
+        if rec['ts'] - self.last_store < .5:
+            return
+        self.last_store, self.dirty = rec['ts'], True
+        with db() as c:
+            c.execute('insert into frames(ts, data) values (?, ?)', (rec['ts'], json.dumps(rec)))
+
+    def fit(self, now):
+        """Fuse today's frames into today's body estimate (one row in `scans` per day)."""
+        self.last_fit, self.dirty = now, False
+        with db() as c:
+            frames = [json.loads(r[0]) for r in c.execute('select data from frames where ts >= ? order by ts', (day_start(now),))]
+        raw = measure.estimate(frames) if frames else None
+        self.today = {'frames': len(frames), 'angle': max((f['theta'] for f in frames), default=0)}
+        if not raw or measure.implausible(raw):
+            return
+        with db() as c:
+            c.execute('insert into scans(ts, raw, day) values (?, ?, ?) on conflict(day) do update set ts = excluded.ts, raw = excluded.raw',
+                      (now, json.dumps(raw), date.fromtimestamp(now).isoformat()))
+        if raw.get('torso_ratio') and abs(raw['torso_ratio'] - self.prof.get('torso_ratio', 0)) > .002:
+            set_profile({**(get_profile() or {}), 'torso_ratio': round(raw['torso_ratio'], 4)})  # scales partial views
+        self.live = dict(zip(('m', 'dims'), measure.derive(raw, self.prof, self.weight)))
+
+    def next_status(self, r, msg):
+        today = getattr(self, 'today', {'frames': 0, 'angle': 0})
+        st = {'state': 'idle', 'frames': today['frames'], 'angle': round(today['angle'])}
         if not self.prof.get('height_cm'):
-            return {**st, 'msg': 'Set your height in Profile to start scanning'}
+            return {**st, 'msg': 'Set your height in Profile to start'}
+        if self.live and r is not None:
+            st['live'] = self.live
         if r is None:
-            return {**st, 'msg': 'Step in front of the camera — whole body, minimal clothing, arms slightly out'}
-        if len(self.front) >= LIVE_FRAMES and self.who != 'other':
-            st['live'] = dict(zip(('m', 'dims'), measure.derive(median(list(self.front)[-LIVE_FRAMES:]), self.prof, self.weight)))
-        wait = self.last_scan + COOLDOWN_S - now
-        if self.scan_id is None and len(self.front) >= FRONT_FRAMES and wait <= 0 and (self.me is None or self.who == 'me'):
-            raw = {**median(list(self.front)), 'n_front': len(self.front)}
-            with db() as c:
-                self.scan_id = c.execute('insert into scans(ts, raw) values (?, ?)', (now, json.dumps(raw))).lastrowid
-            self.last_scan = now
-        if self.scan_id and not self.side_saved and len(self.side) >= SIDE_FRAMES:
-            with db() as c:
-                raw = json.loads(c.execute('select raw from scans where id = ?', (self.scan_id,)).fetchone()[0])
-                raw.update({k: v for k, v in median(list(self.side)).items() if k.endswith('_d')}, n_side=len(self.side))
-                c.execute('update scans set raw = ? where id = ?', (json.dumps(raw), self.scan_id))
-            self.side_saved = True
-        st['scan_id'] = self.scan_id
-        if r['problem']:
-            return {**st, 'state': 'adjust', 'msg': r['problem']}
-        if self.side_saved:
-            return {**st, 'state': 'done', 'msg': 'Scan complete ✓ (front + side)'}
-        if self.scan_id:
-            return {**st, 'state': 'saved', 'msg': 'Front scan saved ✓ — turn 90° sideways for a more accurate scan'}
-        if wait > 0:
-            return {**st, 'state': 'live', 'msg': f'Tracking live · next saved scan in {wait / 60:.0f} min (or press Rescan)'}
-        return {**st, 'state': 'scanning', 'msg': f'Hold still… scanning {r["view"]}'}
+            return {**st, 'state': 'adjust' if msg else 'idle', 'msg': msg or 'Watching — walk past any time; every view helps'}
+        if r['obs']:
+            return {**st, 'state': 'scanning', 'msg': f"Measuring — {today['frames']} views today, turned up to {round(today['angle'])}°"}
+        return {**st, 'state': 'adjust', 'msg': msg or 'Watching'}
 
     def publish(self, f, res, mask, r):
-        if self.prof.get('preview', 'silhouette') == 'silhouette':  # private by default: no camera pixels leave the loop
-            f[:] = (40, 26, 20)
+        if self.prof.get('preview', 'silhouette') == 'silhouette':
+            # Private by default: a coarse mosaic shows the room is live; you're only a solid silhouette.
+            h, w = f.shape[:2]
+            f[:] = cv2.resize(cv2.resize(f, (max(w // 40, 1), max(h // 40, 1)), interpolation=cv2.INTER_AREA), (w, h),
+                              interpolation=cv2.INTER_NEAREST) // 3
+            if mask is not None:
+                f[cv2.dilate((mask > .3).astype(np.uint8), np.ones((25, 25), np.uint8)) > 0] = (40, 26, 20)
         if mask is not None:
             sel = mask > .5
             f[sel] = (f[sel] * .55 + np.array([255, 190, 60]) * .45).astype(np.uint8)
@@ -385,6 +414,10 @@ class Capture:
         for a, b in (r or {}).get('lines', []):
             cv2.line(f, tuple(map(int, a)), tuple(map(int, b)), (60, 255, 120), 3)
         self.jpeg = cv2.imencode('.jpg', f, [cv2.IMWRITE_JPEG_QUALITY, 70])[1].tobytes()
+
+
+def day_start(ts):
+    return datetime.combine(date.fromtimestamp(ts), datetime.min.time()).timestamp()
 
 
 def num(v, lo, hi, name):
@@ -424,8 +457,9 @@ def post_profile(b):
             prof[k] = b[k]
     if 'rotate' in b:
         prof['rotate'] = int(b['rotate']) if int(b['rotate']) in ROTATE else 0
-    if 'bare_only' in b:
-        prof['bare_only'] = bool(b['bare_only'])
+    for k in ('bare_only', 'clothes'):
+        if k in b:
+            prof[k] = bool(b[k])
     if 'preview' in b:
         prof['preview'] = 'camera' if b['preview'] == 'camera' else 'silhouette'
     set_profile(prof)
@@ -497,19 +531,20 @@ def post_calibrate(b):
     if b.get('value') in (None, ''):
         cal.pop(metric, None)
     else:
-        row = db().execute('select raw from scans order by ts desc limit 1').fetchone()
-        estimate = row and measure.derive(json.loads(row[0]), {**prof, 'calib': {}})[0].get(metric)
+        raw = next((r for r in (json.loads(x[0]) for x in db().execute('select raw from scans order by ts desc'))
+                    if not measure.implausible(r)), None)
+        estimate = raw and measure.derive(raw, {**prof, 'calib': {}})[0].get(metric)
         if not estimate:
             raise ValueError('Need a scan with this measurement first')
         factor = num(b['value'], 1, 300, 'Measurement') / estimate
         if not .6 <= factor <= 1.6:
-            raise ValueError(f'That is {factor:.2f}× the camera estimate — check the units or rescan')
+            raise ValueError(f'That is {factor:.2f}× the camera estimate — check the units')
         cal[metric] = factor
     set_profile(prof)
 
 
 POST = {'/api/profile': post_profile, '/api/logs': post_log, '/api/goals': post_goal,
-        '/api/calibrate': post_calibrate, '/api/rescan': lambda b: cap.rescan(), '/api/sync': post_sync}
+        '/api/calibrate': post_calibrate, '/api/clear-today': lambda b: cap.clear_today(), '/api/sync': post_sync}
 LOCAL = ('localhost', '127.0.0.1')
 
 
@@ -613,7 +648,7 @@ if __name__ == '__main__':
     init_db()
     ensure_model()
     jpg, meta = face_files()
-    if meta.exists() and 'embedding' not in json.loads(meta.read_text()):  # photo added before identity checks existed
+    if meta.exists() and not {'embedding', 'hair'} <= json.loads(meta.read_text()).keys():  # photo from an older version
         try:
             post_face(jpg.read_bytes())
         except ValueError as e:

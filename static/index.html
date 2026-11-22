@@ -98,8 +98,8 @@ ul.tips { padding-left:18px; color:var(--dim); font-size:12.5px }
 <aside id="cam" class="card">
   <img id="live" alt="Live camera with body tracking overlay">
   <div class="row"><span id="dot"></span><span id="camMsg" role="status">Connecting…</span></div>
-  <div class="row"><div class="bar" style="flex:1" title="front / side scan progress"><i id="barF" style="width:0"></i><i id="barS" style="width:0"></i></div>
-    <button id="rescan" title="Allow a new saved scan now">Rescan</button></div>
+  <div class="row"><div class="bar" id="evidence" style="flex:1"><i id="barF" style="width:0"></i><i id="barS" style="width:0"></i></div>
+    <button id="clear" title="Discard today's measurements">Clear today</button></div>
 </aside>
 <nav id="nav">
   <button data-tab="log">＋ Log inputs</button>
@@ -112,6 +112,7 @@ ul.tips { padding-left:18px; color:var(--dim); font-size:12.5px }
   <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Scan history">
   <span id="scanLabel"></span>
   <label><input type="checkbox" id="ghost" checked> first-scan ghost</label>
+  <label><input type="checkbox" id="clothes" checked> underwear</label>
 </footer>
 <section id="panel" class="card" hidden><button id="close" aria-label="Close">×</button><div id="pbody"></div></section>
 <div id="tip"></div><div id="toast" role="alert"></div>

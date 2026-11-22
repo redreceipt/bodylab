@@ -11,7 +11,7 @@ let S = null;      // /api/state
 let live = null;   // {m, dims} while someone stands in front of the camera
 let idx = -1;      // selected scan
 let view = null;   // open panel: {tab} or {part}
-let hovered = null, selectedPart = null, lastScanId = null, lastState = null, lastRev = null, lastDimsKey = '';
+let hovered = null, selectedPart = null, lastRev = null, lastDimsKey = '';
 
 // ---------- metrics & units ----------
 const META = {
@@ -152,24 +152,26 @@ const mats = {
   ghost: new THREE.MeshBasicMaterial({ color: '#3ef0ff', transparent: true, opacity: 0.22, depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 8 }),
 };
-let look = { hair: 'short02', brows: true }, lookKey = '';
+let look = { hair: 'short02', brows: true, clothes: true }, lookKey = '';
 // Skin texture, face photo, hair and eyes. Rebuilt only when the profile's look or the face photo changes.
 async function updateLook() {
   const p = S.profile || {}, sex = p.sex === 'female' ? 'female' : 'male', face = S.face;
+  look.clothes = p.clothes !== false;
+  $('#clothes').checked = look.clothes;
   const key = JSON.stringify([sex, p.skin, p.hair, p.hair_color, p.eye_color, face?.ts]);
   if (key === lookKey) return;
   lookKey = key;
   const photo = face && await loadImage(`/api/face.jpg?${face.ts}`);
-  const auto = face ? photoColors(photo, face) : {}, hair = p.hair ?? (sex === 'female' ? 'long01' : 'short02');
-  const hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
+  const auto = { ...(face ? photoColors(photo, face) : {}), hair: face?.hair?.color };
+  const hair = p.hair ?? face?.hair?.style ?? (sex === 'female' ? 'long01' : 'short02'), hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
   const skin = new THREE.CanvasTexture(await skinCanvas(sex, { face, photo, tone: p.skin, hairColor: HAIRS[hair] ? hairColor : null }));
   Object.assign(skin, { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 });
   mats.skin.map?.dispose();
   mats.skin.map = skin;
   mats.skin.needsUpdate = true;
-  look = { hair, brows: !face, auto };
+  look = { hair, brows: !face, auto, clothes: look.clothes };
   if (HAIRS[hair]) mats.hair.map = texture(`/static/assets/${hair}.webp`);
-  for (const m of [mats.hair, mats.brows]) m.color.set(hairColor);
+  for (const m of [mats.hair, mats.brows]) m.color.set(hairColor).multiplyScalar(3.5); // strand textures average ~0.28 (linear); this restores the chosen colour
   mats.eyes.map = texture(`/static/assets/eye_${p.eye_color && p.eye_color !== 'auto' ? p.eye_color : auto.eye ?? 'brown'}.jpg`);
   mats.hair.needsUpdate = mats.eyes.needsUpdate = true;
   rebuildAvatar(true);
@@ -218,7 +220,7 @@ function paint() {
   if (!col) return;
   const { parts, cloth } = g.userData, cache = {};
   for (let r = 0; r < A.src.length; r++) {
-    const i = A.src[r], [a, b] = (cache[parts[i]] ??= [partColor(parts[i], false), partColor(parts[i], true)]), k = cloth[i];
+    const i = A.src[r], [a, b] = (cache[parts[i]] ??= [partColor(parts[i], false), partColor(parts[i], true)]), k = look.clothes ? cloth[i] : 0;
     col.setXYZ(r, a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k, a.b + (b.b - a.b) * k);
   }
   col.needsUpdate = true;
@@ -332,6 +334,11 @@ function renderTimeline() {
 }
 $('#scrub').addEventListener('input', (e) => { idx = +e.target.value; renderAll(); });
 $('#ghost').addEventListener('change', () => rebuildAvatar(true));
+$('#clothes').addEventListener('change', async (e) => {
+  look.clothes = e.target.checked;
+  paint();
+  await api('POST', '/api/profile', { clothes: look.clothes });
+});
 $('#stats').addEventListener('click', (e) => { const b = e.target.closest('[data-part]'); if (b) open({ part: b.dataset.part }); });
 
 // ---------- panel ----------
@@ -484,7 +491,7 @@ function profilePanel() {
     ${first ? '' : `<h3>iPhone · Apple Health</h3>${pairBlock()}`}
     <h3>Scanning tips</h3><ul class="tips"><li>Camera ~chest height, 2.5–3.5 m away, whole body in frame.</li>
       <li>Minimal clothing (underwear / sports bra) — clothes inflate every measurement. Hair off the neck.</li><li>Stand tall, feet hip-width, arms ~30° out.</li>
-      <li>Hold ~5 s facing the camera, then turn 90° for ~3 s.</li><li>Same time of day (e.g. morning, before eating) for clean trends.</li></ul>
+      <li>No need to pose: every frame counts. Turning a little (or walking past side-on) gives body depth.</li><li>Same time of day (e.g. morning, before eating) for clean trends.</li></ul>
     <p class="muted">Camera video never leaves this Mac or gets saved — only the measurements.</p>`;
 }
 function renderPanel() {
@@ -552,26 +559,26 @@ $('#panel').addEventListener('click', async (e) => {
 
 // ---------- camera status ----------
 $('#live').addEventListener('click', () => $('#cam').classList.toggle('big'));
-$('#rescan').addEventListener('click', async () => { await api('POST', '/api/rescan', {}); toast('Ready — step in front of the camera'); });
+$('#clear').addEventListener('click', async () => {
+  if (!confirm("Discard everything measured today? Earlier days aren't touched.")) return;
+  await api('POST', '/api/clear-today', {});
+  toast("Today's measurements cleared");
+});
 async function poll() {
   try {
     const st = await (await fetch('/api/status')).json();
     $('#camMsg').textContent = st.msg;
     $('#dot').className = st.state;
-    $('#barF').style.width = Math.min(1, st.front ?? 0) * (st.side ? 50 : 100) + '%';
-    $('#barS').style.width = Math.min(1, st.side ?? 0) * 50 + '%';
-    scanning = ['scanning', 'saved', 'live', 'adjust'].includes(st.state);
+    $('#barF').style.width = Math.min(1, (st.frames ?? 0) / 150) * 50 + '%'; // views today (150 = plenty)
+    $('#barS').style.width = Math.min(1, (st.angle ?? 0) / 75) * 50 + '%'; // how far you've turned: sets depth
+    $('#evidence').title = `${st.frames ?? 0} views today, turned up to ${st.angle ?? 0}°`;
+    scanning = st.state === 'scanning';
     const wasLive = !!live;
     live = st.live ?? null;
-    if (st.scan_id && st.scan_id !== lastScanId || (st.state === 'done' && lastState !== 'done')) {
-      if (st.scan_id !== lastScanId && lastScanId !== null) toast('Scan saved ✓');
-      lastScanId = st.scan_id;
-      idx = Infinity; // jump to newest
-      await refresh();
-    } else if (st.rev !== lastRev && lastRev !== null) {
-      await refresh(!$('#panel').contains(document.activeElement)); // iPhone sync / face photo landed; don't clobber typing
+    if (st.rev !== lastRev && lastRev !== null) {
+      if (live) idx = Infinity; // today's estimate changed: follow it
+      await refresh(!$('#panel').contains(document.activeElement)); // new evidence, iPhone sync, face photo; don't clobber typing
     } else if (live || wasLive) renderAll(false);
-    lastState = st.state;
     lastRev = st.rev;
   } catch { /* server restarting */ }
   setTimeout(poll, 700);

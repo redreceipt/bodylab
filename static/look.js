@@ -14,7 +14,6 @@ export const loadImage = (src) => new Promise((ok, fail) => {
 });
 const canvas = (w, h = w) => Object.assign(document.createElement('canvas'), { width: w, height: h });
 const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-const toHex = (rgb) => '#' + rgb.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
 
 // Mean colour of r×r patches around points.
 function sample(ctx, pts, r = 8) {
@@ -184,7 +183,7 @@ export async function skinCanvas(sex, { face, photo, tone, hairColor }) {
   return c;
 }
 
-// Eye colour (nearest MakeHuman iris) and hair colour (just above the hairline) from the photo.
+// Eye colour from the photo: the nearest MakeHuman iris. (Hair is analysed on the server.)
 export function photoColors(photo, face) {
   const pc = canvas(photo.naturalWidth, photo.naturalHeight).getContext('2d', { willReadFrequently: true });
   pc.drawImage(photo, 0, 0);
@@ -194,10 +193,6 @@ export function photoColors(photo, face) {
     return [[x + r * 0.6, y], [x - r * 0.6, y], [x, y + r * 0.6]];
   });
   const eyeRGB = sample(pc, iris, 3), eyes = assets().meta.eyes;
-  const eye = Object.keys(eyes).reduce((a, b) => (dist(eyes[b], eyeRGB) < dist(eyes[a], eyeRGB) ? b : a));
-  // Just above the hairline (10, 109, 338 = top of forehead; 152 = chin), median of three spots.
-  const [cx, cy] = P(152), spots = [10, 109, 338].map((k) => { const [x, y] = P(k); return sample(pc, [[x + (x - cx) * 0.07, y + (y - cy) * 0.07]], 10); });
-  const hairRGB = [0, 1, 2].map((c) => spots.map((s) => s[c]).sort((a, b) => a - b)[1]), skinRGB = sample(pc, CHEEKS.map(P));
-  return { eye, hair: dist(hairRGB, skinRGB) > 60 ? toHex(hairRGB) : null }; // null: looks like skin (bald / high hairline)
+  return { eye: Object.keys(eyes).reduce((a, b) => (dist(eyes[b], eyeRGB) < dist(eyes[a], eyeRGB) ? b : a)) };
 }
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
