@@ -151,4 +151,13 @@ d += [{'kind': 'daily', 'ts': now, 'kcal': 600, 'weight': 80}, {'kind': 'measure
 day = M.insights([], d, {}, now)['days'][-1]
 assert day['weight'] and not day['food'] and not day['sleep'] and not day['scan'] and day['kcal'] == 600, day
 assert M.series('penis_len_soft', [], d) == [(now, 9.5)]
+# Predictions: a 500 kcal/day deficit for 12 weeks loses ~5 kg, mostly fat; lifting + protein keeps more lean mass.
+start = {'weight': 90, 'bf': 25, 'waist': 95, 'hips': 102, 'chest': 104, 'neck': 40, 'arm_l': 35}
+rest = M.predict(start, 'male', 12, -500, 0, 1.0, 180)
+lift = M.predict(start, 'male', 12, -500, 4, 2.0, 180)
+lost = 90 - rest['m']['weight']
+assert 4 < lost < 6.5 and rest['m']['bf'] < 25 and rest['m']['waist'] < 95, rest['m']
+assert lift['m']['lean_kg'] > rest['m']['lean_kg'] and lift['m']['bf'] < rest['m']['bf'] and len(rest['path']) == 13
+crash = M.predict({'weight': 63, 'bf': 28}, 'female', 30, -800, 3, 1.8, 165)
+assert crash['warning'] and crash['m']['bf'] >= 11.5 and M.predict(start, 'male', 12, -500, 4, 2.0, 180)['warning'] is None
 print('sync ok')

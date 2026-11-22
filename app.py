@@ -269,7 +269,7 @@ class Capture:
             f = self.frame
             if time.time() - self.frame_ts > 5:
                 self.status = {'state': 'offline', 'msg': f'Camera offline ({self.url}) — retrying…' if self.url
-                               else 'Set your camera URL in Profile'}
+                               else 'Set your camera URL in Settings → Camera'}
             if f is None or f is last:
                 time.sleep(.01)
                 continue
@@ -387,7 +387,7 @@ class Capture:
         today = getattr(self, 'today', {'frames': 0, 'angle': 0})
         st = {'state': 'idle', 'frames': today['frames'], 'angle': round(today['angle']), 'match': self.match}
         if not self.prof.get('height_cm'):
-            return {**st, 'msg': 'Set your height in Profile to start'}
+            return {**st, 'msg': 'Set your height in Settings to start'}
         if self.live and r is not None:
             st['live'] = self.live
         if r is None:
@@ -548,8 +548,36 @@ def post_calibrate(b):
     set_profile(prof)
 
 
+def post_predict(b):
+    """What you'd look like after `weeks` of a plan, from your latest body estimate and weigh-in."""
+    st = app_state()
+    prof, scan = st['profile'] or {}, (st['scans'] or [None])[-1]
+    if not scan or 'bf' not in scan['m']:
+        raise ValueError('Needs a body estimate first: walk past the camera')
+    m = dict(scan['m'])
+    m['weight'] = measure.nearest(weights(st['logs']), time.time(), 90) or m.get('weight')
+    if not m['weight']:
+        raise ValueError('Needs a recent weigh-in (log one, or sync a smart scale through Apple Health)')
+    sex = prof.get('sex', 'male')
+    out = measure.predict(m, sex, int(num(b.get('weeks', 12), 1, 104, 'weeks')), num(b.get('kcal', 0), -1500, 1500, 'kcal'),
+                          num(b.get('strength', 0), 0, 7, 'strength'), num(b.get('protein', 1.2), .5, 3.5, 'protein'),
+                          prof['height_cm'], measure.personal_slopes(st['scans'], sex))
+    dims = dict(scan['dims'])  # the predicted body: each part's width and depth scaled by its circumference change
+    for part in [*measure.TORSO, *measure.LIMBS]:
+        if part in m and part in out['m'] and m[part]:
+            for k in (f'{part}_w', f'{part}_d'):
+                if k in dims:
+                    dims[k] = round(dims[k] * out['m'][part] / m[part], 2)
+    if 'shoulders' in m and 'shoulders_w' in dims:
+        dims['shoulders_w'] = round(dims['shoulders_w'] * out['m']['shoulders'] / m['shoulders'], 2)
+    kcal, source = measure.maintenance(st['logs'], st['scans'])
+    return {**out, 'dims': dims, 'start': {k: m[k] for k in ('weight', 'bf') if k in m},
+            'maintenance': kcal and round(kcal), 'maintenance_source': source}
+
+
 POST = {'/api/profile': post_profile, '/api/logs': post_log, '/api/goals': post_goal,
-        '/api/calibrate': post_calibrate, '/api/clear-today': lambda b: cap.clear_today(), '/api/sync': post_sync}
+        '/api/calibrate': post_calibrate, '/api/clear-today': lambda b: cap.clear_today(), '/api/sync': post_sync,
+        '/api/predict': post_predict}
 LOCAL = ('localhost', '127.0.0.1')
 
 

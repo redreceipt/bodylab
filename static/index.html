@@ -8,6 +8,7 @@
 <style>
 :root { --bg:#060a13; --panel:rgba(13,19,33,.88); --line:rgba(120,200,255,.16); --fg:#e6f1ff; --dim:#8399b3; --acc:#3ef0ff; --good:#4cff9a; --bad:#ff6b6b; }
 * { box-sizing: border-box }
+[hidden] { display:none !important }
 html, body { margin:0; height:100%; overflow:hidden; color:var(--fg); font:14px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif;
   background: radial-gradient(ellipse at 50% 35%, #142440 0%, var(--bg) 65%) }
 #c { position:fixed; inset:0; width:100%; height:100%; display:block; outline:none }
@@ -22,22 +23,25 @@ h2 { margin:0 0 12px; font-size:20px } h3 { margin:16px 0 8px; font-size:15px } 
 p { margin:6px 0 } .muted { color:var(--dim); font-size:12.5px } .good { color:var(--good) } .bad { color:var(--bad) }
 .row { display:flex; align-items:center; justify-content:space-between; gap:10px }
 
-#hud { position:fixed; top:16px; left:16px; width:230px; display:flex; flex-direction:column; gap:9px }
+#hud { position:fixed; top:16px; left:16px; width:240px; display:flex; flex-direction:column; gap:10px }
+#summary { text-align:left; padding:12px 16px; cursor:pointer; background:var(--panel) } #summary:hover { border-color:var(--acc) }
+#summary .k { color:var(--dim); font-size:10.5px; text-transform:uppercase; letter-spacing:.14em } #summary .v { font-size:30px; font-weight:700 }
+#today { padding:10px 14px } #today ul { list-style:none; margin:6px 0 0; padding:0; font-size:13px }
+#today li { display:flex; gap:8px; padding:4px 0; color:var(--fg) } #today li > span { width:14px; color:var(--dim) } #today li.ok > span { color:var(--good) }
+#today li.ok { color:var(--dim) } #today small { display:block; color:var(--dim); font-size:11.5px }
+#cam { position:fixed; top:16px; right:16px; display:flex; align-items:center; gap:8px; max-width:340px; padding:8px 14px; border-radius:20px; font-size:12.5px; background:var(--panel); text-align:left }
+#preview { position:fixed; top:60px; right:16px; width:300px; padding:8px; display:flex; flex-direction:column; gap:7px }
+details { border-top:1px solid var(--line); padding:8px 0 } details > summary { cursor:pointer; color:var(--fg); font-weight:600; padding:4px 0 }
+details[open] > summary { margin-bottom:6px } .callout + .callout { margin-top:10px }
+table.days td, table.days th { text-align:center; padding:3px 2px } table.days td:first-child { text-align:left; color:var(--dim) } .miss { color:var(--bad) }
+#planOut { margin-top:10px }
 .brand { font-weight:800; letter-spacing:.24em; font-size:17px; padding:2px 4px 6px } .brand b { color:var(--acc) }
-.stat { padding:9px 14px; cursor:pointer; text-align:left; background:var(--panel); border:1px solid var(--line); border-radius:14px; width:100% }
-.stat:hover { border-color:var(--acc); background:var(--panel) }
-.stat .k { color:var(--dim); font-size:10.5px; text-transform:uppercase; letter-spacing:.14em }
-.stat .v { font-size:23px; font-weight:700; font-variant-numeric:tabular-nums } .stat .d { font-size:12px; font-weight:500; margin-left:8px }
 
-#cam { position:fixed; top:16px; right:16px; width:300px; padding:8px; display:flex; flex-direction:column; gap:7px; transition:width .2s }
-#cam.big { width:min(720px, 60vw) }
-#live { width:100%; max-height:44vh; object-fit:contain; border-radius:9px; background:#000; cursor:zoom-in; display:block }
-#cam.big #live { cursor:zoom-out }
-#camMsg { font-size:12.5px; flex:1 }
 #dot { width:9px; height:9px; border-radius:50%; background:var(--dim); flex:none }
 #dot.scanning, #dot.live { background:var(--acc); animation:pulse 1s infinite } #dot.saved, #dot.done { background:var(--good) }
 #dot.adjust { background:#ffc65c } #dot.offline, #dot.error { background:var(--bad) }
 @keyframes pulse { 50% { opacity:.3 } }
+#live { width:100%; max-height:50vh; object-fit:contain; border-radius:9px; background:#000; display:block }
 .bar { height:5px; background:rgba(255,255,255,.07); border-radius:3px; overflow:hidden; display:flex }
 .bar i { display:block; height:100%; background:var(--acc); transition:width .3s } .bar i + i { background:var(--good) }
 
@@ -50,7 +54,6 @@ p { margin:6px 0 } .muted { color:var(--dim); font-size:12.5px } .good { color:v
 #timeline label { display:flex; gap:6px; align-items:center; white-space:nowrap; font-size:12.5px; color:var(--dim) }
 #timeline label input { width:auto }
 #scanLabel { white-space:nowrap; font-size:12.5px; font-variant-numeric:tabular-nums }
-#liveTag { color:var(--bad); font-weight:700; font-size:12px; letter-spacing:.1em; animation:pulse 1.2s infinite }
 
 #panel { position:fixed; top:16px; right:16px; bottom:16px; width:440px; padding:20px 20px 24px; overflow:auto; z-index:2 }
 #close { position:absolute; top:12px; right:12px; padding:2px 10px }
@@ -94,24 +97,23 @@ ul.tips { padding-left:18px; color:var(--dim); font-size:12.5px }
 </head>
 <body>
 <canvas id="c" tabindex="0" aria-label="3D body model. Click a body part for details."></canvas>
-<header id="hud"><div class="brand">BODY<b>LAB</b></div><div id="stats" style="display:contents"></div></header>
-<aside id="cam" class="card">
-  <img id="live" alt="Live camera with body tracking overlay">
-  <div class="row"><span id="dot"></span><span id="camMsg" role="status">Connecting…</span></div>
-  <div class="row"><div class="bar" id="evidence" style="flex:1"><i id="barF" style="width:0"></i><i id="barS" style="width:0"></i></div>
-    <button id="clear" title="Discard today's measurements">Clear today</button></div>
-</aside>
+<header id="hud"><div class="brand">BODY<b>LAB</b></div>
+  <button id="summary" class="card" aria-label="Overall numbers"></button>
+  <section id="today" class="card" aria-label="Today's data"></section>
+</header>
+<button id="cam" class="card" title="Show the camera preview"><span id="dot"></span><span id="camMsg" role="status">Connecting…</span></button>
+<aside id="preview" class="card" hidden><img id="live" alt="Camera preview (private silhouette unless switched in Settings)">
+  <div class="bar" id="evidence"><i id="barF" style="width:0"></i><i id="barS" style="width:0"></i></div></aside>
 <nav id="nav">
-  <button data-tab="log">＋ Log inputs</button>
-  <button data-tab="insights">⟲ Insights</button>
-  <button data-tab="goals">◎ Goals</button>
-  <button data-tab="profile">⚙ Profile</button>
+  <button data-tab="log">＋ Log</button>
+  <button data-tab="progress">Progress</button>
+  <button data-tab="whatif">What if…</button>
+  <button data-tab="settings">Settings</button>
 </nav>
 <footer id="timeline" class="card">
-  <span id="liveTag" hidden>● LIVE</span>
-  <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Scan history">
+  <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Day">
   <span id="scanLabel"></span>
-  <label><input type="checkbox" id="ghost" checked> first-scan ghost</label>
+  <label id="ghostLabel"><input type="checkbox" id="ghost" checked> vs first day</label>
   <label><input type="checkbox" id="nude"> nude</label>
 </footer>
 <section id="panel" class="card" hidden><button id="close" aria-label="Close">×</button><div id="pbody"></div></section>

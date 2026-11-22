@@ -247,6 +247,86 @@ def hair_style(hair, img, face):
     return {'style': style, 'color': '#' + ''.join(f'{int(v):02x}' for v in rgb)}
 
 
+# How much each part's circumference typically moves per kg of fat lost/gained (cm/kg), until your own history says
+# otherwise; and per kg of lean mass gained. shortcut: population-typical priors, replaced per part by your measured slope.
+FAT_CM_PER_KG = {'male': {'waist': 1.1, 'hips': .6, 'chest': .5, 'neck': .2, 'thigh_l': .4, 'thigh_r': .4, 'arm_l': .25, 'arm_r': .25,
+                          'calf_l': .1, 'calf_r': .1},
+                 'female': {'waist': .8, 'hips': .9, 'chest': .6, 'underbust': .4, 'neck': .15, 'thigh_l': .6, 'thigh_r': .6,
+                            'arm_l': .3, 'arm_r': .3, 'calf_l': .15, 'calf_r': .15}}
+ESSENTIAL_FAT = {'male': 4, 'female': 12}  # % body fat; physiological minimums
+LEAN_CM_PER_KG = {'chest': .8, 'shoulders': .5, 'arm_l': .6, 'arm_r': .6, 'thigh_l': .6, 'thigh_r': .6, 'calf_l': .2, 'calf_r': .2,
+                  'waist': .1, 'neck': .2}
+
+
+def maintenance(logs, scans, now=None):
+    """Your maintenance calories: from logged intake vs weight trend when there's enough of both (what your body
+    actually did), else Apple Health's active + resting energy, else None."""
+    now, since = now or time.time(), (now or time.time()) - 28 * 86400
+    daily = [d for d in usable([l for l in logs if l['kind'] == 'daily'], now) if d['ts'] >= since]
+    intake = [d['kcal'] for d in daily if 'kcal' in d]
+    change = trend_change(series('weight', scans, logs), since)
+    if len(intake) >= 14 and change is not None:
+        return statistics.fmean(intake) - change * 7700 / 28, 'from your logged food and weight trend'
+    burn = [d['active'] + d['basal'] for d in daily if {'active', 'basal'} <= d.keys()]
+    if len(burn) >= 7:
+        return statistics.fmean(burn), "from Apple Health's active + resting energy"
+    return None, None
+
+
+def personal_slopes(scans, sex):
+    """cm of change per kg of fat for each part, from your own scans once there's a usable spread, else typical."""
+    out = dict(FAT_CM_PER_KG[sex])
+    for part in out:
+        pts = [(s['m']['fat_kg'], s['m'][part]) for s in scans if 'fat_kg' in s['m'] and part in s['m']]
+        if len(pts) >= 5 and np.ptp([p[0] for p in pts]) >= 1.5:  # at least 1.5 kg of fat change to learn from
+            slope = statistics.linear_regression(*zip(*pts)).slope
+            if 0 < slope < 4:
+                out[part] = slope
+    return out
+
+
+def predict(m, sex, weeks, kcal_delta, strength_per_week, protein_g_kg, height_cm, slopes=None):
+    """Simulate weeks of a plan from today's body m (needs weight and bf). Daily energy balance -> fat and lean change
+    (Hall's energy densities; Forbes's rule for how losses split between fat and lean; maintenance falls as you
+    lose), with resistance training and protein protecting or building lean mass. Returns weekly points and the
+    final metrics, including each part's circumference."""
+    weight, bf = m['weight'], m['bf']
+    fat, lean = weight * bf / 100, weight * (1 - bf / 100)
+    trains = strength_per_week >= 2 and protein_g_kg >= 1.6
+    floor = ESSENTIAL_FAT[sex] / 100  # below this the body breaks down lean tissue and organs suffer
+    path, warning = [], None
+    for d in range(weeks * 7 + 1):
+        if d % 7 == 0:
+            path.append({'week': d // 7, 'weight': round(fat + lean, 2), 'bf': round(100 * fat / (fat + lean), 2),
+                         'fat_kg': round(fat, 2), 'lean_kg': round(lean, 2)})
+        balance = kcal_delta + 25 * (weight - (fat + lean))  # maintenance drops ~25 kcal/day per kg lost
+        p = 10.4 / (10.4 + fat)  # Forbes: lean share of weight change (leaner people lose relatively more lean)
+        if balance < 0 and trains:
+            p *= .3  # lifting + enough protein spares most lean mass in a deficit
+        elif balance > 0:
+            p = .5 if trains else .3  # a surplus goes more to muscle when you train
+        d_weight = balance / (p * 1816 + (1 - p) * 9440)  # kcal per kg of that fat/lean mix
+        d_fat, d_lean = (1 - p) * d_weight, p * d_weight
+        if d_fat < 0 and (fat + d_fat) / (fat + lean + d_weight) < floor:
+            d_fat, d_lean = 0, balance / 1816  # nothing left to lose but muscle
+            warning = (f"This plan would take you below essential body fat (~{ESSENTIAL_FAT[sex]}% for "
+                       f"{'women' if sex == 'female' else 'men'}): fat loss stops and you'd lose muscle. Not a safe plan.")
+        if trains:  # resistance training builds some muscle even at maintenance; less as you get leaner of new gains
+            d_lean += min(strength_per_week, 5) / 5 * .25 / 30  # up to ~0.25 kg/month
+        fat, lean = fat + d_fat, lean + d_lean
+    final = {**m, 'weight': fat + lean, 'fat_kg': fat, 'lean_kg': lean, 'bf': 100 * fat / (fat + lean),
+             'ffmi': lean / (height_cm / 100) ** 2}
+    d_fat, d_lean = fat - m['weight'] * m['bf'] / 100, lean - m['weight'] * (1 - m['bf'] / 100)
+    for part, cm in (slopes or FAT_CM_PER_KG[sex]).items():
+        if part in m:
+            final[part] = m[part] + cm * d_fat + LEAN_CM_PER_KG.get(part, 0) * max(d_lean, 0)
+    if 'shoulders' in m:
+        final['shoulders'] = m['shoulders'] + LEAN_CM_PER_KG['shoulders'] * max(d_lean, 0)
+    if 'waist' in final:
+        final['whtr'] = final['waist'] / height_cm
+    return {'path': path, 'm': {k: round(v, 3) for k, v in final.items()}, 'warning': warning}
+
+
 def ellipse(w, d):
     """Ramanujan's ellipse perimeter from full width and depth."""
     a, b = w / 2, d / 2

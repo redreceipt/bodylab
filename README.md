@@ -1,6 +1,6 @@
 # BodyLab
 
-Track body composition by walking past a camera. BodyLab watches a network camera, measures your silhouette, estimates circumferences and body fat, and fits a realistic 3D body to you (your face, skin, eyes and hair from one photo). Click any part for its history and goals. Apple Health supplies the inputs (food, activity, heart, sleep, workouts), and an **inputs → outputs** view shows how they move your body.
+Track body composition by walking past a camera. BodyLab watches a network camera, measures your silhouette, estimates circumferences and body fat, and fits a realistic 3D body to you (your face, skin, eyes and hair from one photo). Apple Health supplies the inputs (food, activity, heart, sleep, workouts); **Progress** shows how they move your body, a **Today** checklist shows what's missing, and **What if…** shows you after a plan, predicted from your own data. See [ROADMAP.md](ROADMAP.md) for where it's going.
 
 Everything runs on your machine; other devices reach it only over your Tailscale tailnet, and only when signed in as you. Camera video stays in memory; only measurements (and your face photo, if you add one) are stored.
 
@@ -10,6 +10,7 @@ Requires [uv](https://docs.astral.sh/uv/) and a camera that serves MJPEG or RTSP
 
 ```sh
 uv run app.py              # http://localhost:8765 (downloads MediaPipe models on first use)
+tools/autostart.sh         # optional: start at login and keep running (macOS)
 uv run python test_bodylab.py && node test_body.mjs
 ```
 
@@ -62,6 +63,8 @@ Mounted sideways? Set **Camera rotation** in Profile.
 - **Your face:** the template head is rendered once and run through MediaPipe's face landmarker, giving each of 478 landmarks a spot on the skin texture. Your photo's landmarks then warp it, triangle by triangle, onto that texture (`static/look.js`), keeping the photo's fine detail but taking broad colour and shading from the skin, so studio lighting doesn't make it look pasted on. Skin tone and eye colour are read from the same photo; your hair is segmented to pick its colour and the closest haircut. An underwear toggle shows the bare body.
 - **Only you, only real scans:** a scan is saved only when one person is in frame, your face matches your photo ([OpenCV](https://github.com/opencv/opencv_zoo) YuNet + SFace), the proportions are human, and — by default — your torso shows skin (checked against your face's skin tone in the same frame), since clothes inflate every measurement. The live preview is a silhouette unless you switch it to the camera image.
 - **Incomplete data:** today's running totals and partly logged food days are left out of averages; energy balance needs 14+ fully logged days out of 28; weight and body trends use a Theil–Sen line so one noisy reading can't swing them; Insights lists exactly which inputs are missing.
+- **What if…:** a daily energy-balance simulation (Hall's energy densities, Forbes's fat/lean partitioning, maintenance that falls as you lose) with training and protein effects. Maintenance is learned from your logged food and weight trend; each body part changes the way yours has, once there's history. It refuses to go below essential body fat.
+- **Anatomy:** breasts are shaped from bust and underbust (MakeHuman cup and firmness morphs); male genitals from tape measurements (MakeHuman's genital helper, smoothed). The **nude** toggle switches between that and workout shorts and a top.
 - `uv run python tools/build_assets.py` rebuilds `static/assets/` from the original sources.
 
 Expect roughly ±3–4 body-fat points without calibration. Clothing, posture and lighting matter more than the math.

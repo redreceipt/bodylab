@@ -69,7 +69,7 @@ const day = (ts) => new Date(ts * 1000).toLocaleDateString(undefined, { month: '
 const isoDay = (iso) => new Date(iso + 'T12:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 const cur = () => live?.m ?? S.scans[idx]?.m ?? {};
 const base = () => S.scans[0]?.m ?? {};
-const series = (k) => (k === 'weight' ? S.logs.filter((l) => l.weight).map((l) => [l.ts, l.weight])
+const series = (k) => (LOGGED.has(k) ? S.logs.filter((l) => l[k] != null).map((l) => [l.ts, l[k]])
   : S.scans.filter((s) => s.m[k] != null).map((s) => [s.ts, s.m[k]]));
 // good/bad colouring only where the user said which way they want a metric to go
 function tone(k, delta) {
@@ -211,12 +211,12 @@ function bodyTris(garments) {
   })());
 }
 
-function buildAvatar(dims, sex, isGhost) {
+function buildAvatar(dims, sex, isGhost, m = {}) {
   // Ghost = first scan as a translucent shell that loses depth ties, so it only shows where the body has shrunk.
   // Shrinking it 6 mm per side hides noise-level differences (and z-fighting).
   const d = isGhost ? Object.fromEntries(Object.entries(dims || {}).map(([k, v]) => [k, /_[wd]$/.test(k) ? v - 1.2 : v])) : dims;
   const garments = look.clothes && !isGhost ? (sex === 'female' ? ['shorts', 'bra'] : ['shorts']) : [];
-  const fit = fitBody(d, S.profile?.height_cm ?? 175, sex, shape(live?.m ?? S.scans[idx]?.m ?? {}));
+  const fit = fitBody(d, S.profile?.height_cm ?? 175, sex, shape(m));
   const body = geometry(fit.pos, A.src, A.uv, bodyTris(garments));
   const group = new THREE.Group();
   if (isGhost) {
@@ -274,15 +274,16 @@ function paint() {
 }
 
 function rebuildAvatar(force = false) {
-  const sex = S.profile?.sex, dims = live?.dims ?? S.scans[idx]?.dims ?? {};
-  const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(live?.m ?? S.scans[idx]?.m ?? {})]);
+  const sex = S.profile?.sex, today = live?.dims ?? S.scans[idx]?.dims ?? {}, dims = predicted?.dims ?? today;
+  const m = predicted?.m ?? live?.m ?? S.scans[idx]?.m ?? {};
+  const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(m), !!predicted]);
   if (!force && key === lastDimsKey) return paint();
   lastDimsKey = key;
   for (const g of [avatar, ghost]) if (g) { scene.remove(g); g.traverse((o) => o.geometry?.dispose()); }
-  avatar = buildAvatar(dims, sex, false);
+  avatar = buildAvatar(dims, sex, false, m);
   scene.add(avatar);
-  const showGhost = $('#ghost').checked && S.scans.length > 1 && (live || idx > 0);
-  ghost = showGhost ? buildAvatar(S.scans[0].dims, sex, true) : null;
+  const showGhost = predicted || ($('#ghost').checked && S.scans.length > 1 && (live || idx > 0));
+  ghost = showGhost ? buildAvatar(predicted ? today : S.scans[0].dims, sex, true) : null; // predicted: outline = today
   if (ghost) scene.add(ghost);
   paint();
 }
@@ -354,22 +355,36 @@ canvas.addEventListener('pointerup', (e) => {
   if (p) open({ part: p });
 });
 
-// ---------- HUD, timeline ----------
+// ---------- main screen: summary, today, timeline ----------
+const LOGGED = new Set(['weight', 'penis_len_soft', 'penis_girth_soft', 'penis_len_erect', 'penis_girth_erect', 'tape_bust', 'tape_underbust']);
+const valueOf = (k) => (LOGGED.has(k) ? latest(k) : cur()[k]);
+function todayCard() {
+  const t = S.insights.days.at(-1), usual = S.insights.usual_kcal;
+  const items = [
+    ['scan', 'Body scan', t.views ? `${t.views} views so far — keep walking past` : 'Walk past the camera; turning helps'],
+    ['weight', 'Weigh-in', 'Step on the scale'],
+    ['food', 'Food', t.kcal ? `${Math.round(t.kcal).toLocaleString()}${usual ? ` of ~${Math.round(usual).toLocaleString()}` : ''} kcal logged` : 'Log meals in a food app that writes to Apple Health'],
+    ['sleep', 'Sleep', 'Wear your Watch to bed'],
+    ['activity', 'Activity', 'Wear your Watch'],
+  ];
+  const done = items.filter(([k]) => t[k]).length;
+  return `<div class="row"><b>Today</b><span class="muted">${done} of ${items.length}</span></div>
+    <ul>${items.map(([k, label, hint]) => `<li class="${t[k] ? 'ok' : ''}"><span>${t[k] ? '✓' : '○'}</span><div>${label}${t[k] ? '' : `<small>${hint}</small>`}</div></li>`).join('')}</ul>`;
+}
 function renderHud() {
-  const m = cur(), b = base();
-  $('#stats').innerHTML = ['bf', 'weight', 'lean_kg', 'whtr'].map((k) => {
-    const d = S.scans.length > 1 && m[k] != null && b[k] != null ? m[k] - b[k] : null;
-    return `<button class="stat" data-part="${k === 'whtr' ? 'waist' : 'overall'}"><div class="k">${META[k].label}</div>
-      <div class="v">${fmt(k, m[k])}${d ? `<span class="d ${tone(k, d)}">${fmt(k, d, true)}</span>` : ''}</div></button>`;
-  }).join('');
+  const m = cur(), c = S.insights.summary.changes;
+  $('#summary').innerHTML = m.bf != null
+    ? `<div class="k">Body fat</div><div class="v">${fmt('bf', m.bf)}</div>
+       <div class="muted">${[valueOf('weight') != null && fmt('weight', valueOf('weight')), c.bf != null && `${fmt('bf', c.bf, true)} in 4 weeks`].filter(Boolean).join(' · ')}</div>`
+    : '<div class="k">Your body</div><div class="muted">No estimate yet. Walk past the camera — every view helps.</div>';
+  $('#today').innerHTML = todayCard();
 }
 function renderTimeline() {
   const n = S.scans.length;
   $('#scrub').max = Math.max(0, n - 1);
   $('#scrub').value = idx;
-  $('#scrub').disabled = n < 2;
-  $('#scanLabel').textContent = live ? 'live view' : n ? `scan ${idx + 1}/${n} · ${day(S.scans[idx].ts)}` : 'no scans yet';
-  $('#liveTag').hidden = !live;
+  $('#scrub').hidden = $('#ghostLabel').hidden = n < 2 || !!predicted;
+  $('#scanLabel').textContent = predicted ? `predicted · in ${plan.weeks} weeks` : live ? 'today, live' : n ? day(S.scans[idx].ts) : 'no estimate yet';
 }
 $('#scrub').addEventListener('input', (e) => { idx = +e.target.value; renderAll(); });
 $('#ghost').addEventListener('change', () => rebuildAvatar(true));
@@ -378,16 +393,16 @@ $('#nude').addEventListener('change', async (e) => {
   rebuildAvatar(true);
   await api('POST', '/api/profile', { clothes: look.clothes });
 });
-$('#stats').addEventListener('click', (e) => { const b = e.target.closest('[data-part]'); if (b) open({ part: b.dataset.part }); });
+$('#summary').addEventListener('click', () => open({ part: 'overall' }));
 
-// ---------- panel ----------
+// ---------- panels ----------
 function spark(k) {
   const pts = series(k);
-  if (pts.length < 2) return '<p class="muted">Trend appears after 2+ data points.</p>';
+  if (pts.length < 2) return '';
   const u = META[k].unit, ys = pts.map((p) => toUnit(p[1], u)), xs = pts.map((p) => p[0]);
   const g = S.goals[k] && toUnit(S.goals[k].target, u);
   const lo = Math.min(...ys, g ?? Infinity), hi = Math.max(...ys, g ?? -Infinity);
-  const W = 360, H = 80, sx = (x) => 6 + ((x - xs[0]) / (xs.at(-1) - xs[0] || 1)) * (W - 12), sy = (y) => H - 8 - ((y - lo) / (hi - lo || 1)) * (H - 16);
+  const W = 360, H = 70, sx = (x) => 6 + ((x - xs[0]) / (xs.at(-1) - xs[0] || 1)) * (W - 12), sy = (y) => H - 8 - ((y - lo) / (hi - lo || 1)) * (H - 16);
   return `<svg class="spark" viewBox="0 0 ${W} ${H}" role="img" aria-label="${META[k].label} history">
     ${g != null ? `<line x1="0" x2="${W}" y1="${sy(g)}" y2="${sy(g)}"/>` : ''}
     <polyline points="${xs.map((x, i) => `${sx(x)},${sy(ys[i])}`).join(' ')}"/>
@@ -395,178 +410,194 @@ function spark(k) {
 }
 function goalBlock(k) {
   const g = S.goals[k], gi = S.insights.goals[k];
-  if (!g) return `<form class="inline" data-goal="${k}"><input name="target" type="number" step="any" placeholder="Target (${uLabel(META[k].unit) || 'value'})" required aria-label="Goal for ${META[k].label}"><button>Set goal</button></form>`;
+  if (!g) return `<form class="inline" data-goal="${k}"><input name="target" type="number" step="any" placeholder="Goal (${uLabel(META[k].unit) || 'value'})" required aria-label="Goal for ${META[k].label}"><button>Set goal</button></form>`;
   const pace = gi.progress === 1 ? '🎉 Goal reached'
     : gi.eta ? `On pace for <b>${isoDay(gi.eta)}</b> (${fmt(k, gi.rate_per_week, true)}/week)`
-      : gi.rate_per_week != null ? `Trend ${fmt(k, gi.rate_per_week, true)}/week — not heading toward the goal yet` : 'Projection needs ~3 data points over a few days';
+      : gi.rate_per_week != null ? `Trend ${fmt(k, gi.rate_per_week, true)}/week — not heading toward it yet` : 'A pace estimate needs a few days of data';
   return `<div class="goal"><div class="row"><span>Goal <b>${fmt(k, g.target)}</b></span><button class="link" data-delgoal="${k}">remove</button></div>
     <div class="bar"><i style="width:${(gi.progress ?? 0) * 100}%"></i></div><div class="muted">${pace}</div></div>`;
 }
-function metricBlock(k) {
-  const m = cur(), b = base(), d = m[k] != null && b[k] != null && S.scans.length > 1 ? m[k] - b[k] : null;
-  const c28 = S.insights.parts[k]?.change ?? S.insights.summary.changes[k];
-  return `<div class="metric"><div class="row"><h3>${META[k].label}</h3><span class="big">${fmt(k, m[k])}</span></div>
-    <div class="muted">Since first scan <span class="${tone(k, d)}">${fmt(k, d, true)}</span> · last 28 days <span class="${tone(k, c28)}">${fmt(k, c28, true)}</span></div>
-    ${spark(k)}${goalBlock(k)}</div>`;
+function metricBlock(k, withGoal = true) {
+  const pts = series(k), now = valueOf(k), c28 = S.insights.parts[k]?.change ?? S.insights.summary.changes[k];
+  const since = pts.length > 1 ? now - pts[0][1] : null;
+  return `<div class="metric"><div class="row"><h3>${META[k].label}</h3><span class="big">${fmt(k, now)}</span></div>
+    ${since != null || c28 != null ? `<div class="muted">${c28 != null ? `last 4 weeks <span class="${tone(k, c28)}">${fmt(k, c28, true)}</span>` : ''}${since != null ? ` · since you started <span class="${tone(k, since)}">${fmt(k, since, true)}</span>` : ''}</div>` : ''}
+    ${spark(k)}${withGoal ? goalBlock(k) : ''}</div>`;
 }
 function partPanel(k) {
   if (k === 'genitals') {
-    return `<h2>Genitals</h2>${['penis_len_soft', 'penis_girth_soft', 'penis_len_erect', 'penis_girth_erect'].map(metricBlock).join('')}
-      <p class="muted">Tracked from your tape measurements (Log inputs → Body measurements); the camera can't measure these reliably.
-      The 3D body shows the resting size. Length: bone-pressed, from the pubic bone along the top to the tip. Girth: around the middle of the shaft.
-      Measure at the same time of day and room temperature for clean trends.</p>`;
+    return `<h2>Genitals</h2>${['penis_len_soft', 'penis_girth_soft', 'penis_len_erect', 'penis_girth_erect'].map((x) => metricBlock(x, false)).join('')}
+      <p class="muted">From your tape measurements (Log → Body measurements). The 3D body shows the resting size.</p>`;
   }
   if (k === 'overall') {
     const m = cur();
-    return `<h2>Overall</h2>${['bf', 'weight', 'lean_kg'].map(metricBlock).join('')}
-      <table>${['fat_kg', 'ffmi', 'whtr', 'whr'].map((x) => `<tr><td>${META[x].label}</td><td>${fmt(x, m[x])}</td></tr>`).join('')}</table>
-      ${healthTable()}
-      <p class="muted">Body fat uses the US Navy circumference formula (height, neck, waist${S.profile?.sex === 'female' ? ', hips' : ''}). Expect ±3–4 points; tape-calibrating neck and waist helps most. Mass values need a weigh-in within 7 days of the scan.</p>`;
+    return `<h2>Overall</h2>${['bf', 'weight', 'lean_kg'].map((x) => metricBlock(x)).join('')}
+      <details><summary>More numbers</summary>
+        <table>${['fat_kg', 'ffmi', 'whtr', 'whr'].map((x) => `<tr><td>${META[x].label}</td><td>${fmt(x, m[x])}</td></tr>`).join('')}</table>
+        ${healthTable()}
+        <p class="muted">Body fat uses the US Navy circumference formula. Expect ±3–4 points; tape-calibrating neck and waist (tap them) tightens it.</p>
+      </details>`;
   }
-  const p = S.insights.parts[k] || {}, cal = S.profile?.calib?.[k], dims = (live?.dims ?? S.scans[idx]?.dims) || {};
-  const torso = ['neck', 'chest', 'waist', 'hips'].includes(k) && dims[`${k}_w`] ? `<p class="muted">Measured width ${fmt('neck', dims[`${k}_w`])}, depth ${fmt('neck', dims[`${k}_d`])} ${S.scans[idx]?.side && !live ? '(side view)' : '(estimated — turn sideways during a scan to measure it)'}.</p>` : '';
+  const p = S.insights.parts[k] || {}, cal = S.profile?.calib?.[k];
   const breasts = k === 'chest' && S.profile?.sex === 'female' ? (() => {
     const m = cur(), bust = latest('tape_bust') ?? m.chest, under = latest('tape_underbust') ?? m.underbust;
-    return `${metricBlock('underbust')}<p>${bust && under ? `Cup size about <b>${cupLetter(bust - under)}</b> (bust ${fmt('chest', bust)}, underbust ${fmt('chest', under)}${latest('tape_bust') ? ', from your tape' : ', from the camera'}).` : 'Cup size appears once bust and underbust are measured.'}
-      The 3D breasts are shaped from this; firmness is under Profile → Look.</p>`;
+    return `${metricBlock('underbust', false)}<p>${bust && under ? `Cup size about <b>${cupLetter(bust - under)}</b>.` : 'Cup size appears once bust and underbust are measured.'}</p>`;
   })() : '';
-  return `${metricBlock(k)}${breasts}${torso}
-    <h4>Training → result · last 28 days</h4>
-    <p>${p.workouts ? `<b>${p.workouts}</b> workouts targeted this area (load ${p.load}).` : 'No logged workouts targeted this area.'}
-    ${p.change != null ? ` Measured change <b class="${tone(k, p.change)}">${fmt(k, p.change, true)}</b>.` : ''}</p>
-    <h4>Calibrate</h4><p class="muted">Tape-measure once; all scans (past and future) are corrected.${cal ? ` Current correction ×${cal.toFixed(3)}.` : ''}</p>
-    <form class="inline" data-cal="${k}"><input name="value" type="number" step="any" required placeholder="Tape (${uLabel('cm')})" aria-label="Tape measurement"><button>Calibrate</button>
-    ${cal ? `<button type="button" class="link" data-calreset="${k}">reset</button>` : ''}</form>`;
+  return `${metricBlock(k, false)}${breasts}
+    ${p.workouts || p.change != null ? `<p>${p.workouts ? `${p.workouts} workouts trained this in the last 4 weeks.` : ''}</p>` : ''}
+    <details><summary>Goal and calibration</summary>${goalBlock(k)}
+      <p class="muted">Tape-measured it? Enter it once and every day (past and future) is corrected.${cal ? ` Current correction ×${cal.toFixed(3)}.` : ''}</p>
+      <form class="inline" data-cal="${k}"><input name="value" type="number" step="any" required placeholder="Tape (${uLabel('cm')})" aria-label="Tape measurement"><button>Calibrate</button>
+      ${cal ? `<button type="button" class="link" data-calreset="${k}">reset</button>` : ''}</form></details>`;
 }
 const FOCUS = ['full body', 'chest', 'back', 'shoulders', 'arms', 'core', 'legs', 'glutes', 'cardio'];
 function logItem(l) {
   const txt = l.kind === 'measure' ? '📏 ' + Object.keys(l).filter((x) => META[x]).map((x) => `${META[x].label} ${fmt(x, l[x])}`).join(' · ')
     : l.kind === 'workout'
-    ? `🏋️ ${l.type} · ${l.minutes} min · RPE ${l.rpe}${l.focus?.length ? ' · ' + l.focus.join(', ') : ''}${l.notes ? ' · ' + l.notes : ''}`
+    ? `🏋️ ${l.type} · ${l.minutes} min${l.focus?.length ? ' · ' + l.focus.join(', ') : ''}${l.notes ? ' · ' + l.notes : ''}`
     : '📋 ' + [l.weight && fmt('weight', l.weight), l.kcal && `${Math.round(l.kcal)} kcal`, l.protein && `${Math.round(l.protein)} g protein`,
-      l.sleep && `${l.sleep.toFixed(1)} h sleep`, l.steps && `${Math.round(l.steps)} steps`, l.active && `${Math.round(l.active)} active kcal`].filter(Boolean).join(' · ');
+      l.sleep && `${l.sleep.toFixed(1)} h sleep`, l.steps && `${Math.round(l.steps)} steps`].filter(Boolean).join(' · ');
   return `<li><span>${day(l.ts)}</span> ${esc(txt)} <button class="link" data-dellog="${l.id}">delete</button></li>`;
 }
 function logPanel() {
   const today = new Date().toLocaleDateString('en-CA');
-  return `<h2>Log inputs</h2>
-    <form id="fWorkout" class="stack"><h3>Workout</h3>
-      <div class="grid2"><label>Date<input type="date" name="date" value="${today}"></label>
-      <label>Type<select name="type">${['Strength', 'Cardio', 'HIIT', 'Sports', 'Mobility'].map((t) => `<option>${t}</option>`).join('')}</select></label>
+  return `<h2>Log</h2><p class="muted">Apple Health fills most of this in automatically. Use these for anything it doesn't.</p>
+    <details open><summary>Workout</summary><form id="fWorkout" class="stack">
+      <div class="grid2"><label>Type<select name="type">${['Strength', 'Cardio', 'HIIT', 'Sports', 'Mobility'].map((t) => `<option>${t}</option>`).join('')}</select></label>
       <label>Minutes<input type="number" name="minutes" min="1" max="600" value="45" required></label>
-      <label>Effort (RPE 1–10)<input type="number" name="rpe" min="1" max="10" value="7" required></label></div>
-      <fieldset class="chips"><legend class="muted">Focus</legend>${FOCUS.map((f) => `<label><input type="checkbox" name="focus" value="${f}">${f}</label>`).join('')}</fieldset>
-      <input name="notes" placeholder="Notes (optional)" aria-label="Notes"><button>Save workout</button></form>
-    <form id="fDaily" class="stack"><h3>Daily check-in</h3>
-      <div class="grid2"><label>Date<input type="date" name="date" value="${today}"></label>
-      <label>Weight (${uLabel('kg')})<input type="number" step="any" name="weight"></label>
+      <label>Effort (1–10)<input type="number" name="rpe" min="1" max="10" value="7" required></label>
+      <label>Date<input type="date" name="date" value="${today}"></label></div>
+      <fieldset class="chips"><legend class="muted">Worked</legend>${FOCUS.map((f) => `<label><input type="checkbox" name="focus" value="${f}">${f}</label>`).join('')}</fieldset>
+      <button>Save workout</button></form></details>
+    <details><summary>Weight, food, sleep</summary><form id="fDaily" class="stack">
+      <div class="grid2"><label>Weight (${uLabel('kg')})<input type="number" step="any" name="weight"></label>
       <label>Calories (kcal)<input type="number" name="kcal"></label>
       <label>Protein (g)<input type="number" name="protein"></label>
-      <label>Sleep (h)<input type="number" step="any" name="sleep"></label></div><button>Save check-in</button></form>
-    <form id="fMeasure" class="stack"><h3>Body measurements (tape)</h3>
+      <label>Sleep (h)<input type="number" step="any" name="sleep"></label>
+      <label>Date<input type="date" name="date" value="${today}"></label></div><button>Save</button></form></details>
+    <details><summary>Body measurements (tape)</summary><form id="fMeasure" class="stack">
       ${S.profile?.sex === 'female'
     ? `<div class="grid2"><label>Bust (${uLabel('cm')})<input type="number" step="any" name="tape_bust"></label>
          <label>Underbust (${uLabel('cm')})<input type="number" step="any" name="tape_underbust"></label></div>
-       <p class="muted">Bust: around the fullest part, tape level, no padding. Underbust: snug, right under the breasts.</p>`
+       <p class="muted">Bust: around the fullest part, tape level. Underbust: snug, right under the breasts.</p>`
     : `<div class="grid2"><label>Length, resting (${uLabel('cm')})<input type="number" step="any" name="penis_len_soft"></label>
          <label>Girth, resting (${uLabel('cm')})<input type="number" step="any" name="penis_girth_soft"></label>
          <label>Length, erect (${uLabel('cm')})<input type="number" step="any" name="penis_len_erect"></label>
          <label>Girth, erect (${uLabel('cm')})<input type="number" step="any" name="penis_girth_erect"></label></div>
-       <p class="muted">Men's health tracking (fill in any). Length: bone-pressed, pubic bone to tip along the top. Girth: around mid-shaft. Same time of day each time.</p>`}
-      <button>Save measurements</button></form>
-    <h3>Recent</h3><ul class="list">${S.logs.slice(-15).reverse().map(logItem).join('') || '<li class="muted">Nothing logged yet</li>'}</ul>
-    <h3>Scans</h3>${S.hidden_scans ? `<p class="muted">${S.hidden_scans} scan${S.hidden_scans > 1 ? 's' : ''} hidden: the proportions weren't human (a misread pose).</p>` : ''}<ul class="list">${S.scans.slice(-10).reverse().map((s) => `<li><span>${new Date(s.ts * 1000).toLocaleString()}</span> · body fat ${fmt('bf', s.m.bf)}${s.side ? ' · front+side' : ''} <button class="link" data-delscan="${s.id}">delete</button></li>`).join('') || '<li class="muted">No scans yet</li>'}</ul>`;
-}
-function goalsPanel() {
-  const free = Object.keys(META).filter((k) => !S.goals[k]);
-  return `<h2>Goals</h2>${Object.keys(S.goals).map(metricBlock).join('') || '<p class="muted">No goals yet. Goals colour the body: green = moving toward it, red = away.</p>'}
-    <form id="fGoal" class="inline"><select name="metric" aria-label="Metric">${free.map((k) => `<option value="${k}">${META[k].label}</option>`).join('')}</select>
-    <input name="target" type="number" step="any" placeholder="Target" required aria-label="Target"><button>Add goal</button></form>`;
+       <p class="muted">Length: bone-pressed, pubic bone to tip along the top. Girth: around mid-shaft. Same time of day each time.</p>`}
+      <button>Save</button></form></details>
+    <details><summary>Recent entries</summary><ul class="list">${S.logs.slice(-20).reverse().map(logItem).join('') || '<li class="muted">Nothing yet</li>'}</ul></details>`;
 }
 function weekChart(weeks) {
-  const W = 380, H = 140, bw = W / weeks.length, maxL = Math.max(1, ...weeks.map((w) => w.load));
+  const W = 380, H = 130, bw = W / weeks.length, maxL = Math.max(1, ...weeks.map((w) => w.load));
   const bfs = weeks.map((w) => w.bf).filter((v) => v != null), lo = Math.min(...bfs), hi = Math.max(...bfs);
   const y = (v) => H - 22 - ((v - lo) / (hi - lo || 1)) * (H - 44);
   const pts = weeks.map((w, i) => (w.bf == null ? null : [i * bw + bw / 2, y(w.bf)])).filter(Boolean);
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Weekly training load and body fat">
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Weekly training and body fat">
     ${weeks.map((w, i) => { const h = (w.load / maxL) * (H - 44); return `<rect x="${i * bw + 5}" y="${H - 16 - h}" width="${bw - 10}" height="${h}" rx="3"/>`; }).join('')}
     <polyline points="${pts.map((p) => p.join(',')).join(' ')}"/>${pts.map(([cx, cy]) => `<circle r="3" cx="${cx}" cy="${cy}"/>`).join('')}
     ${weeks.map((w, i) => `<text x="${i * bw + bw / 2}" y="${H - 3}">${w.week.slice(5)}</text>`).join('')}</svg>
-    <div class="legend"><span><i></i>training load (min × RPE)</span><span><i class="l"></i>body fat</span></div>`;
+    <div class="legend"><span><i></i>training</span><span><i class="l"></i>body fat</span></div>`;
 }
-function insightsPanel() {
+function daysGrid() { // which inputs each of the last 14 days has, so gaps show while they can still be fixed
+  const rows = [['scan', 'Scan'], ['weight', 'Weigh-in'], ['food', 'Food'], ['sleep', 'Sleep'], ['activity', 'Activity']];
+  return `<table class="days"><tr><th></th>${S.insights.days.map((d) => `<th>${'SMTWTFS'[new Date(d.date + 'T12:00').getDay()]}</th>`).join('')}</tr>
+    ${rows.map(([k, label]) => `<tr><td>${label}</td>${S.insights.days.map((d) => `<td title="${d.date}">${d[k] ? '●' : '<span class="miss">○</span>'}</td>`).join('')}</tr>`).join('')}</table>`;
+}
+function progressPanel() {
   const I = S.insights, s = I.summary, c = s.changes;
   const outs = ['bf', 'waist', 'weight', 'lean_kg'].filter((k) => c[k] != null).map((k) => `${META[k].label.toLowerCase()} <b class="${tone(k, c[k])}">${fmt(k, c[k], true)}</b>`);
-  const lines = [`<b>Inputs</b> (28 days): ${s.workouts} workouts, load ${s.load}${s.kcal ? `, ${Math.round(s.kcal)} kcal/day avg` : ''}.`,
-    s.balance != null
-      ? `<b>Energy balance</b> ${s.balance > 0 ? '+' : ''}${Math.round(s.balance)} kcal/day (${s.balance_days} fully logged days) → predicts <b>${fmt('weight', s.predicted_kg, true)}</b> over 28 days${c.weight != null ? `; measured trend ${fmt('weight', c.weight, true)}` : ''}.`
-      : `<b>Energy balance</b>: needs 14+ fully logged days in the last 28 (${s.balance_days} so far).`,
-    `<b>Outputs</b>: ${outs.length ? outs.join(', ') : 'need 2+ scans in this window'}.`,
-    ...Object.entries(I.goals).filter(([, g]) => g.eta).map(([k, g]) => `At this pace: ${META[k].label} ${fmt(k, g.target)} by <b>${isoDay(g.eta)}</b>.`),
-    ...I.notes];
-  const cell = (k, v, dec = 0) => (v == null ? '—' : toUnit(v, META[k]?.unit).toFixed(META[k]?.dec ?? dec));
-  const gaps = I.gaps.length ? `<div class="callout gaps"><b>Data gaps</b> — fill these for trustworthy results<ul>${I.gaps.map((g) => `<li>${esc(g)}</li>`).join('')}</ul></div>` : '';
-  return `<h2>Inputs → Outputs</h2><div class="callout">${lines.map((l) => `<p>${l}</p>`).join('')}</div>${gaps}${weekChart(I.weeks)}
-    <div class="scroll"><table><tr><th>Week of</th><th>Wkts</th><th>Load</th><th>kcal</th><th>Bal</th><th>Steps</th><th>Prot g</th><th>Sleep h</th><th>Wt ${uLabel('kg')}</th><th>BF %</th><th>Waist ${uLabel('cm')}</th></tr>
-    ${I.weeks.map((w) => `<tr><td>${isoDay(w.week).replace(/, \d{4}$/, '')}</td><td>${w.workouts}</td><td>${w.load}</td><td>${cell(0, w.kcal)}</td><td>${cell(0, w.balance)}</td><td>${cell(0, w.steps)}</td>
-      <td>${cell(0, w.protein)}</td><td>${cell(0, w.sleep, 1)}</td><td>${cell('weight', w.weight)}</td><td>${cell('bf', w.bf)}</td><td>${cell('waist', w.waist)}</td></tr>`).join('')}</table></div>
-    <p class="muted">Correlations show up after ~4 weeks of scans and logs. They're hints, not proof.</p>`;
+  const lines = [outs.length ? `Last 4 weeks: ${outs.join(', ')}.` : 'Changes appear after a few days of body estimates.',
+    s.balance != null ? `You ate about <b>${Math.abs(Math.round(s.balance))} kcal/day ${s.balance < 0 ? 'under' : 'over'}</b> what you burned, which predicts ${fmt('weight', s.predicted_kg, true)}${c.weight != null ? `; the scale says ${fmt('weight', c.weight, true)}` : ''}.` : '',
+    ...Object.entries(I.goals).filter(([, g]) => g.eta).map(([k, g]) => `On pace: ${META[k].label.toLowerCase()} ${fmt(k, g.target)} by <b>${isoDay(g.eta)}</b>.`),
+    ...I.notes].filter(Boolean);
+  const free = Object.keys(META).filter((k) => !S.goals[k] && !['genitals'].includes(k));
+  return `<h2>Progress</h2><div class="callout">${lines.map((l) => `<p>${l}</p>`).join('')}</div>
+    ${I.gaps.length ? `<div class="callout gaps"><b>Missing data</b><ul>${I.gaps.map((g) => `<li>${esc(g)}</li>`).join('')}</ul></div>` : ''}
+    <h3>Last 2 weeks</h3>${daysGrid()}
+    <h3>Goals</h3>${Object.keys(S.goals).map((k) => metricBlock(k)).join('') || '<p class="muted">Goals colour the body: green = moving toward them, red = away.</p>'}
+    <form id="fGoal" class="inline"><select name="metric" aria-label="Metric">${free.map((k) => `<option value="${k}">${META[k].label}</option>`).join('')}</select>
+      <input name="target" type="number" step="any" placeholder="Target" required aria-label="Target"><button>Add</button></form>
+    <details><summary>Training vs body fat, week by week</summary>${weekChart(I.weeks)}</details>`;
+}
+// What if: a plan's effect on your body, simulated from your own data.
+const plan = { kcal: -300, strength: 3, protein: 1.6, weeks: 12 };
+let predicted = null, predictTimer = null;
+function whatifPanel() {
+  const r = (name, label, min, max, step, unit) => `<label>${label} <b>${plan[name]}${unit}</b><input type="range" name="${name}" min="${min}" max="${max}" step="${step}" value="${plan[name]}"></label>`;
+  return `<h2>What if…</h2><p class="muted">The avatar shows you after this plan; the outline is you today.</p>
+    <form id="fPlan" class="stack">${r('kcal', 'Calories vs maintenance', -1000, 800, 50, ' kcal/day')}${r('strength', 'Strength workouts', 0, 6, 1, '/week')}
+      ${r('protein', 'Protein', 0.8, 2.4, 0.1, ' g/kg')}${r('weeks', 'For', 1, 52, 1, ' weeks')}</form><div id="planOut" class="callout"><p class="muted">Simulating…</p></div>`;
+}
+async function runPlan() {
+  try {
+    const out = await api('POST', '/api/predict', plan), m = out.m;
+    predicted = { dims: out.dims, m };
+    $('#planOut').innerHTML = `${out.warning ? `<p class="bad"><b>${esc(out.warning)}</b></p>` : ''}<p>${['weight', 'bf', 'lean_kg', 'waist'].filter((k) => m[k] != null)
+      .map((k) => `${META[k].label} <b>${fmt(k, m[k])}</b> (${fmt(k, m[k] - (out.start[k] ?? cur()[k] ?? m[k]), true)})`).join('<br>')}</p>
+      <p class="muted">${out.maintenance ? `Your maintenance ≈ ${out.maintenance.toLocaleString()} kcal/day, ${out.maintenance_source}.` : 'Log food and weight in Apple Health and this learns your real maintenance.'}
+      Each body part changes the way yours has, once there's enough history; until then, by typical patterns.</p>`;
+  } catch (e) {
+    predicted = null;
+    $('#planOut').innerHTML = `<p>${esc(e.message)}</p>`;
+  }
+  renderTimeline();
+  rebuildAvatar();
 }
 const EYES = ['brown', 'brownlight', 'blue', 'deepblue', 'bluegreen', 'green', 'grey', 'lightblue', 'ice'];
 function pairBlock() {
   if (!S.sync.url) return '<p class="muted">Run <code>tailscale serve --bg --https=8443 http://127.0.0.1:8765</code> so your iPhone can reach BodyLab, then reload.</p>';
   const link = `bodylab://pair?server=${encodeURIComponent(S.sync.url)}&token=${encodeURIComponent(S.sync.token)}`;
   return `<div class="qr" title="Pairing code">${renderSVG(link, { pixelSize: 4 })}</div>
-    <p class="muted">Scan with the iPhone Camera to pair the BodyLab Sync app. Apple Health then fills in your height, sex and age and keeps weight, food, activity, heart, sleep and workouts flowing in.</p>`;
+    <p class="muted">Scan with the iPhone Camera to pair BodyLab Sync. Apple Health fills in your height, sex and age, then keeps everything flowing in.</p>`;
 }
-function profilePanel() {
+function settingsPanel() {
   const p = S.profile || {}, imp = p.units ? imperial() : true, first = !p.height_cm;
   const h = p.height_cm ? (imp ? p.height_cm / 2.54 : p.height_cm).toFixed(1) : '';
   const opt = (value, label, on) => `<option value="${value}" ${on ? 'selected' : ''}>${label}</option>`;
-  return `<h2>${first ? 'Welcome to BodyLab' : 'Profile'}</h2>
-    ${first ? `<p>Fastest setup: pair your iPhone and let Apple Health fill in the rest.</p>${pairBlock()}<p class="muted">Or enter your height yourself:</p>` : ''}
-    <form id="fProfile" class="stack">
-      <label>Units<select name="units">${opt('imperial', 'Imperial (in, lb)', imp)}${opt('metric', 'Metric (cm, kg)', !imp)}</select></label>
+  return `<h2>${first ? 'Welcome to BodyLab' : 'Settings'}</h2>
+    ${first ? `<p>Pair your iPhone and Apple Health fills in the rest.</p>${pairBlock()}<p class="muted">Or set your height:</p>` : ''}
+    <form id="fProfile" class="stack"><div class="grid2">
       <label><span>Height (<span id="hu">${imp ? 'in' : 'cm'}</span>)</span><input name="height" type="number" step="any" value="${h}" required></label>
-      <label>Sex (body shape &amp; body-fat formula)<select name="sex">${opt('male', 'Male')}${opt('female', 'Female', p.sex === 'female')}</select></label>
-      ${p.birth_date ? `<p class="muted">Born ${esc(p.birth_date)} (from Apple Health)</p>` : ''}
-      <label>Camera URL<input name="camera_url" value="${esc(p.camera_url ?? '')}" placeholder="http://&lt;pi-tailscale-ip&gt;:8000/stream.mjpg"></label>
-      <label>Camera rotation<select name="rotate">${[0, 90, 180, 270].map((r) => opt(r, r ? r + '° clockwise' : 'None', (p.rotate ?? 0) === r)).join('')}</select></label>
+      <label>Sex<select name="sex">${opt('male', 'Male')}${opt('female', 'Female', p.sex === 'female')}</select></label>
+      <label>Units<select name="units">${opt('imperial', 'in, lb', imp)}${opt('metric', 'cm, kg', !imp)}</select></label></div>
+      <input type="hidden" name="camera_url" value="${esc(p.camera_url ?? '')}"><input type="hidden" name="rotate" value="${p.rotate ?? 0}">
       <button>Save</button></form>
-    <h3>Scanning</h3>
-    <form id="fScan" class="stack">
-      <label class="check"><input type="checkbox" name="bare_only" ${p.bare_only === false ? '' : 'checked'}> Only count scans in minimal clothing (underwear is fine) — clothes inflate every measurement</label>
-      <label>Live preview<select name="preview">${opt('silhouette', 'Silhouette only (private)', p.preview !== 'camera')}${opt('camera', 'Camera image (for aiming the camera)', p.preview === 'camera')}</select></label>
-      <p class="muted">${S.face ? 'Scans are saved only for you: your face must match your photo, and only one person can be in the frame.' : 'Add a face photo below so scans are saved only for you. Until then, anyone alone in the frame gets scanned.'} Frames are never stored.</p>
-      <button>Save</button></form>
-    <h3>Look</h3>
-    <div class="row" style="justify-content:flex-start">${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
-      <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
-      ${S.face ? '<button type="button" class="link" data-delface="1">remove</button>' : ''}</div>
-    <p class="muted">Straight on, evenly lit, neutral face with mouth closed, like a passport photo (the iPhone app can take it). It's mapped onto your 3D face and sets skin, eye and hair colour. Stays on this Mac.</p>
-    <form id="fLook" class="stack"><div class="grid2">
-      <label>Hair<select name="hair">${[['none', 'None'], ...Object.entries(HAIRS)].map(([k, v]) => opt(k, v, look.hair === k)).join('')}</select></label>
-      <label>Hair colour<input type="color" name="hair_color" value="${esc(p.hair_color ?? look.auto?.hair ?? '#3b2a20')}"></label>
-      <label>Eyes<select name="eye_color">${opt('auto', S.face ? 'From photo' : 'Brown', !p.eye_color || p.eye_color === 'auto')}${EYES.map((e) => opt(e, e, p.eye_color === e)).join('')}</select></label>
-      <label>Skin tone${S.face ? ' (from photo)' : ''}<input type="color" name="skin" value="${esc(p.skin ?? '#c99478')}" ${S.face ? 'disabled' : ''}></label>
-      ${p.sex === 'female' ? `<label>Breast firmness<input type="range" name="firmness" min="-1" max="1" step="0.1" value="${p.firmness ?? 0}"></label>`
+    <details><summary>Your look</summary>
+      <div class="row" style="justify-content:flex-start">${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
+        <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
+        ${S.face ? '<button type="button" class="link" data-delface="1">remove</button>' : ''}</div>
+      <p class="muted">Straight on, even light, neutral face, mouth closed. Sets your face, skin, eyes and hair.</p>
+      <form id="fLook" class="stack"><div class="grid2">
+        <label>Hair<select name="hair">${[['none', 'None'], ...Object.entries(HAIRS)].map(([k, v]) => opt(k, v, look.hair === k)).join('')}</select></label>
+        <label>Hair colour<input type="color" name="hair_color" value="${esc(p.hair_color ?? look.auto?.hair ?? '#3b2a20')}"></label>
+        <label>Eyes<select name="eye_color">${opt('auto', S.face ? 'From photo' : 'Brown', !p.eye_color || p.eye_color === 'auto')}${EYES.map((e) => opt(e, e, p.eye_color === e)).join('')}</select></label>
+        ${S.face ? '' : `<label>Skin tone<input type="color" name="skin" value="${esc(p.skin ?? '#c99478')}"></label>`}
+        ${p.sex === 'female' ? `<label>Breast firmness<input type="range" name="firmness" min="-1" max="1" step="0.1" value="${p.firmness ?? 0}"></label>`
     : `<label>Testicle size<input type="range" name="testicles" min="-1" max="1" step="0.1" value="${p.testicles ?? 0}"></label>`}
-    </div><button>Save look</button></form>
-    ${first ? '' : `<h3>iPhone · Apple Health</h3>${pairBlock()}`}
-    <h3>Scanning tips</h3><ul class="tips"><li>Camera ~chest height, 2.5–3.5 m away, whole body in frame.</li>
-      <li>Minimal clothing (underwear / sports bra) — clothes inflate every measurement. Hair off the neck.</li><li>Stand tall, feet hip-width, arms ~30° out.</li>
-      <li>No need to pose: every frame counts. Turning a little (or walking past side-on) gives body depth.</li><li>Same time of day (e.g. morning, before eating) for clean trends.</li></ul>
-    <p class="muted">Camera video never leaves this Mac or gets saved — only the measurements.</p>`;
+      </div><button>Save look</button></form></details>
+    <details><summary>Camera</summary>
+      <form id="fCamera" class="stack">
+        <label>Camera URL<input name="camera_url" value="${esc(p.camera_url ?? '')}" placeholder="http://&lt;pi-tailscale-ip&gt;:8000/stream.mjpg"></label>
+        <label>Rotation<select name="rotate">${[0, 90, 180, 270].map((r) => opt(r, r ? r + '° clockwise' : 'None', (p.rotate ?? 0) === r)).join('')}</select></label>
+        <label class="check"><input type="checkbox" name="bare_only" ${p.bare_only === false ? '' : 'checked'}> Only measure bare skin (underwear is fine): clothes inflate measurements</label>
+        <label>Preview<select name="preview">${opt('silhouette', 'Silhouette only (private)', p.preview !== 'camera')}${opt('camera', 'Camera image (for aiming)', p.preview === 'camera')}</select></label>
+        <button>Save</button></form>
+      <p class="muted">Only you are measured (your face must match your photo; one person in view). Frames are never stored.</p>
+      <button type="button" id="clear">Discard today's measurements</button></details>
+    ${first ? '' : `<details><summary>iPhone and Apple Health</summary>${pairBlock()}</details>`}`;
 }
 function renderPanel() {
   if (!view) return ($('#panel').hidden = true);
   $('#panel').hidden = false;
   $('#pbody').innerHTML = view.part ? partPanel(view.part)
-    : { log: logPanel, goals: goalsPanel, insights: insightsPanel, profile: profilePanel }[view.tab]();
+    : { log: logPanel, progress: progressPanel, whatif: whatifPanel, settings: settingsPanel }[view.tab]();
+  if (view.tab === 'whatif') runPlan();
   document.querySelectorAll('#nav button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.tab === view.tab));
 }
 function open(v) {
   if (v?.part || (!v && view?.part)) focusOn(v?.part);
+  if (view?.tab === 'whatif' && v?.tab !== 'whatif') { predicted = null; renderTimeline(); rebuildAvatar(); }
   view = v;
   selectedPart = v?.part && v.part !== 'overall' ? v.part : null;
   renderPanel();
@@ -575,6 +606,13 @@ function open(v) {
 $('#nav').addEventListener('click', (e) => { const t = e.target.closest('[data-tab]')?.dataset.tab; if (t) open(view?.tab === t ? null : { tab: t }); });
 $('#close').addEventListener('click', () => open(null));
 addEventListener('keydown', (e) => e.key === 'Escape' && open(null));
+$('#panel').addEventListener('input', (e) => {
+  if (e.target.form?.id !== 'fPlan') return;
+  plan[e.target.name] = +e.target.value;
+  e.target.previousElementSibling.textContent = e.target.previousElementSibling.textContent.replace(/^-?[\d.]+/, e.target.value);
+  clearTimeout(predictTimer);
+  predictTimer = setTimeout(runPlan, 250);
+});
 $('#panel').addEventListener('change', async (e) => {
   if (e.target.id === 'faceFile' && e.target.files[0]) {
     toast('Reading your face…');
@@ -598,7 +636,7 @@ $('#panel').addEventListener('submit', async (e) => {
     else if (f.id === 'fProfile') await api('POST', '/api/profile', { ...o, height_cm: o.units === 'imperial' ? o.height * 2.54 : +o.height });
     else if (f.id === 'fLook') await api('POST', '/api/profile', o);
     else if (f.id === 'fMeasure') await api('POST', '/api/logs', { kind: 'measure', ...Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v === '' ? '' : fromUnit(+v, 'cm')])) });
-    else if (f.id === 'fScan') await api('POST', '/api/profile', { bare_only: fd.has('bare_only'), preview: o.preview });
+    else if (f.id === 'fCamera') await api('POST', '/api/profile', { ...o, bare_only: fd.has('bare_only') });
     else if (f.id === 'fGoal' || f.dataset.goal) {
       const k = f.dataset.goal || o.metric;
       await api('POST', '/api/goals', { metric: k, target: fromUnit(+o.target, META[k].unit) });
@@ -608,6 +646,11 @@ $('#panel').addEventListener('submit', async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 $('#panel').addEventListener('click', async (e) => {
+  if (e.target.id === 'clear') {
+    if (!confirm("Discard everything measured today? Earlier days aren't touched.")) return;
+    await api('POST', '/api/clear-today', {});
+    return toast("Today's measurements cleared");
+  }
   const b = e.target.closest('button[data-dellog],button[data-delscan],button[data-delgoal],button[data-calreset],button[data-delface]');
   if (!b) return;
   const { dellog, delscan, delgoal, calreset, delface } = b.dataset;
@@ -623,11 +666,10 @@ $('#panel').addEventListener('click', async (e) => {
 });
 
 // ---------- camera status ----------
-$('#live').addEventListener('click', () => $('#cam').classList.toggle('big'));
-$('#clear').addEventListener('click', async () => {
-  if (!confirm("Discard everything measured today? Earlier days aren't touched.")) return;
-  await api('POST', '/api/clear-today', {});
-  toast("Today's measurements cleared");
+$('#cam').addEventListener('click', () => {
+  const show = $('#preview').hidden;
+  $('#preview').hidden = !show;
+  $('#live').src = show ? '/api/live.mjpg' : ''; // only stream while you're looking
 });
 async function poll() {
   try {
@@ -665,6 +707,5 @@ async function refresh(withPanel = true) {
 }
 
 await refresh();
-$('#live').src = '/api/live.mjpg';
-if (!S.profile?.height_cm) open({ tab: 'profile' });
+if (!S.profile?.height_cm) open({ tab: 'settings' });
 poll();
