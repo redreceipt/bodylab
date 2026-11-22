@@ -20,6 +20,10 @@ targets:
       properties:
         CFBundleDisplayName: BodyLab Sync
         NSHealthShareUsageDescription: BodyLab reads weight, nutrition, sleep, activity and workouts to show how they change your body.
+        NSCameraUsageDescription: BodyLab uses a face photo to make your 3D body look like you. It stays on your BodyLab server.
+        CFBundleURLTypes:
+          - CFBundleURLName: bodylab-pairing
+            CFBundleURLSchemes: [bodylab]
         UILaunchScreen: {}
     settings:
       base:

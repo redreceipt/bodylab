@@ -28,13 +28,21 @@ ROOT = Path(__file__).parent
 MODEL = ROOT / 'models' / 'pose_landmarker_heavy.task'
 MODEL_URL = ('https://storage.googleapis.com/mediapipe-models/pose_landmarker/'
              'pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task')
+FACE_MODEL = ROOT / 'models' / 'face_landmarker.task'
+FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task'
 ROTATE = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
 PORT = int(os.environ.get('PORT', '8765'))
 SYNC_PORT = 8443  # `tailscale serve --bg --https=8443 8765` exposes /api/sync to your tailnet
 COOLDOWN_S = float(os.environ.get('COOLDOWN_MIN', '10')) * 60
 FRONT_FRAMES, SIDE_FRAMES, LIVE_FRAMES = 40, 20, 12
 DB_PATH = Path(os.environ.get('BODYLAB_DB') or ROOT / 'data' / 'bodylab.db')
-DAILY = {'weight': (20, 400), 'kcal': (0, 15000), 'protein': (0, 1000), 'sleep': (0, 24), 'active': (0, 20000)}
+# Daily inputs (manual or Apple Health) and their sane ranges.
+DAILY = {'weight': (20, 400), 'scale_bf': (2, 75), 'scale_lean': (10, 300), 'tape_waist': (30, 300),
+         'kcal': (0, 15000), 'protein': (0, 1000), 'carbs': (0, 2000), 'fat': (0, 1000), 'fiber': (0, 300),
+         'sugar': (0, 1000), 'water': (0, 20), 'alcohol': (0, 50),
+         'sleep': (0, 24), 'sleep_deep': (0, 24), 'sleep_rem': (0, 24),
+         'active': (0, 20000), 'basal': (0, 10000), 'steps': (0, 200000), 'exercise': (0, 1440),
+         'rhr': (20, 250), 'hrv': (1, 500), 'vo2max': (5, 100), 'walk_hr': (20, 250), 'resp': (2, 80)}
 
 
 def db():
@@ -77,12 +85,60 @@ def sync_url():
         return None
 
 
-def ensure_model():
-    if not MODEL.exists():
-        MODEL.parent.mkdir(exist_ok=True)
-        print('Downloading pose model (30 MB)…', flush=True)
-        urllib.request.urlretrieve(MODEL_URL, MODEL.with_suffix('.part'))
-        MODEL.with_suffix('.part').rename(MODEL)
+def ensure_model(path=MODEL, url=MODEL_URL):
+    if not path.exists():
+        path.parent.mkdir(exist_ok=True)
+        print(f'Downloading {path.name}…', flush=True)
+        urllib.request.urlretrieve(url, path.with_suffix('.part'))
+        path.with_suffix('.part').rename(path)
+
+
+REV = threading.Lock()
+
+
+def data_rev():
+    """Changes whenever another connection commits (iPhone sync, edits) or the face photo changes."""
+    global _rev_db
+    with REV:
+        if '_rev_db' not in globals():
+            _rev_db = sqlite3.connect(DB_PATH, check_same_thread=False)
+        version = _rev_db.execute('pragma data_version').fetchone()[0]
+    face = face_files()[1]
+    return f'{version}-{face.stat().st_mtime if face.exists() else 0}'
+
+
+def face_files():
+    return DB_PATH.parent / 'face.jpg', DB_PATH.parent / 'face.json'
+
+
+def post_face(raw):
+    """Face photo for the avatar: stored with its 478 landmarks next to the database (never leaves this Mac)."""
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError('That is not an image')
+    if (k := 1600 / max(img.shape[:2])) < 1:
+        img = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    ensure_model(FACE_MODEL, FACE_MODEL_URL)
+    landmarker = vision.FaceLandmarker.create_from_options(
+        vision.FaceLandmarkerOptions(base_options=BaseOptions(model_asset_path=str(FACE_MODEL)), num_faces=2))
+    try:
+        faces = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(img, cv2.COLOR_BGR2RGB))).face_landmarks
+    finally:
+        landmarker.close()
+    if len(faces) != 1:
+        raise ValueError('Need exactly one face in the photo' if faces else 'No face found — try a brighter, closer photo')
+    h, w = img.shape[:2]
+    pts = np.array([[l.x * w, l.y * h] for l in faces[0]])
+    if np.ptp(pts[:, 0]) < 150:
+        raise ValueError('Face is too small — hold the camera closer')
+    left, right = np.linalg.norm(pts[1] - pts[263]), np.linalg.norm(pts[1] - pts[33])  # nose tip to outer eye corners
+    if abs(left - right) / (left + right) > .2:
+        raise ValueError('Look straight at the camera')
+    if np.linalg.norm(pts[13] - pts[14]) > .03 * np.ptp(pts[:, 1]):  # inner lips apart
+        raise ValueError('Close your mouth (neutral expression) — teeth don\'t map onto the 3D face')
+    jpg, meta = face_files()
+    cv2.imwrite(str(jpg), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    meta.write_text(json.dumps({'w': w, 'h': h, 'ts': time.time(), 'landmarks': (pts / [w, h]).round(5).tolist()}))
 
 
 def get_logs():
@@ -114,7 +170,9 @@ def app_state():
             raw = json.loads(r['raw'])
             m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']))
             scans.append({'id': r['id'], 'ts': r['ts'], 'side': 'neck_d' in raw, 'm': m, 'dims': dims})
+    face = face_files()[1]
     return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': SYNC_URL},
+            'face': json.loads(face.read_text()) if face.exists() else None,
             'insights': measure.insights(scans, logs, goals)}
 
 
@@ -275,15 +333,24 @@ def post_profile(b):
         if not re.fullmatch(r'#[0-9a-fA-F]{6}', str(b['skin'])):
             raise ValueError('Skin tone must be a #rrggbb colour')
         prof['skin'] = b['skin']
+    for k, pattern in (('hair', r'[a-z0-9]{1,20}'), ('hair_color', r'#[0-9a-fA-F]{6}'), ('eye_color', r'[a-z]{1,20}')):
+        if k in b:
+            if not re.fullmatch(pattern, str(b[k])):
+                raise ValueError(f'Invalid {k}')
+            prof[k] = b[k]
     if 'rotate' in b:
         prof['rotate'] = int(b['rotate']) if int(b['rotate']) in ROTATE else 0
     set_profile(prof)
 
 
 def workout_data(b):
-    return {'type': str(b.get('type') or 'Workout')[:40], 'minutes': num(b.get('minutes'), 1, 600, 'Minutes'),
+    data = {'type': str(b.get('type') or 'Workout')[:40], 'minutes': num(b.get('minutes'), 1, 600, 'Minutes'),
             'rpe': num(b.get('rpe') or 5, 1, 10, 'RPE'),
             'focus': [f for f in b.get('focus') or [] if f in measure.FOCUS], 'notes': str(b.get('notes') or '')[:500]}
+    for k, lo, hi in (('kcal', 0, 10000), ('hr', 20, 250)):  # from Apple Health
+        if b.get(k) is not None:
+            data[k] = num(b[k], lo, hi, k)
+    return data
 
 
 def daily_data(b):
@@ -305,7 +372,14 @@ def post_log(b):
 
 
 def post_sync(b):
-    """Apple Health batch from the iOS app. Upserts by Health ID/day, so re-syncing never duplicates."""
+    """Apple Health batch from the iOS app. Upserts by Health ID/day, so re-syncing never duplicates.
+    Health's height/sex/birth date fill profile fields the user hasn't set (that's the whole onboarding)."""
+    hp, prof = b.get('profile') or {}, get_profile() or {}
+    fill = {'height_cm': hp.get('height_cm') and num(hp['height_cm'], 100, 250, 'height'),
+            'sex': hp.get('sex') if hp.get('sex') in ('male', 'female') else None,
+            'birth_date': hp.get('birth_date') and datetime.strptime(hp['birth_date'], '%Y-%m-%d').date().isoformat()}
+    if any(v and k not in prof for k, v in fill.items()):
+        set_profile({**{k: v for k, v in fill.items() if v}, **prof})
     rows = [(ts_of(d), 'daily', data, f"health:day:{d['date']}") for d in b.get('days') or [] if (data := daily_data(d))]
     rows += [(num(w['start'], 0, 1e10, 'start'), 'workout', workout_data(w), f"health:workout:{str(w['id'])[:64]}")
              for w in b.get('workouts') or []]
@@ -383,9 +457,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/state':
             return self.reply(app_state())
         if path == '/api/status':
-            return self.reply(cap.status)
+            return self.reply({**cap.status, 'rev': data_rev()})
         if path == '/api/live.mjpg':
             return self.stream()
+        if path == '/api/face.jpg' and face_files()[0].exists():
+            return self.send(200, face_files()[0].read_bytes(), 'image/jpeg')
         f = (ROOT / path.lstrip('/')).resolve()
         if path.startswith('/static/') and (ROOT / 'static') in f.parents and f.is_file():
             return self.send(200, f.read_bytes(), mimetypes.guess_type(f.name)[0] or 'application/octet-stream')
@@ -393,18 +469,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path == '/api/sync':  # reachable from the tailnet via `tailscale serve`, so it needs the token
-            if not hmac.compare_digest(self.headers.get('Authorization', '').encode(), f'Bearer {sync_token()}'.encode()):
+        auth = self.headers.get('Authorization')
+        if auth is not None and path in ('/api/sync', '/api/face'):  # the iPhone, via `tailscale serve`
+            if not hmac.compare_digest(auth.encode(), f'Bearer {sync_token()}'.encode()):
                 return self.reply({'error': 'bad sync token'}, 401)
         elif not self.allowed():
             return
-        if path not in POST:
+        if path not in POST and path != '/api/face':
             return self.reply({'error': 'not found'}, 404)
         size = int(self.headers.get('Content-Length') or 0)
-        if size > 5_000_000:
+        if size > 15_000_000:
             return self.reply({'error': 'too large'}, 413)
         try:
-            result = POST[path](json.loads(self.rfile.read(size) or b'{}'))
+            body = self.rfile.read(size)
+            result = post_face(body) if path == '/api/face' else POST[path](json.loads(body or b'{}'))
         except (ValueError, TypeError, KeyError) as e:
             return self.reply({'error': str(e)}, 400)
         self.reply(result or {'ok': True})
@@ -413,6 +491,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         parts = urlparse(self.path).path.strip('/').split('/')
+        if parts == ['api', 'face']:
+            for f in face_files():
+                f.unlink(missing_ok=True)
+            return self.reply({'ok': True})
         if len(parts) != 3 or parts[0] != 'api' or parts[1] not in ('logs', 'scans', 'goals'):
             return self.reply({'error': 'not found'}, 404)
         with db() as c:

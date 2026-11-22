@@ -1,10 +1,12 @@
-// Realistic body: MakeHuman's CC0 template (tools/build_body.py) fitted to a scan's measurements.
+// Realistic body: MakeHuman's CC0 template (tools/build_assets.py) fitted to a scan's measurements.
 // Torso: width/depth scaled per level (neck, shoulders, chest, waist, hips). Limbs: scaled radially around
 // their bones. Heights: remapped to the scan's ankle/knee/hip/shoulder levels. Rig weights blend it all.
-// Pure math (no three.js) so test_body.mjs can run it in Node.
+// Hair, brows, lashes and eyes are MakeHuman proxies anchored to base-mesh vertices, so they follow the fit.
+// Pure math (no three.js / DOM) so test_body.mjs can run it in Node.
 
 let T = null;
 const REG = { head: 0, torso: 1, arm_l: 2, arm_r: 3, leg_l: 4, leg_r: 5 };
+const TYPES = { float32: Float32Array, uint8: Uint8Array, uint16: Uint16Array };
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // Piecewise-linear lookup in [[x, ...values]] sorted by x; clamps outside.
@@ -19,25 +21,22 @@ function interp(knots, x) {
   return knots.at(-1).slice(1);
 }
 
-// meta/buf: static/body.json + static/body.bin. Returns the shared triangle indices and templates.
+// meta/buf: static/assets/body.json + body.bin
 export function initBody(meta, buf) {
-  let o = 0;
-  const take = (Type, n) => { const a = new Type(buf, o, n); o += n * Type.BYTES_PER_ELEMENT; return a; };
-  const male = take(Float32Array, meta.n * 3), female = take(Float32Array, meta.n * 3), reg = take(Uint8Array, meta.n * 6);
-  const index = take(Uint16Array, meta.tris * 3), eyeM = take(Float32Array, meta.eye_n * 3), eyeF = take(Float32Array, meta.eye_n * 3);
-  const eyeIndex = take(Uint16Array, meta.eye_tris * 3);
-  T = { n: meta.n, reg, index, eyeIndex };
-  T.male = template(male, eyeM, meta.joints.male, 'male');
-  T.female = template(female, eyeF, meta.joints.female, 'female');
-  return { index, eyeIndex, male: T.male, female: T.female };
+  const arr = (name) => { const [type, offset, size] = meta.arrays[name]; return new TYPES[type](buf, offset, size); };
+  T = { meta, arr, n: meta.n, reg: arr('weights'), src: arr('body.src'), uv: arr('body.uv'), tris: arr('body.tris') };
+  T.bodyN = T.src.reduce((a, b) => Math.max(a, b), 0) + 1; // body vertices come first; helpers after
+  T.male = template(arr('male'), meta.joints.male, 'male');
+  T.female = template(arr('female'), meta.joints.female, 'female');
+  return T;
 }
 
 // Measure the template exactly the way measure.py measures a camera silhouette.
-function template(pos, eye, J, sex) {
-  const { n, reg } = T, w = (i, r) => reg[i * 6 + r] / 255;
+function template(pos, J, sex) {
+  const { bodyN: n, reg } = T, w = (i, r) => reg[i * 6 + r] / 255;
   const sh = (J.shoulder_l[1] + J.shoulder_r[1]) / 2, hip = (J.hip_l[1] + J.hip_r[1]) / 2, len = sh - hip;
   let H = 0;
-  for (let i = 1; i < pos.length; i += 3) H = Math.max(H, pos[i]);
+  for (let i = 0; i < n; i++) H = Math.max(H, pos[i * 3 + 1]);
   const notArm = (i) => w(i, REG.arm_l) + w(i, REG.arm_r) < 0.5;
   const slab = (y, use = notArm) => {
     let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
@@ -64,7 +63,7 @@ function template(pos, eye, J, sex) {
     return hi - lo;
   }));
   const t = {
-    pos, eye, J, H, sh, hip, len,
+    pos, J, H, sh, hip, len,
     neck: pick(range(sh + 0.2 * (J.eye_l[1] - sh), sh + 0.55 * (J.eye_l[1] - sh), 8), (a, b) => a < b),
     shoulders: slab(sh, () => true),
     chest: slab(yAt(0.3)),
@@ -95,7 +94,7 @@ function template(pos, eye, J, sex) {
   return t;
 }
 
-// dims: scan sizes in cm (from /api/state). Returns vertex positions for a person of height H.
+// dims: scan sizes in cm (from /api/state). Returns fitted positions of every base-mesh vertex for height H.
 export function fitBody(dims, H, sex) {
   const t = T[sex === 'female' ? 'female' : 'male'], d = dims || {}, s = H / t.H, n = T.n;
   const ratio = (scan, tmpl) => (scan ? clamp(scan / (tmpl * s), 0.6, 1.8) : 1);
@@ -160,14 +159,39 @@ export function fitBody(dims, H, sex) {
     sum /= 255;
     out[i * 3] = X / sum; out[i * 3 + 1] = interp(remap, Y / sum)[0]; out[i * 3 + 2] = Z / sum;
   }
-  // Eyes follow the head; iris/pupil coloured by how far each vertex faces forward.
-  const ep = new Float32Array(t.eye.length), ec = new Float32Array(t.eye.length);
-  for (let i = 0; i < t.eye.length; i += 3) {
-    const side = t.eye[i] > 0 ? 'eye_l' : 'eye_r', c = t.J[side];
-    const v = [t.eye[i] - c[0], t.eye[i + 1] - c[1], t.eye[i + 2] - c[2]], fwd = v[2] / Math.hypot(...v);
-    const col = fwd > 0.93 ? [0.02, 0.02, 0.02] : fwd > 0.8 ? [0.23, 0.15, 0.09] : [0.92, 0.9, 0.88];
-    ep.set([t.eye[i] * s, interp(remap, t.eye[i + 1] * s)[0], t.eye[i + 2] * s], i);
-    ec.set(col, i);
-  }
-  return { pos: out, eyePos: ep, eyeColors: ec, parts: t.parts, cloth: t.cloth };
+  return { pos: out, parts: t.parts, cloth: t.cloth };
 }
+
+// MakeHuman proxy (hair, brows, lashes, eyes): each vertex = weighted 3 base vertices + offset scaled by body size.
+export function fitProxy(name, pos) {
+  const refs = T.arr(`${name}.refs`), w = T.arr(`${name}.w`), d = T.arr(`${name}.d`);
+  const scale = T.meta.proxies[name].scale.map(([a, b, den], k) => Math.abs(pos[a * 3 + k] - pos[b * 3 + k]) / den);
+  const out = new Float32Array(refs.length);
+  for (let j = 0; j < refs.length; j += 3) {
+    for (let k = 0; k < 3; k++) {
+      out[j + k] = w[j] * pos[refs[j] * 3 + k] + w[j + 1] * pos[refs[j + 1] * 3 + k] + w[j + 2] * pos[refs[j + 2] * 3 + k] + d[j + k] * scale[k];
+    }
+  }
+  return out;
+}
+
+// Render mesh: vertices split at UV seams (src -> original vertex), with normals averaged over the welded
+// original vertices so seams don't show in the shading.
+export function mesh(pos, src, tris) {
+  const normal = new Float32Array(pos.length);
+  for (let t = 0; t < tris.length; t += 3) {
+    const [a, b, c] = [src[tris[t]] * 3, src[tris[t + 1]] * 3, src[tris[t + 2]] * 3];
+    const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2];
+    const vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const i of [a, b, c]) { normal[i] += nx; normal[i + 1] += ny; normal[i + 2] += nz; }
+  }
+  const P = new Float32Array(src.length * 3), N = new Float32Array(src.length * 3);
+  for (let r = 0; r < src.length; r++) {
+    const i = src[r] * 3, l = Math.hypot(normal[i], normal[i + 1], normal[i + 2]) || 1;
+    for (let k = 0; k < 3; k++) { P[r * 3 + k] = pos[i + k]; N[r * 3 + k] = normal[i + k] / l; }
+  }
+  return { position: P, normal: N };
+}
+
+export const assets = () => T;

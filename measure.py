@@ -224,6 +224,9 @@ def insights(scans, logs, goals, now=None):
     def avg(xs):
         return round(statistics.fmean(xs), 2) if xs else None
 
+    def balance(ds):  # energy in - out, only on days Health has intake, active and resting energy
+        return avg([d['kcal'] - d['active'] - d['basal'] for d in ds if {'kcal', 'active', 'basal'} <= d.keys()])
+
     today = date.fromtimestamp(now)
     monday = datetime.combine(today - timedelta(days=today.weekday()), datetime.min.time())
     weeks = []
@@ -234,13 +237,15 @@ def insights(scans, logs, goals, now=None):
         sc = [s['m'] for s in scans if start <= s['ts'] < start + 7 * day]
         weeks.append({'week': date.fromtimestamp(start).isoformat(), 'workouts': len(wk),
                       'minutes': sum(w['minutes'] for w in wk), 'load': load(wk),
-                      **{k: avg([d[k] for d in dl if k in d]) for k in ('kcal', 'protein', 'sleep', 'weight', 'active')},
+                      **{k: avg([d[k] for d in dl if k in d]) for k in ('kcal', 'protein', 'sleep', 'weight', 'active', 'steps')},
+                      'balance': balance(dl),
                       **{k: avg([m[k] for m in sc if k in m]) for k in ('bf', 'waist')}})
 
     notes = []
     for x, y, xl, yl in (('load', 'bf', 'training-load', 'body fat'), ('kcal', 'weight', 'calorie', 'weight'),
                          ('protein', 'bf', 'protein', 'body fat'), ('sleep', 'bf', 'sleep', 'body fat'),
-                         ('active', 'bf', 'activity', 'body fat')):
+                         ('active', 'bf', 'activity', 'body fat'), ('steps', 'bf', 'step-count', 'body fat'),
+                         ('balance', 'weight', 'energy-balance', 'weight')):
         pairs = [(a[x], b[y] - a[y]) for a, b in zip(weeks, weeks[1:]) if None not in (a[x], a[y], b[y])]
         if len(pairs) >= 4:
             try:
@@ -252,7 +257,9 @@ def insights(scans, logs, goals, now=None):
 
     since = now - 28 * day
     recent = [w for w in workouts if w['ts'] >= since]
-    summary = {'workouts': len(recent), 'load': load(recent),
+    bal = balance([d for d in daily if d['ts'] >= since])
+    summary = {'workouts': len(recent), 'load': load(recent), 'balance': bal,
+               'predicted_kg': round(bal * 28 / 7700, 2) if bal is not None else None,  # ~7700 kcal per kg of fat
                'kcal': avg([d['kcal'] for d in daily if d['ts'] >= since and 'kcal' in d]),
                'changes': {k: _delta(series(k, scans, logs), since) for k in ('bf', 'waist', 'weight', 'lean_kg')}}
     parts = {}
@@ -276,4 +283,8 @@ def insights(scans, logs, goals, now=None):
                 eta = date.fromtimestamp(now + (g['target'] - cur) / slope * day).isoformat()
         goal_out[metric] = {**g, 'start': start, 'current': cur, 'progress': progress, 'rate_per_week': rate, 'eta': eta}
 
-    return {'weeks': weeks, 'summary': summary, 'parts': parts, 'goals': goal_out, 'notes': notes}
+    # Every Health metric: last 7 days vs the 7 before.
+    health = {k: {'avg': avg([d[k] for d in daily if d['ts'] >= now - 7 * day and k in d]),
+                  'prev': avg([d[k] for d in daily if now - 14 * day <= d['ts'] < now - 7 * day and k in d])}
+              for k in sorted({k for d in daily for k in d} - {'id', 'ts', 'kind'})}
+    return {'weeks': weeks, 'summary': summary, 'parts': parts, 'goals': goal_out, 'notes': notes, 'health': health}

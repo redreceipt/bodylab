@@ -78,4 +78,16 @@ batch['days'][0]['weight'] = 80.1
 app.post_sync(batch)
 logs = app.get_logs()
 assert len(logs) == 2 and [l['weight'] for l in logs if l['kind'] == 'daily'] == [80.1], logs
+
+# Health onboarding fills missing profile fields but never overwrites what the user set.
+app.post_sync({'profile': {'height_cm': 180.3, 'sex': 'male', 'birth_date': '1990-05-02'}})
+assert app.get_profile() == {'height_cm': 180.3, 'sex': 'male', 'birth_date': '1990-05-02'}
+app.post_profile({'height_cm': 179})
+app.post_sync({'profile': {'height_cm': 182}})
+assert app.get_profile()['height_cm'] == 179
+
+# Energy balance: 500 kcal/day deficit for 28 days predicts ~1.8 kg lost.
+eb = [{'kind': 'daily', 'ts': now - d * 86400, 'kcal': 2000, 'active': 600, 'basal': 1900} for d in range(28)]
+s = M.insights([], eb, {}, now)['summary']
+assert s['balance'] == -500 and abs(s['predicted_kg'] + 1.82) < .01, s
 print('sync ok')

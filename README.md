@@ -1,24 +1,43 @@
 # BodyLab
 
-Track body composition by walking past a camera. BodyLab watches a network camera, measures your silhouette, estimates circumferences and body fat, and fits a realistic 3D body to you, clickable, with goals, logged inputs (workouts, food, sleep, activity), and an **inputs → outputs** view of how they move your body.
+Track body composition by walking past a camera. BodyLab watches a network camera, measures your silhouette, estimates circumferences and body fat, and fits a realistic 3D body to you (your face, skin, eyes and hair from one photo). Click any part for its history and goals. Apple Health supplies the inputs (food, activity, heart, sleep, workouts), and an **inputs → outputs** view shows how they move your body.
 
-Everything runs locally. Video stays in memory; only measurements are stored.
+Everything runs on your machine. Camera video stays in memory; only measurements (and your face photo, if you add one) are stored.
 
 ## Quick start
 
 Requires [uv](https://docs.astral.sh/uv/) and a camera that serves MJPEG or RTSP.
 
 ```sh
-uv run app.py              # http://localhost:8765 (downloads the 30 MB pose model on first run)
+uv run app.py              # http://localhost:8765 (downloads MediaPipe models on first use)
 uv run python test_bodylab.py && node test_body.mjs
 ```
 
-Open the app, enter your height and camera URL under **Profile**, then stand in front of the camera:
-
-1. Full body in frame, fitted clothes, arms ~30° out. Hold ~3 s → front scan saved.
-2. Turn 90° for ~2 s → side scan adds real body depth (much better circumferences).
+1. **Pair your iPhone** (Profile → scan the QR code). Apple Health fills in height, sex and age, and your history flows in. Or type your height.
+2. Set the **camera URL** in Profile.
+3. Stand in front of the camera: full body in frame, fitted clothes, arms ~30° out. Hold ~3 s → front scan. Turn 90° for ~2 s → side scan adds real body depth.
 
 Env: `PORT` (8765), `COOLDOWN_MIN` (10, minimum minutes between saved scans), `BODYLAB_DB` (default `data/bodylab.db`).
+
+## iPhone: onboarding + Apple Health
+
+`ios/` is a small SwiftUI app. Scan the pairing QR, allow Health, take a face photo, done. It sends 90 days of data on open and in the background whenever Health changes; re-syncs update records rather than duplicating them.
+
+| | Apple Health data |
+|---|---|
+| Profile | height, sex, date of birth |
+| Body | weight, smart-scale body fat & lean mass, waist circumference |
+| Fuel | calories, protein, carbs, fat, fiber, sugar, water, alcoholic drinks |
+| Activity | active & resting energy, steps, exercise minutes, workouts (type, duration, heart rate, effort, calories) |
+| Heart & recovery | resting & walking heart rate, HRV, VO₂ max, respiratory rate |
+| Sleep | total, deep, REM |
+
+Calories in minus active and resting energy gives your **energy balance**, so Insights compares predicted weight change (~7700 kcal per kg) with what the scale and camera measured.
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:8765   # tailnet-only HTTPS; only /api/sync and /api/face (token) answer remotely
+cd ios && xcodegen && open BodyLabSync.xcodeproj           # pick your Team, run on your iPhone
+```
 
 ## Raspberry Pi camera
 
@@ -34,27 +53,15 @@ tailscale ssh $PI 'loginctl enable-linger && systemctl --user daemon-reload && s
 
 Mounted sideways? Set **Camera rotation** in Profile.
 
-## iPhone: Apple Health sync
-
-`ios/` is a small SwiftUI app that sends the last 60 days of weight, calories, protein, sleep, active energy and workouts to BodyLab: on open, and in the background whenever Health gets new data. Re-syncs update records instead of duplicating them.
-
-```sh
-tailscale serve --bg --https=8443 http://127.0.0.1:8765   # tailnet-only HTTPS; only /api/sync (token) answers remotely
-cd ios && xcodegen && open BodyLabSync.xcodeproj
-```
-
-Pick your Team under Signing & Capabilities, run it on your iPhone, enter the server and token shown in BodyLab → Profile, then tap **Connect Apple Health**.
-
 ## How it works
 
-- [MediaPipe Pose](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) finds 33 landmarks and a person mask per frame.
-- Widths are measured across the mask at anatomical levels (neck, chest, navel, hips, limbs), scaled by your height. A side view supplies depths; otherwise typical depth ratios are assumed.
-- Circumferences use an ellipse model; body fat uses the US Navy formula (height, neck, waist, + hips for women).
-- Optional: tape-measure any part once to calibrate it; past and future scans are corrected.
-- The 3D body is MakeHuman's CC0 base mesh (`tools/build_body.py` → `static/body.bin`), fitted in the browser: torso width/depth per level, limbs radially around their bones, heights to your landmarks, blended by the rig's skin weights.
+- **Measuring:** [MediaPipe Pose](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) finds 33 landmarks and a person mask per frame. Widths are measured across the mask at anatomical levels, scaled by your height; a side view supplies depths. Circumferences use an ellipse model; body fat uses the US Navy formula. Tape-measure any part once to calibrate it (past scans are corrected too).
+- **3D body:** [MakeHuman](http://www.makehumancommunity.org)'s CC0 base mesh, fitted in the browser (`static/body.js`): torso width/depth per level, limbs radially around their bones, heights to your landmarks, blended by the rig's skin weights. Hair, brows, lashes and eyes are MakeHuman proxies anchored to the mesh, so they follow the fit.
+- **Your face:** the template head is rendered once and run through MediaPipe's face landmarker, giving each of 478 landmarks a spot on the skin texture. Your photo's landmarks then warp it, triangle by triangle, onto that texture (`static/look.js`). Skin tone, eye colour and hair colour are read from the same photo.
+- `uv run python tools/build_assets.py` rebuilds `static/assets/` from the original sources.
 
 Expect roughly ±3–4 body-fat points without calibration. Clothing, posture and lighting matter more than the math.
 
 ## License
 
-MIT. Bundles [three.js](https://threejs.org) (MIT) and a body mesh derived from [MakeHuman](http://www.makehumancommunity.org) assets (CC0); downloads the MediaPipe pose model (Apache-2.0).
+MIT. Bundles [three.js](https://threejs.org) (MIT), [uqr](https://github.com/unjs/uqr) (MIT), assets derived from [MakeHuman](http://www.makehumancommunity.org) (CC0: mesh, skins, hair, eyes) and MediaPipe's canonical face-mesh triangulation (Apache-2.0); downloads MediaPipe pose and face models (Apache-2.0).

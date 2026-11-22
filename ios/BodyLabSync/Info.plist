@@ -18,8 +18,21 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>bodylab-pairing</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>bodylab</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>BodyLab uses a face photo to make your 3D body look like you. It stays on your BodyLab server.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>BodyLab reads weight, nutrition, sleep, activity and workouts to show how they change your body.</string>
 	<key>UILaunchScreen</key>
