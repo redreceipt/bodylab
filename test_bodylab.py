@@ -39,6 +39,8 @@ expect = {'neck_w': 12, 'chest_w': 35, 'waist_w': 35, 'hips_w': 40, 'arm_l_w': 1
 for k, v in expect.items():
     assert abs(dims[k] - v) < 1.0, (k, dims[k], v)
 assert dims['shoulders_w'] > dims['chest_w']
+assert M.implausible(r['raw']) is None
+assert M.implausible({**r['raw'], 'neck_w': .13, 'hips_w': .12}) == ['neck_w', 'hips_w']  # e.g. the 70 cm 'neck' misread
 
 # Arms down against the body must be rejected, not measured.
 bad, bpts = img.copy(), pts.copy()
@@ -47,6 +49,12 @@ for s, e, w in ((11, 13, 15), (12, 14, 16)):
     cv2.line(bad, tuple(bpts[s].astype(int)), tuple(bpts[e].astype(int)), 255, 40)
     cv2.line(bad, tuple(bpts[e].astype(int)), tuple(bpts[w].astype(int)), 255, 30)
 assert 'arms' in (M.measure(bpts, np.ones(33), bad / 255.0)['problem'] or '')
+
+# Clothing check: a skin-coloured torso line passes, a blue-shirt line doesn't.
+ycc = np.zeros((100, 100, 3), np.uint8)
+ycc[:50] = (150, 150, 110)   # skin chroma (Cr 150, Cb 110)
+ycc[50:] = (90, 110, 160)    # blue shirt
+assert M.skin_share(ycc, (150, 110), (10, 20), (90, 20)) == 1 and M.skin_share(ycc, (150, 110), (10, 80), (90, 80)) == 0
 
 # Formulas: circle perimeter, published Navy example (~17.2% for 178/38/86 cm male).
 assert abs(M.ellipse(10, 10) - math.pi * 10) < 1e-9
@@ -87,7 +95,18 @@ app.post_sync({'profile': {'height_cm': 182}})
 assert app.get_profile()['height_cm'] == 179
 
 # Energy balance: 500 kcal/day deficit for 28 days predicts ~1.8 kg lost.
-eb = [{'kind': 'daily', 'ts': now - d * 86400, 'kcal': 2000, 'active': 600, 'basal': 1900} for d in range(28)]
+eb = [{'kind': 'daily', 'ts': now - d * 86400, 'kcal': 2000, 'active': 600, 'basal': 1900} for d in range(1, 28)]
 s = M.insights([], eb, {}, now)['summary']
 assert s['balance'] == -500 and abs(s['predicted_kg'] + 1.82) < .01, s
+
+# Gaps don't mislead: a half-logged day and today's running totals are dropped, and too few days means no balance.
+eb[3]['kcal'] = 700  # forgot to log dinner
+eb.append({'kind': 'daily', 'ts': now, 'kcal': 400, 'active': 100, 'basal': 600, 'steps': 900})  # today, not over yet
+i = M.insights([], eb, {}, now)
+assert i['summary']['balance'] == -500 and i['summary']['balance_days'] == 26, i['summary']
+assert any('partly logged' in g for g in i['gaps']) and i['health']['steps']['days'] == 0
+assert M.insights([], eb[:10], {}, now)['summary']['balance'] is None  # 9 logged days of 28
+# Weight change uses the trend, not the last noisy reading.
+wl = [{'kind': 'daily', 'ts': now - d * 86400, 'weight': 80 - (27 - d) * .05 + (1.5 if d == 0 else 0)} for d in range(27, -1, -3)]
+assert abs(M.insights([], wl, {}, now)['summary']['changes']['weight'] + 1.35) < .1  # true -1.35; last-minus-first says +0.15
 print('sync ok')

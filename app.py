@@ -30,6 +30,11 @@ MODEL_URL = ('https://storage.googleapis.com/mediapipe-models/pose_landmarker/'
              'pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task')
 FACE_MODEL = ROOT / 'models' / 'face_landmarker.task'
 FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task'
+ZOO = 'https://github.com/opencv/opencv_zoo/raw/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/'
+FACE_DET = (ROOT / 'models' / 'face_detection_yunet_2023mar.onnx', ZOO + 'face_detection_yunet/face_detection_yunet_2023mar.onnx')
+FACE_REC = (ROOT / 'models' / 'face_recognition_sface_2021dec.onnx', ZOO + 'face_recognition_sface/face_recognition_sface_2021dec.onnx')
+SAME_PERSON = .363  # SFace cosine-similarity threshold from its model card
+SKIN_TOLERANCE = 14  # Cr/Cb distance (0-255) from your face's skin that still counts as skin
 ROTATE = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
 PORT = int(os.environ.get('PORT', '8765'))
 SYNC_PORT = 8443  # `tailscale serve --bg --https=8443 http://127.0.0.1:8765` puts BodyLab on your tailnet
@@ -113,6 +118,25 @@ def face_files():
     return DB_PATH.parent / 'face.jpg', DB_PATH.parent / 'face.json'
 
 
+class Faces:
+    """OpenCV YuNet + SFace: one embedding per face, to check the person being scanned is you."""
+
+    def __init__(self):
+        for path, url in (FACE_DET, FACE_REC):
+            ensure_model(path, url)
+        self.det = cv2.FaceDetectorYN.create(str(FACE_DET[0]), '', (320, 320), .7)
+        self.rec = cv2.FaceRecognizerSF.create(str(FACE_REC[0]), '')
+
+    def embed(self, img):
+        """Unit-length embedding of the largest face in a BGR image, or None."""
+        self.det.setInputSize((img.shape[1], img.shape[0]))
+        faces = self.det.detect(img)[1]
+        if faces is None:
+            return None
+        e = self.rec.feature(self.rec.alignCrop(img, max(faces, key=lambda f: f[2] * f[3]))).flatten()
+        return e / np.linalg.norm(e)
+
+
 def post_face(raw):
     """Face photo for the avatar: stored with its 478 landmarks next to the database (never leaves this Mac)."""
     img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
@@ -140,7 +164,9 @@ def post_face(raw):
         raise ValueError('Close your mouth (neutral expression) — teeth don\'t map onto the 3D face')
     jpg, meta = face_files()
     cv2.imwrite(str(jpg), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    meta.write_text(json.dumps({'w': w, 'h': h, 'ts': time.time(), 'landmarks': (pts / [w, h]).round(5).tolist()}))
+    emb = Faces().embed(img)  # enrols you, so scans are only saved for you
+    meta.write_text(json.dumps({'w': w, 'h': h, 'ts': time.time(), 'landmarks': (pts / [w, h]).round(5).tolist(),
+                                'embedding': None if emb is None else emb.round(5).tolist()}))
 
 
 def get_logs():
@@ -165,17 +191,23 @@ def median(frames):
 def app_state():
     prof, logs, c = get_profile(), get_logs(), db()
     goals = {r['metric']: {'target': r['target'], 'start': r['start'], 'ts': r['ts']} for r in c.execute('select * from goals')}
-    scans = []
+    scans, hidden = [], 0
     if prof and prof.get('height_cm'):
         w = weights(logs)
         for r in c.execute('select * from scans order by ts'):
             raw = json.loads(r['raw'])
+            if measure.implausible(raw):  # misread poses saved before the plausibility check; kept, not shown
+                hidden += 1
+                continue
             m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']))
             scans.append({'id': r['id'], 'ts': r['ts'], 'side': 'neck_d' in raw, 'm': m, 'dims': dims})
     face = face_files()[1]
+    face = json.loads(face.read_text()) if face.exists() else None
+    if face:
+        face.pop('embedding', None)  # stays server-side
     sync = f'https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else None
     return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': sync},
-            'face': json.loads(face.read_text()) if face.exists() else None,
+            'face': face, 'hidden_scans': hidden,
             'insights': measure.insights(scans, logs, goals)}
 
 
@@ -189,7 +221,8 @@ class Capture:
         self.front, self.side = deque(maxlen=FRONT_FRAMES), deque(maxlen=SIDE_FRAMES)
         self.scan_id, self.side_saved, self.last_seen, self.last_scan = None, False, 0.0, 0.0
         self.want_rescan = False
-        self.prof, self.weight, self.prof_ts = {}, None, 0.0
+        self.prof, self.weight, self.prof_ts, self.me = {}, None, 0.0, None
+        self.who, self.misses, self.skin = None, 0, None  # per session: 'me' / 'other', and your skin chroma
         threading.Thread(target=self.read_loop, daemon=True).start()
         threading.Thread(target=self.process_loop, daemon=True).start()
 
@@ -200,6 +233,7 @@ class Capture:
         self.front.clear()
         self.side.clear()
         self.scan_id, self.side_saved = None, False
+        self.who, self.misses, self.skin = None, 0, None
 
     def read_loop(self):
         while True:
@@ -216,8 +250,9 @@ class Capture:
 
     def process_loop(self):
         landmarker = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(MODEL)),
+            base_options=BaseOptions(model_asset_path=str(MODEL)), num_poses=2,
             running_mode=vision.RunningMode.VIDEO, output_segmentation_masks=True))
+        self.faces = Faces()
         last, ts_ms = None, 0
         while True:
             f = self.frame
@@ -230,6 +265,9 @@ class Capture:
             last = f
             if time.time() - self.prof_ts > 2:
                 self.prof, self.weight, self.prof_ts = get_profile() or {}, (weights(get_logs()) or [(0, None)])[-1][1], time.time()
+                face = face_files()[1]
+                emb = json.loads(face.read_text()).get('embedding') if face.exists() else None
+                self.me = np.array(emb) if emb else None
             if self.prof.get('rotate') in ROTATE:  # camera mounted sideways / upside down
                 f = cv2.rotate(f, ROTATE[self.prof['rotate']])
             ts_ms = max(ts_ms + 1, int(time.monotonic() * 1000))
@@ -246,7 +284,13 @@ class Capture:
             self.reset()
             self.want_rescan, self.last_scan = False, 0.0
         r, mask = None, None
-        if res.pose_landmarks:
+        people = [i for i, m in enumerate(res.segmentation_masks or []) if (m.numpy_view() > .5).mean() > .01]
+        if len(people) > 1:  # someone else walked in: whose frames are whose is no longer certain
+            self.last_seen = now
+            self.reset()
+            r = {'problem': 'Only one person in the frame, please', 'lines': [], 'view': None}
+            mask = res.segmentation_masks[0].numpy_view().squeeze()
+        elif res.pose_landmarks:
             self.last_seen = now
             h, w = f.shape[:2]
             lms = res.pose_landmarks[0]
@@ -255,22 +299,57 @@ class Capture:
             mask = res.segmentation_masks[0].numpy_view().squeeze()
             r = measure.measure(pts, vis, mask, female=self.prof.get('sex') == 'female')
             if not r['problem']:
+                r['problem'] = self.check_person(f, pts, vis, r)
+            if not r['problem']:
                 (self.front if r['view'] == 'front' else self.side).append(r['raw'])
         elif now - self.last_seen > 8:
             self.reset()
         self.status = self.next_status(now, r)
         self.publish(f, res, mask, r)
 
+    def check_person(self, f, pts, vis, r):
+        """Is this you (face matches your photo) and in minimal clothing? Returns a problem or None."""
+        if self.who == 'other':
+            return 'Not you — BodyLab only saves scans for the profile owner'
+        if self.me is not None and self.who != 'me':
+            if r['view'] == 'side':
+                return 'Face the camera first so BodyLab can check it is you'
+            span = max(np.linalg.norm(pts[7] - pts[8]), 20)  # ear to ear
+            (x0, y0), (x1, y1) = (pts[0] - 1.6 * span).astype(int), (pts[0] + 1.6 * span).astype(int)
+            crop = f[max(y0, 0):max(y1, 0), max(x0, 0):max(x1, 0)]
+            emb = self.faces.embed(cv2.resize(crop, (320, 320), interpolation=cv2.INTER_CUBIC)) if crop.size else None
+            if emb is None:
+                return 'Face the camera so BodyLab can check it is you'
+            if float(emb @ self.me) >= SAME_PERSON:
+                self.who = 'me'
+            else:
+                self.misses += 1
+                if self.misses >= 8:
+                    self.who = 'other'
+                return 'Checking it is you…'
+        if self.prof.get('bare_only', True):
+            ycc = cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb)
+            if vis[0] > .5 and r['view'] == 'front':  # skin chroma from your cheeks, in this frame's lighting
+                eye = np.linalg.norm(pts[2] - pts[5])
+                patches = [ycc[int(y - eye * .15):int(y + eye * .15) + 1, int(x - eye * .15):int(x + eye * .15) + 1, 1:].reshape(-1, 2)
+                           for x, y in ((pts[2] + pts[9]) / 2, (pts[5] + pts[10]) / 2)]
+                self.skin = np.median(np.vstack(patches), axis=0)
+            if self.skin is not None:
+                for name in ('waist',) if self.prof.get('sex') == 'female' or r['view'] == 'side' else ('chest', 'waist'):
+                    if measure.skin_share(ycc, self.skin, *r['cuts'][name], SKIN_TOLERANCE) < .5:
+                        return f'Clothing on your {name} — scans only count in minimal clothing (underwear is fine)'
+        return None
+
     def next_status(self, now, r):
         st = {'state': 'idle', 'front': len(self.front) / FRONT_FRAMES, 'side': len(self.side) / SIDE_FRAMES}
         if not self.prof.get('height_cm'):
             return {**st, 'msg': 'Set your height in Profile to start scanning'}
         if r is None:
-            return {**st, 'msg': 'Step in front of the camera — full body, fitted clothes, arms slightly out'}
-        if len(self.front) >= LIVE_FRAMES:
+            return {**st, 'msg': 'Step in front of the camera — whole body, minimal clothing, arms slightly out'}
+        if len(self.front) >= LIVE_FRAMES and self.who != 'other':
             st['live'] = dict(zip(('m', 'dims'), measure.derive(median(list(self.front)[-LIVE_FRAMES:]), self.prof, self.weight)))
         wait = self.last_scan + COOLDOWN_S - now
-        if self.scan_id is None and len(self.front) >= FRONT_FRAMES and wait <= 0:
+        if self.scan_id is None and len(self.front) >= FRONT_FRAMES and wait <= 0 and (self.me is None or self.who == 'me'):
             raw = {**median(list(self.front)), 'n_front': len(self.front)}
             with db() as c:
                 self.scan_id = c.execute('insert into scans(ts, raw) values (?, ?)', (now, json.dumps(raw))).lastrowid
@@ -293,6 +372,8 @@ class Capture:
         return {**st, 'state': 'scanning', 'msg': f'Hold still… scanning {r["view"]}'}
 
     def publish(self, f, res, mask, r):
+        if self.prof.get('preview', 'silhouette') == 'silhouette':  # private by default: no camera pixels leave the loop
+            f[:] = (40, 26, 20)
         if mask is not None:
             sel = mask > .5
             f[sel] = (f[sel] * .55 + np.array([255, 190, 60]) * .45).astype(np.uint8)
@@ -343,6 +424,10 @@ def post_profile(b):
             prof[k] = b[k]
     if 'rotate' in b:
         prof['rotate'] = int(b['rotate']) if int(b['rotate']) in ROTATE else 0
+    if 'bare_only' in b:
+        prof['bare_only'] = bool(b['bare_only'])
+    if 'preview' in b:
+        prof['preview'] = 'camera' if b['preview'] == 'camera' else 'silhouette'
     set_profile(prof)
 
 
@@ -527,6 +612,12 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     init_db()
     ensure_model()
+    jpg, meta = face_files()
+    if meta.exists() and 'embedding' not in json.loads(meta.read_text()):  # photo added before identity checks existed
+        try:
+            post_face(jpg.read_bytes())
+        except ValueError as e:
+            print(f'Face photo needs replacing: {e}', flush=True)
     TS_HOST, TS_OWNER = tailnet()
     cap = Capture()
     print(f'BodyLab → http://localhost:{PORT}' + (f'  ·  tailnet: https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else ''), flush=True)

@@ -40,10 +40,12 @@ const GROUPS = [['Body', ['weight', 'scale_bf', 'scale_lean', 'tape_waist']], ['
 function healthTable() {
   const H = S.insights.health, rows = GROUPS.map(([g, keys]) => {
     const ks = keys.filter((k) => H[k]?.avg != null);
-    return ks.length ? `<tr><th colspan="3">${g}</th></tr>` + ks.map((k) => `<tr><td>${META[k].label}</td><td>${fmt(k, H[k].avg)}</td>
-      <td class="muted">${H[k].prev != null ? fmt(k, H[k].avg - H[k].prev, true) : ''}</td></tr>`).join('') : '';
+    return ks.length ? `<tr><th colspan="4">${g}</th></tr>` + ks.map((k) => `<tr><td>${META[k].label}</td><td>${fmt(k, H[k].avg)}</td>
+      <td class="muted">${H[k].prev != null ? fmt(k, H[k].avg - H[k].prev, true) : ''}</td>
+      <td class="${H[k].days < 4 ? 'bad' : 'muted'}" title="days with data in the last week">${H[k].days}/7 d</td></tr>`).join('') : '';
   }).join('');
-  return rows ? `<h4>Apple Health · 7-day average (change vs the week before)</h4><table>${rows}</table>`
+  return rows ? `<h4>Apple Health · 7-day average (change vs the week before · days with data)</h4><table>${rows}</table>
+    <p class="muted">Today and partly logged food days are left out, so gaps don't drag averages down.</p>`
     : '<p class="muted">Pair the iPhone app (Profile) to bring in Apple Health data.</p>';
 }
 const imperial = () => S?.profile?.units === 'imperial';
@@ -158,15 +160,16 @@ async function updateLook() {
   if (key === lookKey) return;
   lookKey = key;
   const photo = face && await loadImage(`/api/face.jpg?${face.ts}`);
-  const auto = face ? photoColors(photo, face) : {};
-  const skin = new THREE.CanvasTexture(await skinCanvas(sex, { face, photo, tone: p.skin }));
+  const auto = face ? photoColors(photo, face) : {}, hair = p.hair ?? (sex === 'female' ? 'long01' : 'short02');
+  const hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
+  const skin = new THREE.CanvasTexture(await skinCanvas(sex, { face, photo, tone: p.skin, hairColor: HAIRS[hair] ? hairColor : null }));
   Object.assign(skin, { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 });
   mats.skin.map?.dispose();
   mats.skin.map = skin;
   mats.skin.needsUpdate = true;
-  look = { hair: p.hair ?? (sex === 'female' ? 'long01' : 'short02'), brows: !face, auto };
-  if (HAIRS[look.hair]) mats.hair.map = texture(`/static/assets/${look.hair}.webp`);
-  for (const m of [mats.hair, mats.brows]) m.color.set(p.hair_color ?? auto.hair ?? '#3b2a20');
+  look = { hair, brows: !face, auto };
+  if (HAIRS[hair]) mats.hair.map = texture(`/static/assets/${hair}.webp`);
+  for (const m of [mats.hair, mats.brows]) m.color.set(hairColor);
   mats.eyes.map = texture(`/static/assets/eye_${p.eye_color && p.eye_color !== 'auto' ? p.eye_color : auto.eye ?? 'brown'}.jpg`);
   mats.hair.needsUpdate = mats.eyes.needsUpdate = true;
   rebuildAvatar(true);
@@ -403,7 +406,7 @@ function logPanel() {
       <label>Protein (g)<input type="number" name="protein"></label>
       <label>Sleep (h)<input type="number" step="any" name="sleep"></label></div><button>Save check-in</button></form>
     <h3>Recent</h3><ul class="list">${S.logs.slice(-15).reverse().map(logItem).join('') || '<li class="muted">Nothing logged yet</li>'}</ul>
-    <h3>Scans</h3><ul class="list">${S.scans.slice(-10).reverse().map((s) => `<li><span>${new Date(s.ts * 1000).toLocaleString()}</span> · body fat ${fmt('bf', s.m.bf)}${s.side ? ' · front+side' : ''} <button class="link" data-delscan="${s.id}">delete</button></li>`).join('') || '<li class="muted">No scans yet</li>'}</ul>`;
+    <h3>Scans</h3>${S.hidden_scans ? `<p class="muted">${S.hidden_scans} scan${S.hidden_scans > 1 ? 's' : ''} hidden: the proportions weren't human (a misread pose).</p>` : ''}<ul class="list">${S.scans.slice(-10).reverse().map((s) => `<li><span>${new Date(s.ts * 1000).toLocaleString()}</span> · body fat ${fmt('bf', s.m.bf)}${s.side ? ' · front+side' : ''} <button class="link" data-delscan="${s.id}">delete</button></li>`).join('') || '<li class="muted">No scans yet</li>'}</ul>`;
 }
 function goalsPanel() {
   const free = Object.keys(META).filter((k) => !S.goals[k]);
@@ -426,12 +429,15 @@ function insightsPanel() {
   const I = S.insights, s = I.summary, c = s.changes;
   const outs = ['bf', 'waist', 'weight', 'lean_kg'].filter((k) => c[k] != null).map((k) => `${META[k].label.toLowerCase()} <b class="${tone(k, c[k])}">${fmt(k, c[k], true)}</b>`);
   const lines = [`<b>Inputs</b> (28 days): ${s.workouts} workouts, load ${s.load}${s.kcal ? `, ${Math.round(s.kcal)} kcal/day avg` : ''}.`,
-    ...(s.balance != null ? [`<b>Energy balance</b> ${s.balance > 0 ? '+' : ''}${Math.round(s.balance)} kcal/day → predicts <b>${fmt('weight', s.predicted_kg, true)}</b> over 28 days${c.weight != null ? `; measured ${fmt('weight', c.weight, true)}` : ''}.`] : []),
+    s.balance != null
+      ? `<b>Energy balance</b> ${s.balance > 0 ? '+' : ''}${Math.round(s.balance)} kcal/day (${s.balance_days} fully logged days) → predicts <b>${fmt('weight', s.predicted_kg, true)}</b> over 28 days${c.weight != null ? `; measured trend ${fmt('weight', c.weight, true)}` : ''}.`
+      : `<b>Energy balance</b>: needs 14+ fully logged days in the last 28 (${s.balance_days} so far).`,
     `<b>Outputs</b>: ${outs.length ? outs.join(', ') : 'need 2+ scans in this window'}.`,
     ...Object.entries(I.goals).filter(([, g]) => g.eta).map(([k, g]) => `At this pace: ${META[k].label} ${fmt(k, g.target)} by <b>${isoDay(g.eta)}</b>.`),
     ...I.notes];
   const cell = (k, v, dec = 0) => (v == null ? '—' : toUnit(v, META[k]?.unit).toFixed(META[k]?.dec ?? dec));
-  return `<h2>Inputs → Outputs</h2><div class="callout">${lines.map((l) => `<p>${l}</p>`).join('')}</div>${weekChart(I.weeks)}
+  const gaps = I.gaps.length ? `<div class="callout gaps"><b>Data gaps</b> — fill these for trustworthy results<ul>${I.gaps.map((g) => `<li>${esc(g)}</li>`).join('')}</ul></div>` : '';
+  return `<h2>Inputs → Outputs</h2><div class="callout">${lines.map((l) => `<p>${l}</p>`).join('')}</div>${gaps}${weekChart(I.weeks)}
     <div class="scroll"><table><tr><th>Week of</th><th>Wkts</th><th>Load</th><th>kcal</th><th>Bal</th><th>Steps</th><th>Prot g</th><th>Sleep h</th><th>Wt ${uLabel('kg')}</th><th>BF %</th><th>Waist ${uLabel('cm')}</th></tr>
     ${I.weeks.map((w) => `<tr><td>${isoDay(w.week).replace(/, \d{4}$/, '')}</td><td>${w.workouts}</td><td>${w.load}</td><td>${cell(0, w.kcal)}</td><td>${cell(0, w.balance)}</td><td>${cell(0, w.steps)}</td>
       <td>${cell(0, w.protein)}</td><td>${cell(0, w.sleep, 1)}</td><td>${cell('weight', w.weight)}</td><td>${cell('bf', w.bf)}</td><td>${cell('waist', w.waist)}</td></tr>`).join('')}</table></div>
@@ -458,6 +464,12 @@ function profilePanel() {
       <label>Camera URL<input name="camera_url" value="${esc(p.camera_url ?? '')}" placeholder="http://&lt;pi-tailscale-ip&gt;:8000/stream.mjpg"></label>
       <label>Camera rotation<select name="rotate">${[0, 90, 180, 270].map((r) => opt(r, r ? r + '° clockwise' : 'None', (p.rotate ?? 0) === r)).join('')}</select></label>
       <button>Save</button></form>
+    <h3>Scanning</h3>
+    <form id="fScan" class="stack">
+      <label class="check"><input type="checkbox" name="bare_only" ${p.bare_only === false ? '' : 'checked'}> Only count scans in minimal clothing (underwear is fine) — clothes inflate every measurement</label>
+      <label>Live preview<select name="preview">${opt('silhouette', 'Silhouette only (private)', p.preview !== 'camera')}${opt('camera', 'Camera image (for aiming the camera)', p.preview === 'camera')}</select></label>
+      <p class="muted">${S.face ? 'Scans are saved only for you: your face must match your photo, and only one person can be in the frame.' : 'Add a face photo below so scans are saved only for you. Until then, anyone alone in the frame gets scanned.'} Frames are never stored.</p>
+      <button>Save</button></form>
     <h3>Look</h3>
     <div class="row" style="justify-content:flex-start">${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
       <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
@@ -471,7 +483,7 @@ function profilePanel() {
     </div><button>Save look</button></form>
     ${first ? '' : `<h3>iPhone · Apple Health</h3>${pairBlock()}`}
     <h3>Scanning tips</h3><ul class="tips"><li>Camera ~chest height, 2.5–3.5 m away, whole body in frame.</li>
-      <li>Fitted clothes (or shorts / sports bra), hair off the neck.</li><li>Stand tall, feet hip-width, arms ~30° out.</li>
+      <li>Minimal clothing (underwear / sports bra) — clothes inflate every measurement. Hair off the neck.</li><li>Stand tall, feet hip-width, arms ~30° out.</li>
       <li>Hold ~5 s facing the camera, then turn 90° for ~3 s.</li><li>Same time of day (e.g. morning, before eating) for clean trends.</li></ul>
     <p class="muted">Camera video never leaves this Mac or gets saved — only the measurements.</p>`;
 }
@@ -514,6 +526,7 @@ $('#panel').addEventListener('submit', async (e) => {
     else if (f.id === 'fDaily') await api('POST', '/api/logs', { kind: 'daily', ...o, weight: o.weight && fromUnit(+o.weight, 'kg') });
     else if (f.id === 'fProfile') await api('POST', '/api/profile', { ...o, height_cm: o.units === 'imperial' ? o.height * 2.54 : +o.height });
     else if (f.id === 'fLook') await api('POST', '/api/profile', o);
+    else if (f.id === 'fScan') await api('POST', '/api/profile', { bare_only: fd.has('bare_only'), preview: o.preview });
     else if (f.id === 'fGoal' || f.dataset.goal) {
       const k = f.dataset.goal || o.metric;
       await api('POST', '/api/goals', { metric: k, target: fromUnit(+o.target, META[k].unit) });

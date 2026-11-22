@@ -46,41 +46,140 @@ function warpTriangle(ctx, img, s, d) {
 }
 
 // Skin texture canvas for `sex`: tinted to the photo's cheeks (or `tone`), with the photo's face baked in.
-export async function skinCanvas(sex, { face, photo, tone }) {
+// Separable box blur, 3 passes ≈ Gaussian. buf: Float32Array of w*h*ch.
+function blur(buf, w, h, ch, r) {
+  r = Math.max(1, Math.round(r));
+  let a = buf, b = new Float32Array(buf.length);
+  for (let pass = 0; pass < 6; pass++) {
+    const horiz = pass % 2 === 0, n = horiz ? w : h, m = horiz ? h : w;
+    for (let j = 0; j < m; j++) for (let c = 0; c < ch; c++) {
+      const at = (i) => ((horiz ? j * w + i : i * w + j) * ch + c);
+      let sum = 0;
+      for (let i = -r; i <= r; i++) sum += a[at(Math.min(n - 1, Math.max(0, i)))];
+      for (let i = 0; i < n; i++) {
+        b[at(i)] = sum / (2 * r + 1);
+        sum += a[at(Math.min(n - 1, i + r + 1))] - a[at(Math.max(0, i - r))];
+      }
+    }
+    [a, b] = [b, a];
+  }
+  return a;
+}
+
+// Per-channel median of the pixels where alpha > 0.
+function median(d) {
+  const hist = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+  let n = 0;
+  for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 200) { hist[0][d[i]]++; hist[1][d[i + 1]]++; hist[2][d[i + 2]]++; n++; }
+  return hist.map((h) => { let acc = 0, v = 0; while (v < 255 && (acc += h[v]) < n / 2) v++; return v; });
+}
+
+// Skin texture canvas for `sex`, tinted to your skin and with your face photo baked in.
+// The photo keeps only its fine detail (features, pores, brows); broad colour and shading come from the
+// skin texture, so its studio lighting doesn't make the face look pasted on. Scalp under hair takes the hair colour.
+export async function skinCanvas(sex, { face, photo, tone, hairColor }) {
   const A = assets(), anchors = A.arr(`face_uv.${sex}`);
   const at = (k) => [anchors[k * 2] * SIZE, (1 - anchors[k * 2 + 1]) * SIZE];
   const c = canvas(SIZE), ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(await loadImage(`/static/assets/skin_${sex}.jpg`), 0, 0, SIZE, SIZE);
-  let pc = null, px = null;
+  const oval = A.meta.face_oval.filter((k) => !Number.isNaN(anchors[k * 2])).map(at);
+  const mx = oval.reduce((s, p) => s + p[0], 0) / oval.length, my = oval.reduce((s, p) => s + p[1], 0) / oval.length;
+  const ovalPath = (g, k, dx = 0, dy = 0) => {
+    g.beginPath();
+    oval.forEach(([x, y], i) => g[i ? 'lineTo' : 'moveTo'](mx + (x - mx) * k - dx, my + (y - my) * k - dy));
+    g.fill();
+  };
+  // Face region box (texture px), padded
+  const xs = oval.map((p) => p[0]), ys = oval.map((p) => p[1]), pad = 40;
+  const bx = Math.max(0, Math.floor(Math.min(...xs) - pad)), by = Math.max(0, Math.floor(Math.min(...ys) - pad));
+  const bw = Math.min(SIZE, Math.ceil(Math.max(...xs) + pad)) - bx, bh = Math.min(SIZE, Math.ceil(Math.max(...ys) + pad)) - by;
+
+  let layer = null;
   if (face) {
-    pc = canvas(photo.naturalWidth, photo.naturalHeight).getContext('2d', { willReadFrequently: true });
-    pc.drawImage(photo, 0, 0);
-    px = (k) => [face.landmarks[k][0] * photo.naturalWidth, face.landmarks[k][1] * photo.naturalHeight];
+    const px = (k) => [face.landmarks[k][0] * photo.naturalWidth, face.landmarks[k][1] * photo.naturalHeight];
+    layer = canvas(SIZE);
+    const lc = layer.getContext('2d', { willReadFrequently: true }), tris = A.arr('face.tris');
+    for (let t = 0; t < tris.length; t += 3) {
+      const ks = [tris[t], tris[t + 1], tris[t + 2]];
+      if (!ks.some((k) => Number.isNaN(anchors[k * 2])) && !ks.every((k) => MOUTH.has(k))) warpTriangle(lc, photo, ks.map(px), ks.map(at));
+    }
   }
-  const target = face ? sample(pc, CHEEKS.map(px)) : tone ? hex(tone) : null;
-  if (target) { // multiply the whole skin so body and face meet without a seam
-    const base = sample(ctx, CHEEKS.map(at)), k = target.map((v, i) => v / Math.max(base[i], 1));
+  // Tint the whole skin to your tone: median of the photo's face (or the chosen tone) vs the texture's face.
+  const inner = canvas(bw, bh), ic = inner.getContext('2d', { willReadFrequently: true });
+  ovalPath(ic, 0.75, bx, by);
+  ic.globalCompositeOperation = 'source-in';
+  ic.drawImage(c, bx, by, bw, bh, 0, 0, bw, bh);
+  const base = median(ic.getImageData(0, 0, bw, bh).data);
+  let target = tone ? hex(tone) : null;
+  if (face) {
+    ic.clearRect(0, 0, bw, bh);
+    ic.globalCompositeOperation = 'source-over';
+    ovalPath(ic, 0.75, bx, by);
+    ic.globalCompositeOperation = 'source-in';
+    ic.drawImage(layer, bx, by, bw, bh, 0, 0, bw, bh);
+    target = median(ic.getImageData(0, 0, bw, bh).data);
+  }
+  if (target) {
+    const k = target.map((v, i) => v / Math.max(base[i], 1));
     const im = ctx.getImageData(0, 0, SIZE, SIZE), d = im.data;
     for (let i = 0; i < d.length; i += 4) { d[i] *= k[0]; d[i + 1] *= k[1]; d[i + 2] *= k[2]; }
     ctx.putImageData(im, 0, 0);
   }
   if (face) {
-    const layer = canvas(SIZE), lc = layer.getContext('2d'), tris = A.arr('face.tris');
-    for (let t = 0; t < tris.length; t += 3) {
-      const ks = [tris[t], tris[t + 1], tris[t + 2]];
-      if (!ks.some((k) => Number.isNaN(anchors[k * 2])) && !ks.every((k) => MOUTH.has(k))) warpTriangle(lc, photo, ks.map(px), ks.map(at));
+    // Low-pass both at quarter resolution; photo out = photo × blur(skin) / blur(photo), feathered into the skin.
+    const q = 0.25, sw = Math.ceil(bw * q), sh = Math.ceil(bh * q), r = 0.08 * bw * q;
+    const small = (src, k = null) => {
+      const g = canvas(sw, sh).getContext('2d', { willReadFrequently: true });
+      if (k) { g.fillStyle = '#fff'; ovalPath(g, k, bx, by); g.globalCompositeOperation = 'source-in'; }
+      if (src) g.drawImage(src, bx, by, bw, bh, 0, 0, sw, sh);
+      return g.getImageData(0, 0, sw, sh).data;
+    };
+    const lowT = blur(Float32Array.from(small(c)), sw, sh, 4, r);
+    const pRaw = small(layer), pre = new Float32Array(pRaw.length);
+    for (let i = 0; i < pRaw.length; i += 4) {
+      const a = pRaw[i + 3] / 255;
+      pre[i] = pRaw[i] * a; pre[i + 1] = pRaw[i + 1] * a; pre[i + 2] = pRaw[i + 2] * a; pre[i + 3] = a;
     }
-    // Feathered mask: the face outline pulled 10 % toward its centre, blurred.
-    const oval = A.meta.face_oval.filter((k) => !Number.isNaN(anchors[k * 2])).map(at);
-    const mx = oval.reduce((s, p) => s + p[0], 0) / oval.length, my = oval.reduce((s, p) => s + p[1], 0) / oval.length;
-    const mask = canvas(SIZE), mc = mask.getContext('2d');
-    mc.filter = 'blur(18px)';
-    mc.beginPath();
-    oval.forEach(([x, y], i) => mc[i ? 'lineTo' : 'moveTo'](mx + (x - mx) * 0.9, my + (y - my) * 0.9));
-    mc.fill();
-    lc.globalCompositeOperation = 'destination-in';
-    lc.drawImage(mask, 0, 0);
-    ctx.drawImage(layer, 0, 0);
+    const lowP = blur(pre, sw, sh, 4, r); // premultiplied: dividing by blurred alpha normalises at the edges
+    const mg = canvas(sw, sh).getContext('2d', { willReadFrequently: true });
+    mg.scale(q, q);
+    mg.fillStyle = '#fff';
+    ovalPath(mg, 0.92, bx, by);
+    const mraw = mg.getImageData(0, 0, sw, sh).data, mask = new Float32Array(sw * sh);
+    for (let i = 0; i < mask.length; i++) mask[i] = mraw[i * 4 + 3] / 255;
+    const soft = blur(mask, sw, sh, 1, 0.04 * bw * q);
+    const sampleAt = (buf, ch, x, y, k) => { // bilinear
+      const fx = Math.min(sw - 1.001, Math.max(0, x * q - 0.5)), fy = Math.min(sh - 1.001, Math.max(0, y * q - 0.5));
+      const x0 = fx | 0, y0 = fy | 0, tx = fx - x0, ty = fy - y0, i = (y0 * sw + x0) * ch + k;
+      return (buf[i] * (1 - tx) + buf[i + ch] * tx) * (1 - ty) + (buf[i + sw * ch] * (1 - tx) + buf[i + sw * ch + ch] * tx) * ty;
+    };
+    const T = ctx.getImageData(bx, by, bw, bh), P = layer.getContext('2d').getImageData(bx, by, bw, bh), t = T.data, p = P.data;
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+      const i = (y * bw + x) * 4, alpha = (p[i + 3] / 255) * sampleAt(soft, 1, x, y, 0);
+      if (alpha <= 0) continue;
+      const pa = Math.max(sampleAt(lowP, 4, x, y, 3), 1e-3);
+      for (let k = 0; k < 3; k++) {
+        const ratio = Math.min(2.5, Math.max(0.4, sampleAt(lowT, 4, x, y, k) / Math.max(sampleAt(lowP, 4, x, y, k) / pa, 1)));
+        t[i + k] += (p[i + k] * ratio - t[i + k]) * alpha;
+      }
+    }
+    ctx.putImageData(T, bx, by);
+  }
+  if (hairColor) { // hair-coloured scalp so gaps between hair strands don't show bare skin
+    const sc = canvas(SIZE), sg = sc.getContext('2d'), scalp = A[sex].scalp, uv = (r) => [A.uv[r * 2] * SIZE, (1 - A.uv[r * 2 + 1]) * SIZE];
+    sg.fillStyle = sg.strokeStyle = hairColor;
+    for (let t = 0; t < A.tris.length; t += 3) {
+      const rs = [A.tris[t], A.tris[t + 1], A.tris[t + 2]];
+      if (!rs.every((r) => scalp[A.src[r]])) continue;
+      sg.beginPath();
+      rs.map(uv).forEach(([x, y], i) => sg[i ? 'lineTo' : 'moveTo'](x, y));
+      sg.closePath();
+      sg.fill();
+      sg.stroke(); // closes hairline-thin cracks between triangles
+    }
+    ctx.globalAlpha = 0.8;
+    ctx.drawImage(sc, 0, 0);
+    ctx.globalAlpha = 1;
   }
   return c;
 }

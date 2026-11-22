@@ -14,10 +14,25 @@ EAR_L, EAR_R = 7, 8
 SH_L, SH_R, EL_L, EL_R, WR_L, WR_R = 11, 12, 13, 14, 15, 16
 HIP_L, HIP_R, KN_L, KN_R, AN_L, AN_R = 23, 24, 25, 26, 27, 28
 FRONT_NEEDS = [SH_L, SH_R, EL_L, EL_R, WR_L, WR_R, HIP_L, HIP_R, KN_L, KN_R, AN_L, AN_R]
+# Plausible adult sizes as fractions of standing height. Frames and saved scans outside these are rejected:
+# they come from a misread pose (sitting, partly hidden, someone else's limbs) rather than a real body.
+PLAUSIBLE = {'neck_w': (.04, .1), 'shoulders_w': (.17, .36), 'chest_w': (.12, .3), 'waist_w': (.1, .32), 'hips_w': (.13, .32),
+             'neck_d': (.04, .1), 'chest_d': (.08, .25), 'waist_d': (.07, .28), 'hips_d': (.08, .26),
+             'arm_l_w': (.035, .1), 'arm_r_w': (.035, .1), 'thigh_l_w': (.06, .16), 'thigh_r_w': (.06, .16),
+             'calf_l_w': (.045, .11), 'calf_r_w': (.045, .11), 'lv_shoulder': (.75, .87), 'lv_hip': (.43, .58), 'lv_knee': (.22, .33)}
+
+
+def implausible(raw):
+    """Measurements outside human proportions, or None if the body looks plausible."""
+    bad = [k for k, (lo, hi) in PLAUSIBLE.items() if raw.get(k) is not None and not lo <= raw[k] <= hi]
+    if raw.get('hips_w') and raw.get('waist_w') and raw['hips_w'] < .8 * raw['waist_w']:
+        bad.append('hips_w')
+    return list(dict.fromkeys(bad)) or None
 
 TORSO = {'neck': 1.0, 'chest': .72, 'waist': .78, 'hips': .75}  # typical depth/width, used until a side view exists
 LIMBS = ['arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'calf_l', 'calf_r']
 CALIBRATABLE = [*TORSO, 'shoulders', *LIMBS]
+DONT_LOOK = 'Those proportions look off — stand tall, facing the camera, whole body in view'
 METRICS = ['bf', 'weight', 'lean_kg', 'fat_kg', 'ffmi', 'whtr', 'whr', *CALIBRATABLE]
 # Workout focus -> body parts it trains (cardio only counts toward overall load).
 FOCUS = {'full body': CALIBRATABLE, 'chest': ['chest'], 'back': ['chest', 'shoulders'], 'shoulders': ['shoulders'],
@@ -41,7 +56,7 @@ def _run(m, p, d, cap):
 def measure(pts, vis, mask, female=False):
     """pts: (33,2) pixel landmarks, vis: (33,) visibility, mask: HxW person probability.
     Returns {'view': 'front'|'side'|None, 'raw': {...}, 'lines': [(p, q)], 'problem': str|None}."""
-    out = {'view': None, 'raw': {}, 'lines': [], 'problem': None}
+    out = {'view': None, 'raw': {}, 'lines': [], 'cuts': {}, 'problem': None}
 
     def fail(msg):
         out['problem'] = msg
@@ -88,25 +103,25 @@ def measure(pts, vis, mask, female=False):
     def at(f):
         return sh + axis * f
 
-    def slice_(points, pick=min, cap=torso):
+    def slice_(name, points, pick=min, cap=torso):
         cuts = [(p, _run(m, p, perp, cap)[0], _run(m, p, -perp, cap)[0]) for p in points]
         p, a, b = pick(cuts, key=lambda c: c[1] + c[2])
-        out['lines'].append((p + perp * a, p - perp * b))
+        out['lines'].append(out['cuts'].setdefault(name, (p + perp * a, p - perp * b)))
         return p, a, b
 
     sfx = '_w' if view == 'front' else '_d'
     raw = out['raw']
-    p, a, b = slice_([sh + (head - sh) * t for t in np.linspace(.2, .55, 8)], cap=.5 * torso)
+    p, a, b = slice_('neck', [sh + (head - sh) * t for t in np.linspace(.2, .55, 8)], cap=.5 * torso)
     raw['neck' + sfx], lv_neck = (a + b) / H, lv(p)
-    p, a, b = slice_([at(.30)])
+    p, a, b = slice_('chest', [at(.30)])
     raw['chest' + sfx], lv_chest = (a + b) / H, lv(p)
     # Navy method: men at the navel, women at the narrowest point.
-    p, wa, wb = slice_([at(f) for f in (np.linspace(.5, .8, 7) if female else [.73])])
+    p, wa, wb = slice_('waist', [at(f) for f in (np.linspace(.5, .8, 7) if female else [.73])])
     raw['waist' + sfx], lv_waist = (wa + wb) / H, lv(p)
-    p, ha, hb = slice_([at(f) for f in np.linspace(.95, 1.15, 6)], pick=max)
+    p, ha, hb = slice_('hips', [at(f) for f in np.linspace(.95, 1.15, 6)], pick=max)
     raw['hips' + sfx], lv_hips = (ha + hb) / H, lv(p)
     if view == 'side':
-        return out
+        return fail(DONT_LOOK) if implausible(raw) else out
 
     # Arms touching the torso would inflate waist/hip widths.
     for j, (ra, rb) in ((EL_L, (wa, wb)), (EL_R, (wa, wb)), (WR_L, (ha, hb)), (WR_R, (ha, hb))):
@@ -115,7 +130,7 @@ def measure(pts, vis, mask, female=False):
             out['lines'].clear()
             return fail('Hold your arms slightly away from your body')
 
-    _, a, b = slice_([at(0)])
+    _, a, b = slice_('shoulders', [at(0)])
     raw['shoulders_w'] = (a + b) / H
 
     def limb(j0, j1, ts, cap, inner_ok):
@@ -148,7 +163,15 @@ def measure(pts, vis, mask, female=False):
                lv_hips=lv_hips, lv_hip=lv(hp), lv_knee=(lv(pts[KN_L]) + lv(pts[KN_R])) / 2,
                lv_ankle=(lv(pts[AN_L]) + lv(pts[AN_R])) / 2,
                upperarm=(seg(SH_L, EL_L) + seg(SH_R, EL_R)) / 2, forearm=(seg(EL_L, WR_L) + seg(EL_R, WR_R)) / 2)
-    return out
+    return fail(DONT_LOOK) if implausible(raw) else out
+
+
+def skin_share(ycc, skin, a, b, tol=14):
+    """Share of pixels along a measurement line (middle 70 %) whose Cr/Cb chroma is within tol of your skin.
+    ycc: YCrCb image; skin: (Cr, Cb). A shirt or loose top shows up as a low share."""
+    t = np.linspace(.15, .85, 40)[:, None]
+    xy = np.rint(np.asarray(a) + (np.asarray(b) - np.asarray(a)) * t).astype(int).clip(0, [ycc.shape[1] - 1, ycc.shape[0] - 1])
+    return float((np.abs(ycc[xy[:, 1], xy[:, 0], 1:].astype(int) - np.asarray(skin)) < tol).all(1).mean())
 
 
 def ellipse(w, d):
@@ -211,21 +234,50 @@ def _delta(pts, since):
     return round(pts[-1][1] - pts[0][1], 3) if len(pts) >= 2 else None
 
 
+CUMULATIVE = {'kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'water', 'alcohol', 'active', 'basal', 'steps', 'exercise'}
+NUTRITION = {'kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar'}
+
+
+def usable(daily, now):
+    """Daily records with values that would mislead dropped: today's running totals (the day isn't over) and
+    nutrition from days logged at under 60 % of your usual intake (a forgotten meal, not a fast)."""
+    today = date.fromtimestamp(now)
+    kcals = [d['kcal'] for d in daily if 'kcal' in d and date.fromtimestamp(d['ts']) != today]
+    usual = statistics.median(kcals) if len(kcals) >= 5 else 0
+    out = []
+    for d in daily:
+        drop = (CUMULATIVE if date.fromtimestamp(d['ts']) == today else set()) | (NUTRITION if d.get('kcal', usual) < .6 * usual else set())
+        out.append({k: v for k, v in d.items() if k not in drop})
+    return out
+
+
+def trend_change(pts, since):
+    """Change over the window from the median of all pairwise slopes (Theil-Sen), so one noisy or
+    water-heavy reading doesn't swing it the way first-vs-last or a least-squares line would."""
+    pts = [p for p in pts if p[0] >= since]
+    if len(pts) < 3 or pts[-1][0] - pts[0][0] < 7 * 86400:
+        return _delta(pts, since)
+    slopes = [(b[1] - a[1]) / (b[0] - a[0]) for i, a in enumerate(pts) for b in pts[i + 1:] if b[0] > a[0]]
+    return round(statistics.median(slopes) * (pts[-1][0] - pts[0][0]), 3)
+
+
 def insights(scans, logs, goals, now=None):
     """Inputs (workouts, food, sleep) vs outputs (body metrics): weekly table, 28-day summary,
-    per-part training vs change, goal projections, and correlation notes."""
+    per-part training vs change, goal projections, correlation notes, data coverage and gaps."""
     now, day = now or time.time(), 86400
     workouts = [l for l in logs if l['kind'] == 'workout']
-    daily = [l for l in logs if l['kind'] == 'daily']
+    raw_daily = [l for l in logs if l['kind'] == 'daily']
+    daily = usable(raw_daily, now)
 
     def load(ws):
-        return sum(w['minutes'] * w['rpe'] for w in ws)
+        return round(sum(w['minutes'] * w['rpe'] for w in ws))
 
     def avg(xs):
         return round(statistics.fmean(xs), 2) if xs else None
 
-    def balance(ds):  # energy in - out, only on days Health has intake, active and resting energy
-        return avg([d['kcal'] - d['active'] - d['basal'] for d in ds if {'kcal', 'active', 'basal'} <= d.keys()])
+    def balance(ds, min_days=1):  # energy in - out, only on fully logged days with intake, active and resting energy
+        days = [d['kcal'] - d['active'] - d['basal'] for d in ds if {'kcal', 'active', 'basal'} <= d.keys()]
+        return avg(days) if len(days) >= min_days else None
 
     today = date.fromtimestamp(now)
     monday = datetime.combine(today - timedelta(days=today.weekday()), datetime.min.time())
@@ -237,8 +289,9 @@ def insights(scans, logs, goals, now=None):
         sc = [s['m'] for s in scans if start <= s['ts'] < start + 7 * day]
         weeks.append({'week': date.fromtimestamp(start).isoformat(), 'workouts': len(wk),
                       'minutes': sum(w['minutes'] for w in wk), 'load': load(wk),
-                      **{k: avg([d[k] for d in dl if k in d]) for k in ('kcal', 'protein', 'sleep', 'weight', 'active', 'steps')},
-                      'balance': balance(dl),
+                      **{k: avg([d[k] for d in dl if k in d]) if sum(k in d for d in dl) >= 3 else None
+                         for k in ('kcal', 'protein', 'sleep', 'weight', 'active', 'steps')},
+                      'balance': balance(dl, 4),
                       **{k: avg([m[k] for m in sc if k in m]) for k in ('bf', 'waist')}})
 
     notes = []
@@ -257,11 +310,13 @@ def insights(scans, logs, goals, now=None):
 
     since = now - 28 * day
     recent = [w for w in workouts if w['ts'] >= since]
-    bal = balance([d for d in daily if d['ts'] >= since])
-    summary = {'workouts': len(recent), 'load': load(recent), 'balance': bal,
+    window = [d for d in daily if d['ts'] >= since]
+    balance_days = sum({'kcal', 'active', 'basal'} <= d.keys() for d in window)
+    bal = balance(window, 14)  # under half the month logged, a balance would mostly be guesswork
+    summary = {'workouts': len(recent), 'load': load(recent), 'balance': bal, 'balance_days': balance_days,
                'predicted_kg': round(bal * 28 / 7700, 2) if bal is not None else None,  # ~7700 kcal per kg of fat
                'kcal': avg([d['kcal'] for d in daily if d['ts'] >= since and 'kcal' in d]),
-               'changes': {k: _delta(series(k, scans, logs), since) for k in ('bf', 'waist', 'weight', 'lean_kg')}}
+               'changes': {k: trend_change(series(k, scans, logs), since) for k in ('bf', 'waist', 'weight', 'lean_kg')}}
     parts = {}
     for p in CALIBRATABLE:
         ws = [w for w in recent if any(p in FOCUS.get(f, []) for f in w.get('focus', []))]
@@ -283,8 +338,28 @@ def insights(scans, logs, goals, now=None):
                 eta = date.fromtimestamp(now + (g['target'] - cur) / slope * day).isoformat()
         goal_out[metric] = {**g, 'start': start, 'current': cur, 'progress': progress, 'rate_per_week': rate, 'eta': eta}
 
-    # Every Health metric: last 7 days vs the 7 before.
-    health = {k: {'avg': avg([d[k] for d in daily if d['ts'] >= now - 7 * day and k in d]),
-                  'prev': avg([d[k] for d in daily if now - 14 * day <= d['ts'] < now - 7 * day and k in d])}
-              for k in sorted({k for d in daily for k in d} - {'id', 'ts', 'kind'})}
-    return {'weeks': weeks, 'summary': summary, 'parts': parts, 'goals': goal_out, 'notes': notes, 'health': health}
+    # Every Health metric: last 7 days vs the 7 before, with how many days actually had data.
+    last7, prev7 = [d for d in daily if d['ts'] >= now - 7 * day], [d for d in daily if now - 14 * day <= d['ts'] < now - 7 * day]
+    health = {k: {'avg': avg([d[k] for d in last7 if k in d]), 'prev': avg([d[k] for d in prev7 if k in d]),
+                  'days': sum(k in d for d in last7)}
+              for k in sorted({k for d in raw_daily for k in d} - {'id', 'ts', 'kind'})}
+
+    # Gaps: missing inputs make outputs wrong, so say exactly what's missing and how to fill it.
+    days28 = lambda k: sum(k in d for d in window)  # noqa: E731
+    partial = sum('kcal' in r and 'kcal' not in d for r, d in zip(raw_daily, daily) if r['ts'] >= since)
+    gaps = []
+    if days28('kcal') < 14:
+        gaps.append(f"Calories logged on {days28('kcal')} of 28 days. Energy balance and food insights need a food log — "
+                    "any app that writes to Apple Health (Cronometer, MyFitnessPal, Lose It, MacroFactor).")
+    if partial:
+        gaps.append(f"{partial} partly logged day{'s' * (partial > 1)} left out of nutrition averages.")
+    weighins = sum(1 for p in series('weight', scans, logs) if p[0] >= since)
+    if weighins < 8:
+        gaps.append(f"{weighins} weigh-in{'s' * (weighins != 1)} in 28 days. Fat and lean mass need a weight within a week of "
+                    "each scan — weigh in a few times a week (a smart scale that syncs to Health does it for you).")
+    if days28('sleep') < 17:
+        gaps.append(f"Sleep tracked {days28('sleep')} of 28 nights — wear your Watch to bed for recovery insights.")
+    recent_scans = sum(1 for s in scans if s['ts'] >= since)
+    if recent_scans < 4:
+        gaps.append(f"{recent_scans} body scan{'s' * (recent_scans != 1)} in 28 days — walk past the camera a few times a week.")
+    return {'weeks': weeks, 'summary': summary, 'parts': parts, 'goals': goal_out, 'notes': notes, 'health': health, 'gaps': gaps}

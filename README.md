@@ -15,7 +15,7 @@ uv run python test_bodylab.py && node test_body.mjs
 
 1. **Pair your iPhone** (Profile → scan the QR code). Apple Health fills in height, sex and age, and your history flows in. Or type your height.
 2. Set the **camera URL** in Profile.
-3. Stand in front of the camera: full body in frame, fitted clothes, arms ~30° out. Hold ~3 s → front scan. Turn 90° for ~2 s → side scan adds real body depth.
+3. Stand in front of the camera: whole body in frame, minimal clothing, arms ~30° out. Hold ~3 s → front scan. Turn 90° for ~2 s → side scan adds real body depth.
 
 Env: `PORT` (8765), `COOLDOWN_MIN` (10, minimum minutes between saved scans), `BODYLAB_DB` (default `data/bodylab.db`).
 
@@ -58,11 +58,13 @@ Mounted sideways? Set **Camera rotation** in Profile.
 
 - **Measuring:** [MediaPipe Pose](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) finds 33 landmarks and a person mask per frame. Widths are measured across the mask at anatomical levels, scaled by your height; a side view supplies depths. Circumferences use an ellipse model; body fat uses the US Navy formula. Tape-measure any part once to calibrate it (past scans are corrected too).
 - **3D body:** [MakeHuman](http://www.makehumancommunity.org)'s CC0 base mesh, fitted in the browser (`static/body.js`): torso width/depth per level, limbs radially around their bones, heights to your landmarks, blended by the rig's skin weights. Hair, brows, lashes and eyes are MakeHuman proxies anchored to the mesh, so they follow the fit.
-- **Your face:** the template head is rendered once and run through MediaPipe's face landmarker, giving each of 478 landmarks a spot on the skin texture. Your photo's landmarks then warp it, triangle by triangle, onto that texture (`static/look.js`). Skin tone, eye colour and hair colour are read from the same photo.
+- **Your face:** the template head is rendered once and run through MediaPipe's face landmarker, giving each of 478 landmarks a spot on the skin texture. Your photo's landmarks then warp it, triangle by triangle, onto that texture (`static/look.js`), keeping the photo's fine detail but taking broad colour and shading from the skin, so studio lighting doesn't make it look pasted on. Skin tone, eye colour and hair colour are read from the same photo.
+- **Only you, only real scans:** a scan is saved only when one person is in frame, your face matches your photo ([OpenCV](https://github.com/opencv/opencv_zoo) YuNet + SFace), the proportions are human, and — by default — your torso shows skin (checked against your face's skin tone in the same frame), since clothes inflate every measurement. The live preview is a silhouette unless you switch it to the camera image.
+- **Incomplete data:** today's running totals and partly logged food days are left out of averages; energy balance needs 14+ fully logged days out of 28; weight and body trends use a Theil–Sen line so one noisy reading can't swing them; Insights lists exactly which inputs are missing.
 - `uv run python tools/build_assets.py` rebuilds `static/assets/` from the original sources.
 
 Expect roughly ±3–4 body-fat points without calibration. Clothing, posture and lighting matter more than the math.
 
 ## License
 
-MIT. Bundles [three.js](https://threejs.org) (MIT), [uqr](https://github.com/unjs/uqr) (MIT), assets derived from [MakeHuman](http://www.makehumancommunity.org) (CC0: mesh, skins, hair, eyes) and MediaPipe's canonical face-mesh triangulation (Apache-2.0); downloads MediaPipe pose and face models (Apache-2.0).
+MIT. Bundles [three.js](https://threejs.org) (MIT), [uqr](https://github.com/unjs/uqr) (MIT), assets derived from [MakeHuman](http://www.makehumancommunity.org) (CC0: mesh, skins, hair, eyes) and MediaPipe's canonical face-mesh triangulation (Apache-2.0); downloads MediaPipe pose and face models (Apache-2.0) and OpenCV Zoo face detection/recognition models (MIT, Apache-2.0).

@@ -78,6 +78,7 @@ function template(pos, J, sex) {
   // Per-vertex labels for picking/highlighting, and workout clothes (shorts; sports top for women).
   t.parts = new Array(n);
   t.cloth = new Float32Array(n); // 0 = skin, 1 = fabric, soft edges
+  t.scalp = new Uint8Array(n); // head skin a haircut covers: above the forehead, and the back of the head to the nape
   const smooth = (a, b, x) => { const k = clamp((x - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
   const band = (y, lo, hi) => smooth(lo - 1.5, lo + 1.5, y) * (1 - smooth(hi - 1.5, hi + 1.5, y));
   const kneeY = (J.knee_l[1] + J.knee_r[1]) / 2;
@@ -88,6 +89,8 @@ function template(pos, J, sex) {
     t.parts[i] = r === REG.head ? 'overall' : r === REG.torso
       ? (f < t.neck.f / 2 ? 'neck' : f < 0.15 ? 'shoulders' : f < 0.5 ? 'chest' : f < 0.87 ? 'waist' : 'hips')
       : r <= REG.arm_r ? `arm_${side}` : (y > J[`knee_${side}`][1] ? `thigh_${side}` : `calf_${side}`);
+    const eyeY = J.eye_l[1];
+    t.scalp[i] = r === REG.head && (y > eyeY + 0.045 * H || (pos[i * 3 + 2] < J.head[2] - 3 && y > eyeY - 0.035 * H)) ? 1 : 0;
     const top = sex === 'female' ? band(y, sh - 0.42 * len, sh - 0.1 * len) : 0;
     t.cloth[i] = Math.max(band(y, hip - 0.38 * (hip - kneeY), sh - 0.84 * len), top) * clamp(1 - w(i, REG.arm_l) - w(i, REG.arm_r), 0, 1);
   }
