@@ -10,7 +10,7 @@ Requires [uv](https://docs.astral.sh/uv/) and a camera that serves MJPEG or RTSP
 
 ```sh
 uv run app.py              # http://localhost:8765 (downloads the 30 MB pose model on first run)
-uv run python test_measure.py
+uv run python test_bodylab.py
 ```
 
 Open the app, enter your height and camera URL under **Profile**, then stand in front of the camera:
@@ -33,6 +33,17 @@ tailscale ssh $PI 'loginctl enable-linger && systemctl --user daemon-reload && s
 ```
 
 Mounted sideways? Set **Camera rotation** in Profile.
+
+## iPhone: Apple Health sync
+
+`ios/` is a small SwiftUI app that sends the last 60 days of weight, calories, protein, sleep, active energy and workouts to BodyLab: on open, and in the background whenever Health gets new data. Re-syncs update records instead of duplicating them.
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:8765   # tailnet-only HTTPS; only /api/sync (token) answers remotely
+cd ios && xcodegen && open BodyLabSync.xcodeproj
+```
+
+Pick your Team under Signing & Capabilities, run it on your iPhone, enter the server and token shown in BodyLab → Profile, then tap **Connect Apple Health**.
 
 ## How it works
 

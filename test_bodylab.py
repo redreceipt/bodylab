@@ -1,4 +1,4 @@
-"""Self-check: synthetic 175 cm figure drawn at 4 px/cm. Run: uv run python test_measure.py"""
+"""Self-check: synthetic 175 cm figure drawn at 4 px/cm. Run: uv run python test_bodylab.py"""
 import math
 import time
 
@@ -62,3 +62,20 @@ g = ins['goals']['bf']
 assert len(ins['weeks']) == 8 and abs(g['rate_per_week'] + .7) < .01 and g['eta'] and .5 < g['progress'] < .7, g
 assert ins['parts']['arm_l']['workouts'] == 14 and ins['parts']['waist']['workouts'] == 0
 print('ok', {k: dims[k] for k in expect})
+
+# Apple Health sync: resending the same window updates rows instead of duplicating them.
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import app  # noqa: E402
+
+app.DB_PATH = Path(tempfile.mkdtemp()) / 'test.db'
+app.init_db()
+batch = {'days': [{'date': '2026-11-20', 'weight': 80.5, 'sleep': 7.2}, {'date': '2026-11-21'}],
+         'workouts': [{'id': 'W1', 'start': now, 'minutes': 45, 'type': 'Strength', 'focus': ['full body'], 'rpe': 7.4}]}
+assert app.post_sync(batch)['saved'] == 2  # empty day skipped
+batch['days'][0]['weight'] = 80.1
+app.post_sync(batch)
+logs = app.get_logs()
+assert len(logs) == 2 and [l['weight'] for l in logs if l['kind'] == 'daily'] == [80.1], logs
+print('sync ok')
