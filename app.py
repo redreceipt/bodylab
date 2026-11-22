@@ -421,9 +421,9 @@ class Capture:
                 self.up /= np.linalg.norm(self.up)
                 rec = {'ts': now, 'cam': self.cam, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
                        'sil': silhouette(mask, pts, world, r['origin'], r['H'])} | ({'skin': skin} if skin else {})
-                if self.prof.get('reference') and now - self.last_ref > 2 and reference_wanted(rec):
+                if self.prof.get('reference') and now - self.last_ref > 1:
                     try:  # a developer extra: never costs the frame
-                        self.last_ref, rec['jpg'] = now, reference_crop(f, mask)  # saved only if it's you
+                        self.last_ref, rec['jpg'] = now, reference_crop(f, mask, r, skin)  # saved only if it's you
                     except Exception as e:
                         print('reference image failed:', e, flush=True)
                 for x in self.gate.frame(rec):
@@ -542,17 +542,11 @@ def refit_loop():
                 return
 
 
-REF_PER_BUCKET, REF_MAX = 2, 80  # reference images per 10° of turn per day, and in all
+REF_PER_BUCKET, REF_MAX = 3, 80  # best reference images per 10° of turn per camera, and in all
 
 
 def reference_dir():
     return DB_PATH.parent / 'reference'
-
-
-def reference_wanted(rec):
-    """Developer reference set: a few confirmed frames of you per 10° of turn per day, for tuning the measuring."""
-    tag = f"{date.fromtimestamp(rec['ts'])}_{int(abs(rec['theta']) // 10) * 10:02d}"
-    return len(list(reference_dir().glob(f'{tag}_*.jpg'))) < REF_PER_BUCKET
 
 
 def person_box(mask, margin=.1):
@@ -588,8 +582,10 @@ def bare_skin(segmenter, f, mask, pts):
             'shins': legs([limb(25, 27, .08), limb(26, 28, .08)])}, cat, box
 
 
-def reference_crop(f, mask):
-    """The person (10 % margin), background greyed out, at most 900 px tall, as JPEG: you, not the room."""
+def reference_crop(f, mask, r, skin):
+    """The person (10 % margin), background greyed out, at most 1600 px tall, as JPEG: you, not the room. With where
+    the crop sits (box, scale, hip centre, px per standing height: maps the stored outline onto it) and a score:
+    bare skin, sharpness and size, so better captures replace weaker ones."""
     box = person_box(mask)
     if not box:
         return None
@@ -597,21 +593,30 @@ def reference_crop(f, mask):
     crop = f[y0:y1, x0:x1].copy()
     person = cv2.dilate((mask[y0:y1, x0:x1] > .5).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
     crop[~person] = 128
-    k = min(1, 900 / crop.shape[0])
-    return cv2.imencode('.jpg', cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+    k = min(1, 1600 / crop.shape[0])
+    sharp = cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F)[person].var()
+    bare = sum(.5 if skin.get(p) is None else skin[p] for p in ('torso', 'thighs', 'shins')) / 3 if skin else .5
+    score = round(bare + .5 * min(1, sharp / 300) + .5 * min(1, crop.shape[0] * k / 1600), 3)
+    jpg = cv2.imencode('.jpg', cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
+    return jpg, {'box': [y0, x0], 'k': k, 'origin': [round(float(v), 1) for v in r['origin']], 'H': round(float(r['H']), 1), 'score': score}
 
 
-def save_reference(jpg, rec):
-    """Store a reference image with its measurements; the oldest go beyond REF_MAX. Local only (data/, gitignored)."""
-    if not jpg:
+def save_reference(ref, rec):
+    """Keep the best reference images: 3 per 10° of turn per camera (REF_MAX in all), each with its frame's record.
+    Local only (data/, gitignored)."""
+    if not ref:
         return
+    jpg, info = ref
     d = reference_dir()
     d.mkdir(exist_ok=True)
+    bucket = f"{int(abs(rec['theta']) // 10) * 10:02d}_cam{rec.get('cam', 0) + 1}"
     name = f"{date.fromtimestamp(rec['ts'])}_{int(abs(rec['theta']) // 10) * 10:02d}_{int(rec['ts'])}_cam{rec.get('cam', 0) + 1}"
     (d / f'{name}.jpg').write_bytes(jpg)
-    (d / f'{name}.json').write_text(json.dumps(rec))
-    for old in sorted(d.glob('*.jpg'), key=lambda p: p.stat().st_mtime)[:-REF_MAX]:
-        old.unlink()
+    (d / f'{name}.json').write_text(json.dumps(rec | {'ref': info}))
+    score = lambda p: json.loads(p.with_suffix('.json').read_text()).get('ref', {}).get('score', 0)  # noqa: E731
+    mine = [p for p in d.glob('*.jpg') if p.stem.split('_', 1)[1].startswith(bucket[:2]) and p.stem.endswith(bucket[-4:])]
+    for old in sorted(mine, key=score)[:-REF_PER_BUCKET] + sorted(d.glob('*.jpg'), key=score)[:-REF_MAX]:
+        old.unlink(missing_ok=True)
         old.with_suffix('.json').unlink(missing_ok=True)
 
 

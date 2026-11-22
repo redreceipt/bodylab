@@ -1,4 +1,5 @@
 """Self-check: synthetic 175 cm figure drawn at 4 px/cm, plus fusion, insights and sync. Run: uv run python test_bodylab.py"""
+import json
 import math
 import time
 
@@ -206,7 +207,12 @@ class Seg:
 frame = np.zeros((1000, 800, 3), np.uint8)
 skin, cat, box = app.bare_skin(Seg(), frame, img / 255.0, pts)
 assert skin['thighs'] == 0 and skin['shins'] in (0, None) and 0 < skin['torso'] < 1 and cat.shape == (box[1] - box[0], box[3] - box[2]), (skin, cat.shape, box)
-assert cv2.imdecode(np.frombuffer(app.reference_crop(frame, img / 255.0), np.uint8), cv2.IMREAD_COLOR) is not None
+ref_jpg, ref_info = app.reference_crop(frame, img / 255.0, {'origin': pts[23:25].mean(0), 'H': 700.0}, skin)
+assert cv2.imdecode(np.frombuffer(ref_jpg, np.uint8), cv2.IMREAD_COLOR) is not None and ref_info['k'] == 1 and 0 < ref_info['score'] < 2
+for i, sc in enumerate((.5, 1.5, .9, 1.2)):  # a fourth capture in the same turn bucket and camera: the weakest goes
+    app.save_reference((ref_jpg, ref_info | {'score': sc}), {'ts': now + i, 'theta': 12.0, 'cam': 0})
+kept = sorted(json.loads(p.read_text())['ref']['score'] for p in app.reference_dir().glob('*_10_*_cam1.json'))
+assert kept == [.9, 1.2, 1.5], kept
 bent_over = world.copy()
 bent_over[[11, 12], 2] = -.45  # shoulders forward over the hips
 assert M.bent(bent_over)
@@ -217,7 +223,7 @@ assert len(sil['c']) == 160 and abs(np.array(sil['c']).min(0) - np.array(big['c'
 print('sync ok')
 
 # Body-shape fit helpers (fit.py; the fit itself needs the optional PyTorch group).
-import json  # noqa: E402
+
 import fit as FIT  # noqa: E402
 a = np.linspace(-math.pi, 0, 30)
 cut = np.r_[np.c_[.2 * np.cos(a), .4 * np.sin(a)], np.c_[np.linspace(.2, .15, 6), np.linspace(0, .3, 6)],  # round top, slanted sides
