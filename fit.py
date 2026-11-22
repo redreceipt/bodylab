@@ -389,7 +389,7 @@ def assets():
     return F[~arm[F].any(1)], int(navel), F, arr('weights').reshape(-1, 6) / 255
 
 
-def tape(rest, neck=None, limbs=None):
+def tape(rest, neck=None, limbs=None, female=False):
     """Tape-style circumferences (cm) of the rest-pose body: the convex hull of horizontal slices of the body
     without its arms, like a tape bridging hollows. Neck: narrowest below the jaw; chest: widest; waist: at the
     navel; hips: widest round the seat. neck: (base, top) of the neck's bones; the neck is taped across its own
@@ -431,7 +431,12 @@ def tape(rest, neck=None, limbs=None):
         ax = (p1 - p0) / np.linalg.norm(p1 - p0)
         ts = [.5] if k.startswith('arm') else [.4] if k.startswith('thigh') else np.linspace(.2, .45, 6)
         out[k] = round(max(ring(0, p0 + (p1 - p0) * t, ax, tri) for t in ts), 1)
-    return out | {'neck': round(neck_c, 1), 'chest': round(max(at(.68, .76)), 1), 'waist': round(ring(V[navel, 2]), 1),
+    chest = at(.68, .76)
+    if female:  # underbust: just below where the breasts start, the steepest rise in girth under the fullest ring (cup size)
+        f = .68 + .005 * int(np.argmax(chest))
+        below = at(f - .06, f)
+        out['underbust'] = round(below[int(np.argmax(np.diff(below)))], 1)
+    return out | {'neck': round(neck_c, 1), 'chest': round(max(chest), 1), 'waist': round(ring(V[navel, 2]), 1),
             'hips': round(max(at(.46, .56)), 1), 'navel_h': round(float((V[navel, 2] - z0) / H), 3), 'height': round(float(H), 1)}
 
 
@@ -453,6 +458,21 @@ def restance(db, day, frames, prof):
                  local_changes_kwargs=lc)['rest_vertices'][0].detach().numpy()
     store(db, day, res, rest, G)
     return f'{day}: stance updated'
+
+
+def bake_all(db, prof):
+    """Bake your skin from every reference capture (any day), when there are new ones: the body is fitted to those
+    frames alone, which poses and projects it for each."""
+    refs = [p for p in (Path(db).parent / 'reference').glob('*.json') if p.with_suffix('.jpg').exists()]
+    done = Path(db).parent / 'skin.json'
+    if not refs or (done.exists() and done.stat().st_mtime > max(p.stat().st_mtime for p in refs)):
+        return
+    recs = [(p, json.loads(p.read_text())) for p in refs]
+    recs = [(p, r) for p, r in recs if r.get('ref') and r.get('sil')]
+    if len(recs) < MIN_FRAMES:
+        return
+    _, _, _, views = fit([r for _, r in recs], prof, want=range(len(recs)), log=lambda *a: None)
+    bake_skin(db, prof, {recs[j][1]['ts']: (recs[j][0], v) for j, v in views.items()})
 
 
 def bake_skin(db, prof, views):
@@ -479,6 +499,7 @@ def bake_skin(db, prof, views):
     print(f'skin baked from {len(vs)} captures, {seen * 100:.0f} % of the body seen')
     if seen >= .5:  # patchier than that looks worse than the template
         cv2.imwrite(str(Path(db).parent / 'skin.jpg'), tex, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    (Path(db).parent / 'skin.json').write_text(json.dumps({'captures': len(vs), 'seen': round(float(seen), 3), 'ts': time.time()}))
 
 
 def store(db, day, res, rest, G, model_skin=None):
@@ -531,16 +552,13 @@ if __name__ == '__main__':
         raise SystemExit(restance(a.db, day, frames, prof))
     if len(frames) < MIN_FRAMES:
         raise SystemExit(f'need {MIN_FRAMES} frames')
-    refs = {json.loads(p.read_text())['ts']: p for p in (Path(a.db).parent / 'reference').glob(f'{day}_*.json')}
-    want = [j for j, f in enumerate(frames) if f['ts'] in refs]
-    res, rest, G, views = fit(frames, prof, plot=a.plot, want=want)
-    res |= {'tape': tape(rest, res['neck_axis'], res['limb_axes']), 'frames': len(frames)}
+    res, rest, G, _ = fit(frames, prof, plot=a.plot)
+    res |= {'tape': tape(rest, res['neck_axis'], res['limb_axes'], prof.get('sex') == 'female'), 'frames': len(frames)}
     if a.save:
         np.save(a.save, rest)
     if a.store:
         import anny
         m = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default')
         store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()))
-        if views:
-            bake_skin(a.db, prof, {frames[j]['ts']: (refs[frames[j]['ts']], v) for j, v in views.items()})
+        bake_all(a.db, prof)
     print(json.dumps(res, indent=1))

@@ -209,9 +209,10 @@ skin, cat, box = app.bare_skin(Seg(), frame, img / 255.0, pts)
 assert skin['thighs'] == 0 and skin['shins'] in (0, None) and 0 < skin['torso'] < 1 and cat.shape == (box[1] - box[0], box[3] - box[2]), (skin, cat.shape, box)
 ref_jpg, ref_info = app.reference_crop(frame, img / 255.0, {'origin': pts[23:25].mean(0), 'H': 700.0}, skin)
 assert cv2.imdecode(np.frombuffer(ref_jpg, np.uint8), cv2.IMREAD_COLOR) is not None and ref_info['k'] == 1 and 0 < ref_info['score'] < 2
-for i, sc in enumerate((.5, 1.5, .9, 1.2)):  # a fourth capture in the same turn bucket and camera: the weakest goes
-    app.save_reference((ref_jpg, ref_info | {'score': sc}), {'ts': now + i, 'theta': 12.0, 'cam': 0})
-kept = sorted(json.loads(p.read_text())['ref']['score'] for p in app.reference_dir().glob('*_10_*_cam1.json'))
+app.REF_CAP = 3 * (len(ref_jpg) + 400)  # room for about three
+for i, (sc, th) in enumerate(((.5, 12.), (1.5, 14.), (.9, 16.), (1.2, 50.))):  # over the cap: the weakest of the fullest turn goes
+    app.save_reference((ref_jpg, ref_info | {'score': sc}), {'ts': now + i, 'theta': th, 'cam': 0})
+kept = sorted(json.loads(p.read_text())['ref']['score'] for p in app.reference_dir().glob('*.json'))
 assert kept == [.9, 1.2, 1.5], kept
 bent_over = world.copy()
 bent_over[[11, 12], 2] = -.45  # shoulders forward over the hips
@@ -240,4 +241,8 @@ limbs = {f'{k}_{s}': (J[f'{a}_{s}'], J[f'{b}_{s}']) for s in 'lr' for k, a, b in
 tp = FIT.tape(np.stack([tm[:, 0], -tm[:, 2], tm[:, 1]], 1) / 100, limbs=limbs)  # template in Anny's frame: tape like a person
 assert 22 < tp['arm_l'] < 34 and 42 < tp['thigh_l'] < 60 and 30 < tp['calf_l'] < 42 and abs(tp['arm_l'] - tp['arm_r']) < 1, tp
 assert 34 < tp['neck'] < 42 and 85 < tp['chest'] < 100 and 70 < tp['waist'] < 85 and 85 < tp['hips'] < 100 and .58 < tp['navel_h'] < .65, tp
-print('fit helpers ok', tp)
+t, off, n = meta['arrays']['female']
+tf = np.frombuffer((FIT.ROOT / 'static/assets/body.bin').read_bytes(), np.float32, n, off).reshape(-1, 3)
+tpf = FIT.tape(np.stack([tf[:, 0], -tf[:, 2], tf[:, 1]], 1) / 100, female=True)
+assert 65 < tpf['underbust'] < tpf['chest'] - 5, tpf  # under the bust, clearly smaller than round it
+print('fit helpers ok', tp, '| female', {k: tpf[k] for k in ('chest', 'underbust')})

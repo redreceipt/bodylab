@@ -236,6 +236,7 @@ def app_state():
     return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': sync},
             'face': face, 'hidden_scans': hidden, 'reference_images': len(list(reference_dir().glob('*.jpg'))),
             'skin_baked': (DB_PATH.parent / 'skin.jpg').stat().st_mtime if (DB_PATH.parent / 'skin.jpg').exists() else None,
+            'skin': json.loads((DB_PATH.parent / 'skin.json').read_text()) if (DB_PATH.parent / 'skin.json').exists() else None,
             'insights': measure.insights(scans, logs, goals)}
 
 
@@ -536,7 +537,7 @@ def refit_loop():
                 return
 
 
-REF_PER_BUCKET, REF_MAX = 3, 80  # best reference images per 10° of turn per camera, and in all
+REF_CAP = int(os.environ.get('BODYLAB_REFERENCE_MB', 1000)) * 2 ** 20  # disk for reference images; the weakest go first
 
 
 def reference_dir():
@@ -596,20 +597,28 @@ def reference_crop(f, mask, r, skin):
 
 
 def save_reference(ref, rec):
-    """Keep the best reference images: 3 per 10° of turn per camera (REF_MAX in all), each with its frame's record.
-    Local only (data/, gitignored)."""
+    """Keep reference images, each with its frame's record, up to REF_CAP on disk: beyond it the lowest-scoring capture
+    of the most-represented turn and camera goes, so every angle stays covered. Local only (data/, gitignored)."""
     if not ref:
         return
     jpg, info = ref
     d = reference_dir()
     d.mkdir(exist_ok=True)
-    bucket = f"{int(abs(rec['theta']) // 10) * 10:02d}_cam{rec.get('cam', 0) + 1}"
     name = f"{date.fromtimestamp(rec['ts'])}_{int(abs(rec['theta']) // 10) * 10:02d}_{int(rec['ts'])}_cam{rec.get('cam', 0) + 1}"
     (d / f'{name}.jpg').write_bytes(jpg)
     (d / f'{name}.json').write_text(json.dumps(rec | {'ref': info}))
-    score = lambda p: json.loads(p.with_suffix('.json').read_text()).get('ref', {}).get('score', 0)  # noqa: E731
-    mine = [p for p in d.glob('*.jpg') if p.stem.split('_', 1)[1].startswith(bucket[:2]) and p.stem.endswith(bucket[-4:])]
-    for old in sorted(mine, key=score)[:-REF_PER_BUCKET] + sorted(d.glob('*.jpg'), key=score)[:-REF_MAX]:
+    files = list(d.glob('*.jpg'))
+    total = sum(p.stat().st_size + p.with_suffix('.json').stat().st_size for p in files if p.with_suffix('.json').exists())
+    if total <= REF_CAP:
+        return
+    buckets = {}
+    for p in files:  # bucket: turn and camera, from the name (day_turn_ts_camN)
+        buckets.setdefault(p.stem.split('_')[1] + p.stem[-4:], []).append(p)
+    score = lambda p: json.loads(p.with_suffix('.json').read_text()).get('ref', {}).get('score', 0) if p.with_suffix('.json').exists() else 0  # noqa: E731
+    while total > REF_CAP:
+        old = min(max(buckets.values(), key=len), key=score)
+        buckets = {k: [p for p in v if p != old] for k, v in buckets.items()}
+        total -= old.stat().st_size + (old.with_suffix('.json').stat().st_size if old.with_suffix('.json').exists() else 0)
         old.unlink(missing_ok=True)
         old.with_suffix('.json').unlink(missing_ok=True)
 

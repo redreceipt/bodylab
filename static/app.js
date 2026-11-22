@@ -632,8 +632,9 @@ function settingsPanel() {
     ${first ? '' : `<details><summary>iPhone and Apple Health</summary>${pairBlock()}</details>`}`}
     ${inApp ? '' : `<details><summary>Developer</summary>
       <p class="muted">For tuning BodyLab's measuring. Nothing here changes your numbers.</p>
-      <label class="check"><input type="checkbox" id="refImages" ${p.reference ? 'checked' : ''}> Save reference images: a few cropped frames of you
-        per angle per day (at most ${80}), on this Mac only. ${S.reference_images ? `${S.reference_images} saved.` : ''}</label>
+      <label class="check"><input type="checkbox" id="refImages" ${p.reference ? 'checked' : ''}> Save reference images: the best frames of you
+        from every angle (cropped to you), up to 1 GB on this Mac. ${S.reference_images ? `${S.reference_images} saved.` : ''}</label>
+      ${S.skin ? `<p class="muted">Skin baked from ${S.skin.captures} captures, ${Math.round(S.skin.seen * 100)} % of the body seen${S.skin.seen < 0.5 ? ' (shown from 50 %)' : ''}.</p>` : ''}
       <form id="fRef" class="stack"><div class="grid2">${REFS.filter(([k]) => !(k === 'ref_underbust' && p.sex !== 'female') && !(k.startsWith('ref_penis') && p.sex === 'female'))
         .map(([k, label, u]) => `<label>${label} (${u === '%' ? '%' : uLabel(u)})<input name="${k}" type="number" step="any"></label>`).join('')}</div>
         <button>Save reference measurements</button></form></details>`}`;
