@@ -246,40 +246,37 @@ export function mesh(pos, src, tris) {
   return { position: P, normal: N };
 }
 
-// Clothes hang instead of being painted on. Shorts stand off the skin and flare toward the hem (less on the inner
-// thigh, so the legs don't collide); a top falls straight from the bust instead of tucking under it.
-export function drape(name, pos, g) {
-  const out = Float32Array.from(g), at = (k) => { const ids = T.arr(`joint.${k}`), c = [0, 0, 0];
-    for (const i of ids) for (let k2 = 0; k2 < 3; k2++) c[k2] += pos[i * 3 + k2] / ids.length; return c; };
-  if (name === 'shorts') {
-    const leg = T.arr('shorts.leg'), axes = { 1: [at('hip_l'), at('knee_l')], [-1]: [at('hip_r'), at('knee_r')] };
-    for (let i = 0; i < out.length / 3; i++) {
-      const p = [out[i * 3], out[i * 3 + 1], out[i * 3 + 2]], side = p[0] >= 0 ? 1 : -1, [A, B] = axes[side];
-      const ax = B.map((v, k) => v - A[k]), L2 = ax.reduce((s2, v) => s2 + v * v, 0);
-      const t = clamp(((p[0] - A[0]) * ax[0] + (p[1] - A[1]) * ax[1] + (p[2] - A[2]) * ax[2]) / L2, 0, 1);
-      const r = p.map((v, k) => v - (A[k] + ax[k] * t)), len = Math.hypot(...r) || 1;
-      const u = clamp(leg[i], 0, 1), inner = r[0] * side < 0 ? 0.35 : 1;  // toward the other leg: barely
-      const extra = (0.5 + 2.8 * u * u) * inner;  // cm: a little ease at the waist, ~3 cm of flare at the hem
-      for (let k = 0; k < 3; k++) out[i * 3 + k] += (r[k] / len) * extra;
-    }
-  } else if (name === 'bra') {
-    // Fabric bridges hollows instead of clinging: the cleavage and the fold under the bust are spanned while the band
-    // stays snug. Each front vertex rises to its neighbours' average but never sinks into the skin.
-    const src = T.arr('bra.src'), tris = T.arr('bra.tris'), nb = new Map(), link = (i, j) => (nb.get(i) ?? nb.set(i, new Set()).get(i)).add(j);
-    for (let t = 0; t < tris.length; t += 3) for (let a = 0; a < 3; a++) {
-      const i = src[tris[t + a]], j = src[tris[t + (a + 1) % 3]];
-      if (i !== j) { link(i, j); link(j, i); }
-    }
-    let hem = Infinity;
-    for (const i of nb.keys()) hem = Math.min(hem, g[i * 3 + 1]);
-    const free = [...nb.keys()].filter((i) => g[i * 3 + 2] > 0 && g[i * 3 + 1] > hem + 2);
-    for (let it = 0; it < 300; it++) for (const i of free) {
-      let z = 0;
-      for (const j of nb.get(i)) z += out[j * 3 + 2];
-      out[i * 3 + 2] = Math.max(g[i * 3 + 2], z / nb.get(i).size);
-    }
+// Underwear cut from the body's own surface (see tools/build_assets.py underwear()): each vertex sits on a body edge,
+// then stands 3 mm off the skin, and fabric tension bridges hollows (cleavage, between the buttocks) while the edges
+// stay snug. Returns positions for the garment's triangles `${name}.tris` and uv `${name}.uv`.
+const adjacency = {};
+export function underwear(name, pos) {
+  const ij = T.arr(`${name}.ij`), t = T.arr(`${name}.t`), tris = T.arr(`${name}.tris`), n = t.length, p = new Float32Array(n * 3);
+  for (let k = 0; k < n; k++) for (let c = 0; c < 3; c++) p[k * 3 + c] = pos[ij[k * 2] * 3 + c] * (1 - t[k]) + pos[ij[k * 2 + 1] * 3 + c] * t[k];
+  const nb = (adjacency[name] ??= (() => {
+    const a = Array.from({ length: n }, () => new Set());
+    for (let k = 0; k < tris.length; k += 3) for (let e = 0; e < 3; e++) { a[tris[k + e]].add(tris[k + (e + 1) % 3]); a[tris[k + (e + 1) % 3]].add(tris[k + e]); }
+    return a.map((s) => [...s]);
+  })());
+  const normals = new Float32Array(n * 3);
+  for (let k = 0; k < tris.length; k += 3) {
+    const [a, b, c] = [tris[k], tris[k + 1], tris[k + 2]], e1 = [0, 1, 2].map((d) => p[b * 3 + d] - p[a * 3 + d]), e2 = [0, 1, 2].map((d) => p[c * 3 + d] - p[a * 3 + d]);
+    const nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2], nz = e1[0] * e2[1] - e1[1] * e2[0];
+    for (const v of [a, b, c]) { normals[v * 3] += nx; normals[v * 3 + 1] += ny; normals[v * 3 + 2] += nz; }
   }
-  return out;
+  for (let k = 0; k < n; k++) {
+    const l = Math.hypot(normals[k * 3], normals[k * 3 + 1], normals[k * 3 + 2]) || 1;
+    for (let c = 0; c < 3; c++) { normals[k * 3 + c] /= l; p[k * 3 + c] += 0.3 * normals[k * 3 + c]; }
+  }
+  const edge = (k) => ij[k * 2] !== ij[k * 2 + 1];
+  for (let it = 0; it < 30; it++) for (let k = 0; k < n; k++) {
+    if (edge(k)) continue;
+    let d = 0;
+    for (const q of nb[k]) for (let c = 0; c < 3; c++) d += (p[q * 3 + c] - p[k * 3 + c]) * normals[k * 3 + c];
+    d /= nb[k].length;
+    if (d > 0) for (let c = 0; c < 3; c++) p[k * 3 + c] += d * normals[k * 3 + c];
+  }
+  return p;
 }
 
 // Smoothed genital mesh: each vertex is a fixed mix of helper vertices (Catmull-Clark weights from the build).

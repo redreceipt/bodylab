@@ -1,7 +1,7 @@
 // Self-check for static/body.js (template fitting). Run: node test_body.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fitBody, fitProxy, genitalPositions, initBody } from './static/body.js';
+import { fitBody, fitProxy, genitalPositions, initBody, underwear } from './static/body.js';
 
 const file = (f) => readFileSync(new URL(`./static/assets/${f}`, import.meta.url));
 const bin = file('body.bin');
@@ -68,3 +68,5 @@ const asIs = fitBody(today, t.H, 'male', {}, base, today).pos;
 assert(asIs.every((v, i) => Math.abs(v - base[i]) < 1e-3));
 const thinner = fitBody({ waist_w: 27, waist_d: 22 }, t.H, 'male', {}, base, today);
 near(width(thinner, t.waist.y, notArm), width({ pos: base, parts: same.parts }, t.waist.y, notArm) * 0.9, 0.03);
+// Underwear is built on any body: every vertex placed, standing off the skin.
+for (const g of ['trunks', 'briefs', 'bra']) { const u = underwear(g, same.pos); assert(u.length === A.arr(`${g}.t`).length * 3 && u.every(Number.isFinite), g); }

@@ -43,8 +43,6 @@ SHAPES = {'cup+': 'breast/female-young-averagemuscle-averageweight-maxcup-averag
           'length+': 'genitals/penis-length-incr', 'length-': 'genitals/penis-length-decr',
           'girth+': 'genitals/penis-circ-incr', 'girth-': 'genitals/penis-circ-decr',
           'testicles+': 'genitals/penis-testicles-incr', 'testicles-': 'genitals/penis-testicles-decr'}
-SUIT = 'clothes/female_sportsuit01/female_sportsuit01'  # crop top + leggings: the leggings, cut down to athletic shorts
-TEE = 'clothes/female_casualsuit02/female_casualsuit02'  # fitted tee + denim shorts: the tee, cut down to a sports bra
 EYE_COLORS = ['brown', 'brownlight', 'blue', 'deepblue', 'bluegreen', 'green', 'grey', 'lightblue', 'ice']
 
 
@@ -120,20 +118,6 @@ def parse_mhclo(text):
             refs.append([int(p[0])] * 3 + [1, 0, 0, 0, 0, 0] if len(p) == 1 else [int(x) for x in p[:3]] + [float(x) for x in p[3:]])
     r = np.array(refs, dtype=float)
     return r[:, :3].astype(int), r[:, 3:6], r[:, 6:9], [scale[k] for k in 'xyz']
-
-
-def delete_verts(text):
-    """Body vertices a garment hides ('a - b' ranges and single indices after `delete_verts`)."""
-    tokens, out = ' '.join(text.split('delete_verts', 1)[1].split('\n')).split(), set()
-    i = 0
-    while i < len(tokens):
-        if i + 2 < len(tokens) and tokens[i + 1] == '-':
-            out.update(range(int(tokens[i]), int(tokens[i + 2]) + 1))
-            i += 3
-        else:
-            out.add(int(tokens[i]))
-            i += 1
-    return out
 
 
 def rasterize(P, Z, tris, W, H):
@@ -223,23 +207,72 @@ def face_anchors(pos, src, uv, tris, eye_tris, eye_centers, skin, landmarker):
     return out
 
 
-def pieces(faces, by=0):
-    """Connected pieces, biggest first. by=0: faces sharing vertices; by=1: sharing UVs (a garment's sewn panels)."""
-    parent = {}
+def underwear(name, v, J, weights, tris):
+    """A garment cut from the body's own surface along a smooth edge, so it fits any body the template becomes.
+    A field F is negative where the garment is; triangles crossing F = 0 are clipped exactly there. Each garment
+    vertex is a point on a body edge (i, j, t); uv = (distance to the waistband / underband edge, distance to the
+    other edges) / 12 cm, for drawing bands and stitched hems. Also lists the body vertices it fully covers."""
+    sh = (J['shoulder_l'][1] + J['shoulder_r'][1]) / 2
+    ln = sh - (J['hip_l'][1] + J['hip_r'][1]) / 2
+    x, y, z = v.T
+    limb = lambda r: weights[:, REGIONS.index(r)]  # noqa: E731
+    mid = np.flatnonzero((np.abs(x) < 1) & (z > 0) & (np.abs(y - y.max() * .615) < 7))
+    navel = min(mid, key=lambda k: z[k] - np.mean([z[q] for q in mid if 1 < abs(y[q] - y[k]) < 3] or [z[k]]))
 
-    def root(i):
-        parent.setdefault(i, i)
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-    for f in faces:
-        for x in f[1:]:
-            parent[root(x[by])] = root(f[0][by])
-    out = {}
-    for f in faces:
-        out.setdefault(root(f[0][by]), []).append(f)
-    return sorted(out.values(), key=len, reverse=True)
+    def leg_hem(at):  # distance past `at` (fraction from hip to knee) down each thigh; well inside on the torso
+        f = np.full(len(v), -20.)
+        for side in 'lr':
+            hip, knee = np.array(J[f'hip_{side}']), np.array(J[f'knee_{side}'])
+            w = limb(f'leg_{side}')
+            t = ((v - hip) @ (knee - hip)) / ((knee - hip) @ (knee - hip))
+            f = np.where(w > .5, (t - at) * np.linalg.norm(knee - hip), f)
+        return f
+    outside_limbs = limb('arm_l') + limb('arm_r') + limb('head') > .5
+    if name in ('trunks', 'briefs'):
+        top = y - (y[navel] - (6 if name == 'trunks' else 10))
+        F = np.maximum(top, leg_hem(.33 if name == 'trunks' else .06))
+    else:  # sports bra: an underband, a scooped neckline in front, and straps over the shoulders
+        ub, pit = sh - .42 * ln, sh - .12 * ln
+        cz = z[(np.abs(y - (ub + pit) / 2) < 2) & (limb('torso') > .5)].mean()
+        front = np.clip((z - cz) / 6 + .5, 0, 1)
+        top = pit - 3 * (1 - front) - front * 7 * np.clip(1 - (x / 10) ** 2, 0, 1)
+        band = np.maximum(ub - y, y - top)
+        xs = .6 * abs(J['shoulder_l'][0])
+        strap = np.maximum(np.abs(np.abs(x) - xs) - 1.3, np.maximum(pit - 5 - y, y - sh - 14))
+        top = y - top  # for edge distances: the band's top edge counts as a hem
+        F = np.minimum(band, strap)
+    F = np.where(outside_limbs, np.maximum(F, 5), F)
+    keep = {}  # (i, j) -> garment vertex; (i, i) for body vertices
+    pts, out_tris = [], []
+
+    def vid(i, j):
+        key = (min(i, j), max(i, j))
+        if key not in keep:
+            t = 0 if i == j else F[key[0]] / (F[key[0]] - F[key[1]])
+            keep[key] = len(pts)
+            pts.append((key[0], key[1], t))
+        return keep[key]
+    for tri in tris:
+        poly = []
+        for k in range(3):  # Sutherland-Hodgman against F < 0
+            a, b = tri[k], tri[(k + 1) % 3]
+            if F[a] < 0:
+                poly.append(vid(a, a))
+            if (F[a] < 0) != (F[b] < 0):
+                poly.append(vid(a, b))
+        out_tris += [(poly[0], poly[k], poly[k + 1]) for k in range(1, len(poly) - 1)]
+    ij = np.array([(i, j) for i, j, _ in pts])
+    t = np.array([t for _, _, t in pts])
+    P = v[ij[:, 0]] * (1 - t[:, None]) + v[ij[:, 1]] * t[:, None]
+    edge = ij[:, 0] != ij[:, 1]
+    top_at = (top[ij[:, 0]] * (1 - t) + top[ij[:, 1]] * t)
+    first = edge & ((np.abs(top_at) < .6) if name != 'bra' else (np.abs(y[ij[:, 0]] * (1 - t) + y[ij[:, 1]] * t - (sh - .42 * ln)) < .6))
+    dist = lambda sel: np.min(np.linalg.norm(P[:, None] - P[sel][None], axis=2), 1) if sel.any() else np.full(len(P), 99.)  # noqa: E731
+    uv = np.stack([dist(first), dist(edge & ~first)], 1) / 12
+    hide = np.flatnonzero((F < -1.5) & ~outside_limbs)
+    print(f'{name}: {len(pts)} vertices, {len(out_tris)} triangles, hides {len(hide)} body vertices')
+    return {f'{name}.ij': ij.astype('<u2'), f'{name}.t': t.astype('<f4'), f'{name}.tris': np.array(out_tris, '<u2'),
+            f'{name}.uv': uv.clip(0, 1).astype('<f4'), f'{name}.hide': hide.astype('<u2')}
 
 
 def subdivide(faces, levels=2):
@@ -377,58 +410,10 @@ def main():
     meta['genital'] = {'base': size(vm)} | {k: size(vm + 10 * target(f'targets/{SHAPES[k]}.target')) for k in ('length+', 'length-', 'girth+', 'girth-')}
     print('genital template size (length, girth cm):', meta['genital'])
 
-    # Shorts and sports bra: the sportsuit's leggings cut at mid-thigh, and a fitted tee cut under the bust. Each also lists
-    # the body skin it covers, hidden while it's worn so skin can't poke through.
-    refs, w, d, scale = parse_mhclo(read(SUIT + '.mhclo').decode())
-    sv, suv, sfaces = parse_obj(read(SUIT + '.obj').decode())
-    vf, Jf = tmpl['female'], meta['joints']['female']
-    gp = (w[:, :, None] * vf[refs]).sum(1)  # garment vertices on the template (offsets don't matter for cutting)
-    bottom = min(pieces([f for g in sfaces.values() for f in g])[:2], key=lambda fs: gp[[v for f in fs for v, _ in f], 1].mean())
-    def along(a, b):  # position of each garment vertex along its own side's limb (0 at joint a, 1 at b)
-        A_, B_ = np.where(gp[:, :1] > 0, Jf[f'{a}_l'], Jf[f'{a}_r']), np.where(gp[:, :1] > 0, Jf[f'{b}_l'], Jf[f'{b}_r'])
-        return ((gp - A_) * (B_ - A_)).sum(1) / ((B_ - A_) ** 2).sum(1)
-    # Cut across each limb, not horizontally, so the hems follow the garment's own edge loops (clean, not ragged).
-    leg = along('hip', 'knee')
-
-    def gap(t, piece, lo, hi):  # the widest gap between edge loops in [lo, hi]: a cut there crosses no faces raggedly
-        vals = np.unique(np.round(t[[v for f in piece for v, _ in f]], 3))
-        vals = vals[(vals > lo) & (vals < hi)]
-        i = np.argmax(np.diff(vals))
-        return (vals[i] + vals[i + 1]) / 2
-    leg_cut = gap(leg, bottom, .35, .55)
-    garments = {'shorts': ([f for f in bottom if all(leg[v] < leg_cut for v, _ in f)], SUIT, (refs, w, d, scale), suv, gp)}
-    tee = parse_mhclo(read(TEE + '.mhclo').decode())
-    _, tuv, tfaces = parse_obj(read(TEE + '.obj').decode())
-    tgp = (tee[1][:, :, None] * vf[tee[0]]).sum(1)
-    panels = [f for p in pieces([f for g in tfaces.values() for f in g], by=1)[:2] for f in p]  # front + back; sleeves are their own panels
-    apex = tgp[[v for f in panels for v, _ in f]][:, 2].argmax()
-    apex_y = tgp[[v for f in panels for v, _ in f]][apex, 1]
-    bra_cut = gap(tgp[:, 1], panels, apex_y - 13, apex_y - 8)  # 8-13 cm under the bust: the band
-    garments['bra'] = ([f for f in panels if all(tgp[v, 1] > bra_cut for v, _ in f)], TEE, tee, tuv, tgp)
-    body_arm = weights[:, 2:4].sum(1)
-    for name, (fs, src_path, (refs, w, d, scale), suv, gp) in garments.items():
-        hidden = delete_verts(read(src_path + '.mhclo').decode())
-        psrc, ppuv, ptris = split_uv(fs, suv)
-        ys = gp[[v for f in fs for v, _ in f], 1]
-        m = min(1.5, (ys.max() - ys.min()) / 5)
-        hide = [i for i in hidden if ys.min() + m < vf[i, 1] < ys.max() - m and body_arm[i] < .5]  # inside the edges: no gaps
-        print(f'{name}: {len(fs)} faces, y {ys.min():.2f}..{ys.max():.2f}, hides {len(hide)} body vertices')
-        arrays |= {f'{name}.refs': refs.astype('<u2'), f'{name}.w': w.astype('<f4'), f'{name}.d': d.astype('<f4'),
-                   f'{name}.src': psrc.astype('<u2'), f'{name}.uv': ppuv.astype('<f4'), f'{name}.tris': ptris.astype('<u2'),
-                   f'{name}.hide': np.array(sorted(hide), '<u2')}
-        meta['proxies'][name] = {'kind': 'garment', 'scale': scale}
-    # For draping: each shorts vertex's place down the leg (0 = hip joint, 1 = hem), and the joints' vertices.
-    arrays['shorts.leg'] = (leg / leg_cut).astype('<f4')
-    for k in ('hip_l', 'hip_r', 'knee_l', 'knee_r'):
-        arrays[f'joint.{k}'] = np.array(sorted({i for f in faces[JOINTS[k]] for i, _ in f}), '<u2')
-    for name, path in (('shorts', SUIT), ('bra', TEE)):
-        diffuse = image(f'{path}_diffuse.png', cv2.IMREAD_COLOR)
-        if path == TEE:  # paint out the MakeHuman logo printed on the chest (keyed on anything that isn't shirt blue)
-            box = diffuse[330:620, 1470:1780]
-            off = (np.abs(box.astype(int) - np.median(box.reshape(-1, 3), 0)).sum(2) > 60).astype(np.uint8)
-            box[:] = cv2.inpaint(box, cv2.dilate(off, np.ones((7, 7), np.uint8)), 9, cv2.INPAINT_TELEA)
-        for tex, img in (('', diffuse), ('_normal', image(f'{path}_normal.png', cv2.IMREAD_COLOR))):
-            cv2.imwrite(str(OUT / f'{name}{tex}.jpg'), cv2.resize(img, (1024, 1024), interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 88])
+    # Underwear made from the body itself: a region of its surface, cut along smooth edges (see underwear()).
+    body_tris = src[tris].reshape(-1, 3)
+    for name, sex in (('trunks', 'male'), ('briefs', 'female'), ('bra', 'female')):
+        arrays |= underwear(name, tmpl[sex], meta['joints'][sex], weights, body_tris)
 
     proxies = {f'hair/{h}/{h}': 'hair' for h in HAIRS} | {'eyebrows/eyebrow001/eyebrow001': 'eyebrows',
                                                           'eyelashes/eyelashes01/eyelashes01': 'eyelashes', 'eyes/high-poly/high-poly': 'eyes'}

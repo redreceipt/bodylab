@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
-import { drape, fitBody, fitProxy, genitalPositions, initBody, mesh, pose } from './body.js';
+import { fitBody, fitProxy, genitalPositions, initBody, mesh, pose, underwear } from './body.js';
 import { loadImage, photoColors, skinCanvas } from './look.js';
 import { renderSVG } from './vendor/uqr.mjs';
 
@@ -145,6 +145,17 @@ function glowMaterial(opacity) {
     polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4 });
 }
 const strands = (map, color) => new THREE.MeshStandardMaterial({ map, color, alphaTest: 0.4, alphaToCoverage: true, side: THREE.DoubleSide, roughness: 0.7 });
+// Knit underwear: uv = (distance to the waistband / underband edge, distance to the other edges) / 12 cm. Draws the
+// elastic band with its stitch line, and a folded, stitched hem along the other edges.
+function fabric() {
+  const c = document.createElement('canvas'), x = c.getContext('2d'), px = 256 / 12; // px per cm
+  c.width = c.height = 256;
+  x.fillStyle = '#30343b'; x.fillRect(0, 0, 256, 256);
+  x.fillStyle = '#25292f'; x.fillRect(0, 0, 256, 0.9 * px); // hem fold
+  x.fillStyle = '#16191d'; x.fillRect(0, 0, 3.2 * px, 256); // elastic band
+  x.fillStyle = '#7d838c'; x.fillRect(0, 1.0 * px, 256, 2); x.fillRect(3.4 * px, 0, 2, 256); // stitches
+  return Object.assign(new THREE.CanvasTexture(c), { colorSpace: THREE.SRGBColorSpace, flipY: false, anisotropy: 8 });
+}
 const mats = {
   skin: new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.6, sheen: 0.3, sheenRoughness: 0.7, sheenColor: '#ffcfb8' }),
   // Additive glow over the selected / hovered part, so the skin itself stays untouched.
@@ -152,9 +163,8 @@ const mats = {
   hair: strands(null, '#3b2a20'), brows: strands(texture('/static/assets/eyebrow001.webp'), '#3b2a20'),
   lashes: strands(texture('/static/assets/eyelashes01.webp'), '#ffffff'),
   eyes: new THREE.MeshPhysicalMaterial({ roughness: 0.05, clearcoat: 1 }),
-  ...Object.fromEntries(['shorts', 'bra'].map((g) => [g, new THREE.MeshStandardMaterial({ map: texture(`/static/assets/${g}.jpg`),
-    normalMap: new THREE.TextureLoader().load(`/static/assets/${g}_normal.jpg`), roughness: 0.85, side: THREE.DoubleSide,
-    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })])),
+  ...Object.fromEntries(['trunks', 'briefs', 'bra'].map((g) => [g, new THREE.MeshPhysicalMaterial({ map: fabric(), roughness: 0.85,
+    sheen: 0.5, sheenRoughness: 0.8, sheenColor: '#9aa3b5', side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })])),
   genitals: new THREE.MeshPhysicalMaterial({ roughness: 0.6, sheen: 0.3, sheenRoughness: 0.7, sheenColor: '#ffcfb8' }),
   ghost: new THREE.MeshBasicMaterial({ color: '#3ef0ff', transparent: true, opacity: 0.22, depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 8 }),
@@ -232,7 +242,7 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
   // Ghost = first scan as a translucent shell that loses depth ties, so it only shows where the body has shrunk.
   // Shrinking it 6 mm per side hides noise-level differences (and z-fighting).
   const d = isGhost ? Object.fromEntries(Object.entries(dims || {}).map(([k, v]) => [k, /_[wd]$/.test(k) ? v - 1.2 : v])) : dims;
-  const garments = look.clothes && !isGhost ? (sex === 'female' ? ['shorts', 'bra'] : ['shorts']) : [];
+  const garments = look.clothes && !isGhost ? (sex === 'female' ? ['briefs', 'bra'] : ['trunks']) : [];
   const fit = fitBody(d, S.profile?.height_cm ?? 175, sex, shape(m), mesh?.rest, ref);
   if (mesh?.G && skin) fit.pos = pose(fit.pos, mesh.G, skin); // relaxed stance instead of the rest pose's spread arms
   const body = geometry(fit.pos, A.src, A.uv, bodyTris(garments));
@@ -253,8 +263,12 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
     group.add(skin, group.userData.glow.selected, group.userData.glow.hovered, new THREE.Mesh(proxy('high-poly', fit.pos), mats.eyes), new THREE.Mesh(proxy('eyelashes01', fit.pos), mats.lashes));
     if (look.brows) group.add(new THREE.Mesh(proxy('eyebrow001', fit.pos), mats.brows));
     for (const g of garments) {
-      const mesh = geometry(drape(g, fit.pos, fitProxy(g, fit.pos)), A.arr(`${g}.src`), A.arr(`${g}.uv`), A.arr(`${g}.tris`));
-      group.add(Object.assign(new THREE.Mesh(mesh, mats[g]), { castShadow: true }));
+      const cloth = new THREE.BufferGeometry();
+      cloth.setAttribute('position', new THREE.BufferAttribute(underwear(g, fit.pos), 3));
+      cloth.setAttribute('uv', new THREE.BufferAttribute(A.arr(`${g}.uv`), 2));
+      cloth.setIndex(new THREE.BufferAttribute(A.arr(`${g}.tris`), 1));
+      cloth.computeVertexNormals();
+      group.add(Object.assign(new THREE.Mesh(cloth, mats[g]), { castShadow: true }));
     }
     if (!look.clothes && sex !== 'female') {
       const g = new THREE.BufferGeometry();
