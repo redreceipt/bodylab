@@ -235,15 +235,19 @@ def app_state():
     if prof and prof.get('height_cm'):
         w, rows = weights(logs), []
         fits = {r['day']: json.loads(r['params'])['tape'] for r in c.execute('select day, params from fits')}
+        manual = {}  # your tape (oldest first, so the day's latest wins): the truth for the day it was taken
+        for l in logs:
+            if l['kind'] == 'reference':
+                manual.setdefault(date.fromtimestamp(l['ts']).isoformat(), {}).update({p: l[k] for k, p in measure.REF_PART.items() if k in l})
         for r in c.execute('select * from scans order by ts'):
-            raw = json.loads(r['raw']) | ({'tape': fits[r['day']]} if r['day'] in fits else {})
+            raw = json.loads(r['raw']) | {'tape': fits.get(r['day'], {}) | manual.get(r['day'], {}), 'manual': sorted(manual.get(r['day'], {}))}
             if measure.implausible(raw):  # misread poses saved before the plausibility check; kept, not shown
                 hidden += 1
             else:
                 rows.append((r, raw))
         for r, raw in rows:
             m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']))
-            scans.append({'id': r['id'], 'ts': r['ts'], 'day': r['day'], 'fit': 'tape' in raw, 'side': raw.get('n_angle', 0) >= 30,
+            scans.append({'id': r['id'], 'ts': r['ts'], 'day': r['day'], 'fit': r['day'] in fits, 'manual': raw['manual'], 'side': raw.get('n_angle', 0) >= 30,
                           'frames': raw.get('n_frames'), 'm': m, 'dims': dims})
     face = face_files()[1]
     face = json.loads(face.read_text()) if face.exists() else None

@@ -32,7 +32,22 @@ const HEALTH = {
   resp: ['Respiratory rate', '/min', 1], sleep: ['Sleep', 'h', 1], sleep_deep: ['Deep sleep', 'h', 1], sleep_rem: ['REM sleep', 'h', 1],
   balance: ['Energy balance', 'kcal', 0],
 };
-Object.assign(HEALTH, { underbust: ['Underbust', 'cm', 1] });
+Object.assign(HEALTH, { underbust: ['Underbust', 'cm', 1], penis_len: ['Penis length', 'cm', 1], penis_girth: ['Penis girth', 'cm', 1] });
+// Your tape, by part: the log key and how to measure. It's the truth for the day you take it and shapes your body for a month.
+const TAPE = {
+  neck: ['ref_neck', "Just below the Adam's apple, tape tilted slightly down at the front"],
+  chest: ['ref_chest', 'Fullest part: across the nipples, under the armpits, arms down'],
+  underbust: ['ref_underbust', 'Directly under the breasts, level all round'],
+  waist: ['ref_waist', "Level round the belly button; don't suck in"],
+  hips: ['ref_hips', 'Widest part of the buttocks, feet together'],
+  arm_l: ['ref_arm', 'Arm hanging relaxed, halfway between the shoulder tip and the elbow'],
+  arm_r: ['ref_arm_r', 'Arm hanging relaxed, halfway between the shoulder tip and the elbow'],
+  thigh_l: ['ref_thigh', 'Halfway between the groin crease and the top of the kneecap'],
+  thigh_r: ['ref_thigh_r', 'Halfway between the groin crease and the top of the kneecap'],
+  calf_l: ['ref_calf', 'At its widest, weight on both feet'], calf_r: ['ref_calf_r', 'At its widest, weight on both feet'],
+  penis_len: ['ref_penis_len', 'Resting, standing: from the base at the pubic bone along the top to the tip, not stretched'],
+  penis_girth: ['ref_penis_girth', 'Resting: round the middle of the shaft'],
+};
 for (const [k, [label, unit, dec]] of Object.entries(HEALTH)) META[k] ??= { label, unit, dec };
 // US cup letter from bust minus underbust (one letter per inch).
 const cupLetter = (cm) => ['AA', 'A', 'B', 'C', 'D', 'DD', 'DDD/F', 'G', 'H'][Math.max(0, Math.min(8, Math.round(cm / 2.54)))];
@@ -226,7 +241,7 @@ async function updateLook() {
   const hair = p.hair ?? face?.hair?.style ?? (sex === 'female' ? 'long01' : 'short02'), hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
   const { canvas: skinTex, tone } = await skinCanvas(sex, { face, photo, tone: p.skin ?? (S.skin?.tone && '#' + S.skin.tone.map((v) => v.toString(16).padStart(2, '0')).join('')), hairColor: HAIRS[hair] ? hairColor : null,
     baseUrl: S.skin_baked ? `/api/skin.jpg?${S.skin_baked}` : null });
-  mats.genitals.color.set(`rgb(${tone.map(Math.round).join(',')})`).multiplyScalar(0.93); // a touch darker than the face's tone
+  mats.genitals.color.set(`rgb(${tone.map(Math.round).join(',')})`).multiplyScalar(0.8); // genital skin is darker than the body's
   const skin = new THREE.CanvasTexture(skinTex);
   Object.assign(skin, { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 });
   mats.skin.map?.dispose();
@@ -249,7 +264,7 @@ function partColor(p) { // multiplies the skin texture: white = true skin colour
 // Breast shape from the camera's bust and underbust.
 const latest = (k) => S.logs.findLast((l) => l[k] != null)?.[k];
 function shape(m) {
-  return { cup: m.chest && m.underbust ? m.chest - m.underbust : null };
+  return { cup: m.chest && m.underbust ? m.chest - m.underbust : null, length: m.penis_len, girth: m.penis_girth };
 }
 // Body triangles under the worn garments are dropped so skin can't poke through.
 const dressed = {};
@@ -318,7 +333,7 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
       g.setAttribute('position', new THREE.BufferAttribute(genitalPositions(fit.pos), 3));
       g.setIndex(new THREE.BufferAttribute(A.arr('genital.tris'), 1));
       g.computeVertexNormals();
-      group.add(new THREE.Mesh(g, mats.genitals));
+      group.add(Object.assign(new THREE.Mesh(g, mats.genitals), { userData: { part: 'penis_len' } })); // tap: length and girth
     }
     if (HAIRS[look.hair]) {
       const geom = proxy(look.hair, fit.pos);
@@ -556,18 +571,27 @@ async function showGoal() {
   rebuildAvatar();
   renderPanel();
 }
+function tapeForm(k) {
+  const [key, how] = TAPE[k] ?? [];
+  if (!key) return '';
+  const yours = S.scans[idx]?.manual?.includes(k);
+  return `<form class="inline" data-tape="${key}"><input name="v" type="number" step="any" inputmode="decimal" required
+      placeholder="Your tape (${uLabel('cm')})" aria-label="${META[k].label}: your tape measurement"><button>Save</button></form>
+    <p class="muted">${yours ? 'This day shows your tape. ' : ''}${how}.</p>`;
+}
 function partPanel(k) {
   const p = S.insights.parts[k] || {};
   const breasts = k === 'chest' && S.profile?.sex === 'female' ? (() => {
     const m = cur();
     return `${metricBlock('underbust', false)}<p>${m.chest && m.underbust ? `Cup size about <b>${cupLetter(m.chest - m.underbust)}</b>.` : 'Cup size appears once the camera has your bust and underbust.'}</p>`;
   })() : '';
-  return `${metricBlock(k, false)}${breasts}
+  if (k === 'penis_len') return metricBlock('penis_len', false) + tapeForm('penis_len') + metricBlock('penis_girth', false) + tapeForm('penis_girth');
+  return `${metricBlock(k, false)}${tapeForm(k)}${breasts}${breasts && tapeForm('underbust')}
     ${p.workouts || p.change != null ? `<p>${p.workouts ? `${p.workouts} workouts trained this in the last 4 weeks.` : ''}</p>` : ''}
     <details><summary>Goal</summary>${goalBlock(k)}</details>`;
 }
 function logItem(l) {
-  const txt = l.kind === 'reference' ? '🔬 Reference measurements (see the console)'
+  const txt = l.kind === 'reference' ? '📏 ' + Object.entries(TAPE).filter(([, [key]]) => l[key] != null).map(([k, [key]]) => `${META[k].label.toLowerCase()} ${fmt(k, l[key])}`).join(' · ')
     : l.kind === 'workout'
     ? `🏋️ ${l.type} · ${l.minutes} min${l.focus?.length ? ' · ' + l.focus.join(', ') : ''}${l.notes ? ' · ' + l.notes : ''}`
     : '📋 ' + [l.weight && fmt('weight', l.weight), l.kcal && `${Math.round(l.kcal)} kcal`, l.protein && `${Math.round(l.protein)} g protein`,
@@ -686,6 +710,8 @@ $('#panel').addEventListener('submit', async (e) => {
       await api('POST', '/api/goals', { metric: 'weight', target: fromUnit(+o.weight, 'kg') });
       if (o.bf !== '') await api('POST', '/api/goals', { metric: 'bf', target: +o.bf });
       else if (S.goals.bf) await api('DELETE', '/api/goals/bf'); // empty: the recommended body fat
+    } else if (f.dataset.tape) {
+      await api('POST', '/api/logs', { kind: 'reference', [f.dataset.tape]: fromUnit(+o.v, 'cm') });
     } else if (f.id === 'fGoal' || f.dataset.goal) {
       const k = f.dataset.goal || o.metric;
       await api('POST', '/api/goals', { metric: k, target: fromUnit(+o.target, META[k].unit) });

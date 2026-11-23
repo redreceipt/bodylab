@@ -45,9 +45,13 @@ def load(db, day=None):
     w = c.execute("select json_extract(data, '$.weight'), abs(ts - ?) / 86400 from logs where kind = 'daily' "
                   "and json_extract(data, '$.weight') > 0 and abs(ts - ?) < 180 * 86400 order by abs(ts - ?) limit 1", (noon,) * 3).fetchone()
     prof |= {'weight': w[0], 'weight_age': w[1]} if w else {}
+    import measure
+    tape_t = {}  # your tape: the latest of each part in the month to this day, with its age (days)
+    for data, ts in c.execute("select data, ts from logs where kind = 'reference' and ts between ? and ? order by ts", (noon - 30 * 86400, noon + 43200)):
+        tape_t |= {p: (v, max(0., (noon - ts) / 86400)) for k, v in json.loads(data).items() if (p := measure.REF_PART.get(k))}
+    prof['tape'] = tape_t
     last = c.execute('select params from fits where day <= ? order by day desc limit 1', (day,)).fetchone()
     if last and prof.get('weight'):  # body composition from the last fit: what the muscle/fat split should look like
-        import measure
         t = json.loads(last[0])['tape']
         bf = measure.navy_bf(prof.get('sex'), prof['height_cm'], t['neck'], t['waist'], t['hips'])
         prof |= {'bf': bf, 'ffmi': prof['weight'] * (1 - bf / 100) / (prof['height_cm'] / 100) ** 2}
@@ -201,6 +205,26 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     a, b = C, torch.roll(C, -1, 1)
 
     use = torch.ones(B, device=dev)  # frames the shape is fitted to
+    # Your tape: the body must measure what you measured (trusted less as it ages over a month), at the very slices tape()
+    # reports; which vertices bound each slice is re-picked every 50 iterations as the body changes.
+    targets = {k: (v, 1 - age / 30) for k, (v, age) in prof.get('tape', {}).items() if k in ('neck', 'chest', 'waist', 'hips', 'arm_l', 'arm_r',
+               'thigh_l', 'thigh_r', 'calf_l', 'calf_r') or (k == 'underbust' and female)}
+    rings = {}
+
+    def axes(out):
+        heads = out['rest_bone_heads'][0].detach().cpu().numpy()
+        bone = lambda b: heads[model.bone_labels.index(b)].tolist()  # noqa: E731
+        return (bone('neck01'), bone('head')), {f'{k}_{s.lower()}': (bone(f'{a}.{s}'), bone(f'{b}.{s}')) for s in 'LR' for k, a, b in
+                                                (('arm', 'upperarm01', 'lowerarm01'), ('thigh', 'upperleg01', 'lowerleg01'), ('calf', 'lowerleg01', 'foot'))}
+
+    def pick_rings(out):
+        V = out['rest_vertices'][0].detach().cpu().numpy() * 100
+        for k, (at, n, tri) in slices(V / 100, *axes(out), female)[0].items():
+            if k in targets:
+                ids = hull(V, at, n, tri)
+                p = V[ids] - np.outer(V[ids] @ n, n)
+                scale = ring(V, at, n, tri) / max(np.linalg.norm(p - np.roll(p, 1, 0), axis=1).sum(), 1e-6)  # vertices to tape()'s slice
+                rings[k] = (torch.tensor(ids, device=dev), torch.tensor(n, dtype=torch.float32, device=dev), scale)
     kp_shape = torch.tensor([0 if k in KP_FREE else KP_SHAPE for k in KP], device=dev)
     # shortcut: linear maps from body fat % and fat-free mass index to Anny's fat and muscle axes, eyeballed on its
     # renders (lean ~10 % men show definition near muscle .65 / fat .3); refine against reference captures.
@@ -228,9 +252,18 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
             + .004 * ((torch.sigmoid(phen['muscle']) - muscle_t) ** 2 + (torch.sigmoid(phen['weight']) - fat_t) ** 2)
         total = l_kp + .3 * l_3d + 10 * l_h + l_reg
         if prof.get('weight') and stage:  # outlines leave volume loose (±10 %); a weigh-in pins it, trusted less with age
-            trust = min(1, max(0, 1 - (prof.get('weight_age', 0) - 4) / 180))
+            trust = min(1, max(0, 1 - (prof.get('weight_age', 0) - 4) / 180)) * (.2 if len(targets) >= 3 else 1)  # your tape sets it
             total = total + .3 * trust * ((mass - prof['weight']) / prof['weight']) ** 2
         parts = {'kp': l_kp.item() ** .5 * 100, '3d': l_3d.item() ** .5 * 100, 'kg': mass.item()}
+        if stage and rings:
+            l_tape = 0
+            for k, (ids, n, scale) in rings.items():
+                p = rest[ids] * 100
+                p = p - (p @ n)[:, None] * n
+                g = (p - torch.roll(p, 1, 0)).norm(dim=1).sum() * scale
+                l_tape = l_tape + targets[k][1] * ((g - targets[k][0]) / targets[k][0]) ** 2
+            total = total + 50 * l_tape
+            parts['tape'] = (l_tape.item() / len(rings)) ** .5 * 100  # rms % off your tape
         if stage:
             # Mesh outside the outline (where the camera sees) is too big; outline nowhere near the mesh is too small.
             d2 = seg_dist2(v2, a, b).min(-1).values
@@ -259,6 +292,9 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
         params = [rot, turn, cam] + ([local] + list(phen.values()) if stage else [])
         opt = torch.optim.Adam(params, lr=.02 if stage else .05)
         for i in range(n):
+            if stage and targets and i % 50 == 0:
+                with torch.no_grad():
+                    pick_rings(run())
             opt.zero_grad()
             total, parts, out, e_kp, e_sil = loss(stage)
             total.backward()
@@ -274,11 +310,7 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
         out = run()
         k3, v3 = project(out)
         rest = out['rest_vertices'][0].cpu().numpy()
-        heads = out['rest_bone_heads'][0].cpu().numpy()
-        bone = lambda b: heads[model.bone_labels.index(b)].tolist()  # noqa: E731
-        neck = bone('neck01'), bone('head')
-        limbs = {f'{k}_{s.lower()}': (bone(f'{a}.{s}'), bone(f'{b}.{s}')) for s in 'LR' for k, a, b in
-                 (('arm', 'upperarm01', 'lowerarm01'), ('thigh', 'upperleg01', 'lowerleg01'), ('calf', 'lowerleg01', 'foot'))}
+        neck, limbs = axes(out)
         res = {'phenotypes': {k: round(torch.sigmoid(v).item(), 4) for k, v in phen.items()} | {'age': round(age_p, 4)},
                'local': {k: round(v, 4) for k, v in zip(labels, (torch.tanh((local + local[mirror]) / 2) * local_on).tolist()) if abs(v) > 1e-3},
                'fit': {k: round(v, 2) for k, v in parts.items()}, 'neck_axis': neck, 'limb_axes': limbs}
@@ -435,55 +467,76 @@ def assets():
     return F[~arm[F].any(1)], int(navel), F, arr('weights').reshape(-1, 6) / 255
 
 
-def tape(rest, neck=None, limbs=None, female=False):
-    """Tape-style circumferences (cm) of the rest-pose body: the convex hull of horizontal slices of the body
-    without its arms, like a tape bridging hollows. Neck: narrowest below the jaw; chest: widest; waist: at the
-    navel; hips: widest round the seat. neck: (base, top) of the neck's bones; the neck is taped across its own
-    axis (it leans forward, so a level slice catches the chin). limbs: {'arm_l': (shoulder, elbow), ...} bone ends:
-    arms at their midpoint, thighs 40 % down, calves at their widest, each across the bone and on that limb alone."""
+def ring(V, at, n, tri):
+    """Tape length (cm) round the slice of the triangles tri through point at, across direction n: the convex hull of the
+    slice, like a tape bridging hollows. V: vertices, cm."""
     import cv2
+    a, b, c = V[tri[:, 0]], V[tri[:, 1]], V[tri[:, 2]]
+    da, db, dc = (a - at) @ n, (b - at) @ n, (c - at) @ n
+    pts = []
+    for p, q, dp, dq in ((a, b, da, db), (b, c, db, dc), (c, a, dc, da)):
+        s = dp * dq < 0
+        pts.append(p[s] + (q[s] - p[s]) * (dp[s] / (dp[s] - dq[s]))[:, None])
+    P = np.concatenate(pts) - at
+    u = np.cross(n, [1, 0, 0] if abs(n[0]) < .9 else [0, 1, 0])
+    u /= np.linalg.norm(u)
+    P2 = np.stack([P @ u, P @ np.cross(n, u)], 1).astype(np.float32)
+    return cv2.arcLength(cv2.convexHull(P2), True) if len(P2) > 2 else 0
+
+
+def slices(rest, neck=None, limbs=None, female=False):
+    """Where each girth is taped on the rest-pose body (Anny frame, m): {part: (point cm, direction, triangles)}, plus the
+    navel's height (fraction) and the body's height (cm). Torso slices skip the arms. Neck: narrowest below the jaw,
+    across the neck's own axis (it leans forward, so a level slice catches the chin); chest: widest; waist: at the navel;
+    hips: widest round the seat. limbs: {'arm_l': (shoulder, elbow), ...} bone ends: arms at their midpoint, thighs 40 %
+    down, calves at their widest, each across the bone and on that limb alone."""
     F, navel, Fall, reg = assets()
     V = rest * 100
     z0, H = V[np.unique(F), 2].min(), np.ptp(V[np.unique(F), 2])
-    a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
-
-    def ring(z, at=None, n=np.array([0, 0, 1.]), tri=None):
-        """Tape length round the slice through point `at` (or height z) across direction n."""
-        at = np.array([0, 0, z]) if at is None else at
-        a, b, c = (V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]) if tri is None else (V[tri[:, 0]], V[tri[:, 1]], V[tri[:, 2]])
-        da, db, dc = (a - at) @ n, (b - at) @ n, (c - at) @ n
-        pts = []
-        for p, q, dp, dq in ((a, b, da, db), (b, c, db, dc), (c, a, dc, da)):
-            s = dp * dq < 0
-            pts.append(p[s] + (q[s] - p[s]) * (dp[s] / (dp[s] - dq[s]))[:, None])
-        P = np.concatenate(pts) - at
-        u = np.cross(n, [1, 0, 0] if abs(n[0]) < .9 else [0, 1, 0])
-        u /= np.linalg.norm(u)
-        P2 = np.stack([P @ u, P @ np.cross(n, u)], 1).astype(np.float32)
-        return cv2.arcLength(cv2.convexHull(P2), True) if len(P2) > 2 else 0
-
-    at = lambda lo, hi: [ring(z0 + f * H) for f in np.arange(lo, hi, .005)]  # noqa: E731
+    up = np.array([0, 0, 1.])
+    level = lambda f: (np.array([0, 0, z0 + f * H]), up, F)  # noqa: E731
+    length = lambda s: ring(V, *s)  # noqa: E731
+    out = {}
     if neck is not None:
         b0, b1 = np.asarray(neck[0]) * 100, np.asarray(neck[1]) * 100
         ax = (b1 - b0) / np.linalg.norm(b1 - b0)
-        neck_c = min(ring(0, b0 + (b1 - b0) * t, ax) for t in np.linspace(.2, .8, 13))
+        out['neck'] = min(((b0 + (b1 - b0) * t, ax, F) for t in np.linspace(.2, .8, 13)), key=length)
     else:
-        neck_c = min(at(.83, .88))
-    out = {}
+        out['neck'] = min((level(f) for f in np.arange(.83, .88, .005)), key=length)
     for k, (p0, p1) in (limbs or {}).items():
         p0, p1 = np.asarray(p0) * 100, np.asarray(p1) * 100
         r = ['arm_l', 'arm_r', 'leg_l', 'leg_r'].index(k.replace('thigh', 'leg').replace('calf', 'leg')) + 2
         tri = Fall[(reg[Fall, r] > .5).all(1)]
         ax = (p1 - p0) / np.linalg.norm(p1 - p0)
         ts = [.5] if k.startswith('arm') else [.4] if k.startswith('thigh') else np.linspace(.2, .45, 6)
-        out[k] = round(max(ring(0, p0 + (p1 - p0) * t, ax, tri) for t in ts), 1)
-    chest = at(.68, .76)
+        out[k] = max(((p0 + (p1 - p0) * t, ax, tri) for t in ts), key=length)
+    chest = [level(f) for f in np.arange(.68, .76, .005)]
+    widest = int(np.argmax([length(c) for c in chest]))
+    out['chest'] = chest[widest]
     if female:  # underbust: just below where the breasts start, the steepest rise in girth under the fullest ring (cup size)
-        f = .68 + .005 * int(np.argmax(chest))
-        below = at(f - .06, f)
-        out['underbust'] = round(below[int(np.argmax(np.diff(below)))], 1)
-    return out | {'neck': round(neck_c, 1), 'chest': round(max(chest), 1), 'waist': round(ring(V[navel, 2]), 1),
-            'hips': round(max(at(.46, .56)), 1), 'navel_h': round(float((V[navel, 2] - z0) / H), 3), 'height': round(float(H), 1)}
+        f = .68 + .005 * widest
+        below = [level(g) for g in np.arange(f - .06, f, .005)]
+        out['underbust'] = below[int(np.argmax(np.diff([length(s) for s in below])))]
+    out['waist'] = (np.array([0, 0, V[navel, 2]]), up, F)
+    out['hips'] = max((level(f) for f in np.arange(.46, .56, .005)), key=length)
+    return out, float((V[navel, 2] - z0) / H), float(H)
+
+
+def tape(rest, neck=None, limbs=None, female=False):
+    """Tape-style circumferences (cm) of the rest-pose body, at slices()."""
+    sl, navel_h, H = slices(rest, neck, limbs, female)
+    return {k: round(ring(rest * 100, *s), 1) for k, s in sl.items()} | {'navel_h': round(navel_h, 3), 'height': round(H, 1)}
+
+
+def hull(V, at, n, tri, band=1.):
+    """The mesh vertices within `band` cm of a slice that bound it, in order round it (V in cm)."""
+    import cv2
+    vs = np.unique(tri)
+    vs = vs[np.abs((V[vs] - at) @ n) < band]
+    u = np.cross(n, [1, 0, 0] if abs(n[0]) < .9 else [0, 1, 0])
+    u /= np.linalg.norm(u)
+    P = np.stack([(V[vs] - at) @ u, (V[vs] - at) @ np.cross(n, u)], 1).astype(np.float32)
+    return vs[cv2.convexHull(P, returnPoints=False)[:, 0]]
 
 
 def restance(db, day, frames, prof):
@@ -609,9 +662,11 @@ if __name__ == '__main__':
         np.save(a.save, rest)
     if a.store:
         import anny
-        if prof.get('sex') != 'female':  # the cameras' own estimate, for the console's reference comparison
-            import genital
-            res['tape'] |= genital.measure(Path(a.db).parent / 'reference', prof['height_cm'], day)
+        if prof.get('sex') != 'female':  # your tape this month, else the cameras' own (rough) estimate
+            yours = {k: v for k, (v, _) in prof['tape'].items() if k.startswith('penis')}
+            if not yours:
+                import genital
+            res['tape'] |= yours or genital.measure(Path(a.db).parent / 'reference', prof['height_cm'], day)
         m = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default')
         store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()))
         bake_all(a.db, prof)
