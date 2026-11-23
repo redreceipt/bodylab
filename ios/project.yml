@@ -21,7 +21,7 @@ targets:
         CFBundleDisplayName: BodyLab
         NSHealthShareUsageDescription: BodyLab reads weight, nutrition, sleep, activity and workouts to show how they change your body.
         NSHealthUpdateUsageDescription: BodyLab saves the food, weight and workouts you log so every app sees them.
-        NSCameraUsageDescription: BodyLab uses a face photo to make your 3D body look like you. It stays on your BodyLab server.
+        NSCameraUsageDescription: BodyLab uses a face photo or a Face ID camera scan to make your 3D body look like you. It stays on your BodyLab server.
         CFBundleURLTypes:
           - CFBundleURLName: bodylab-pairing
             CFBundleURLSchemes: [bodylab]

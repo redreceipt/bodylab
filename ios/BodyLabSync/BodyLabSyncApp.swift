@@ -136,16 +136,19 @@ struct MeView: View {
     @AppStorage("server") private var server = ""
     @AppStorage("token") private var token = ""
     @State private var camera = false
+    @State private var faceScan = false
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     Button("Connect Apple Health") { Task { await health.connect() } }
+                    Button("Scan your face (Face ID camera)") { faceScan = true }
                     Button("Take face photo") { camera = true }
                 } footer: {
-                    Text("Height, sex, birth date and units come from Apple Health and this phone. The face photo (straight on, neutral, mouth closed) makes your 3D body look like you; it stays on your BodyLab server.")
+                    Text("Height, sex, birth date and units come from Apple Health and this phone. The face scan shapes your 3D face and takes its photo (a face photo alone: straight on, neutral, mouth closed); both stay on your BodyLab server.")
                 }
+                if !health.status.isEmpty { Section { Text(health.status).font(.footnote).foregroundStyle(.secondary) } }
                 Section("Paired with") {
                     Text(URL(string: server)?.host() ?? server).foregroundStyle(.secondary)
                     Button("Unpair", role: .destructive) { token = "" }
@@ -154,6 +157,9 @@ struct MeView: View {
             .navigationTitle("Me")
             .sheet(isPresented: $camera) {
                 CameraPicker { image in Task { await health.uploadFace(image) } }.ignoresSafeArea()
+            }
+            .fullScreenCover(isPresented: $faceScan) {
+                FaceScanView { body in Task { await health.uploadFaceScan(body) } }
             }
         }
     }

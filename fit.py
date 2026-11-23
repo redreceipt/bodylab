@@ -29,6 +29,7 @@ POSED = ['clavicle.L', 'clavicle.R', 'upperarm01.L', 'upperarm01.R', 'lowerarm01
          'lowerleg01.L', 'lowerleg01.R', 'spine03', 'spine01', 'neck01', 'head']
 FACE = ('eye', 'ear', 'nose', 'mouth', 'chin', 'cheek', 'forehead', 'head', 'brow', 'jaw', 'lip', 'finger', 'hand', 'foot',
         'toe', 'temple', 'genital', 'nipple')
+HEAD = ('eye', 'ear', 'nose', 'mouth', 'chin', 'cheek', 'forehead', 'head', 'brow', 'jaw', 'lip', 'temple')  # a face scan shapes these
 # Anny (x: person's left, y: back, z: up) -> camera (x: right, y: down, z: away), for someone facing the camera.
 TO_CAM = [[1., 0, 0], [0, 0, -1], [0, 1, 0]]
 
@@ -50,6 +51,8 @@ def load(db, day=None):
     for data, ts in c.execute("select data, ts from logs where kind = 'reference' and ts between ? and ? order by ts", (noon - 30 * 86400, noon + 43200)):
         tape_t |= {p: (v, max(0., (noon - ts) / 86400)) for k, v in json.loads(data).items() if (p := measure.REF_PART.get(k))}
     prof['tape'] = tape_t
+    scan = Path(db).parent / 'face_scan.json'  # TrueDepth (app.py post_face_scan): your face's landmarks in 3D
+    prof['face_scan'] = json.loads(scan.read_text())['points'] if scan.exists() else None
     last = c.execute('select params from fits where day <= ? order by day desc limit 1', (day,)).fetchone()
     if last and prof.get('weight'):  # body composition from the last fit: what the muscle/fat split should look like
         t = json.loads(last[0])['tape']
@@ -123,6 +126,8 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     labels = model.local_change_labels
     # Body-shape changes only; no breast changes on a man (outlines can't tell pecs from breasts).
     local_on = torch.tensor([not any(t in k for t in FACE) and not (not female and k.startswith('breast')) for k in labels], device=dev)
+    head_on = torch.tensor([any(t in k for t in HEAD) for k in labels], device=dev)  # shaped by your face scan, if any
+    flocal = torch.zeros(len(labels), device=dev, requires_grad=True)
     mirror = torch.tensor([labels.index('r' + k[1:]) if k.startswith('l-') and 'r' + k[1:] in labels else
                            labels.index('l' + k[1:]) if k.startswith('r-') and 'l' + k[1:] in labels else i for i, k in enumerate(labels)], device=dev)
     posed = torch.tensor([model.bone_labels.index(b) for b in POSED], device=dev)
@@ -170,7 +175,7 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     def shape(n):
         p = {k: torch.sigmoid(v).expand(n) for k, v in phen.items()}
         p |= {'gender': torch.full((n,), 1. if female else 0., device=dev), 'age': torch.full((n,), age_p, device=dev)}  # Anny: 0 = male
-        lc = (torch.tanh((local + local[mirror]) / 2) * local_on).expand(n, -1)  # left = right
+        lc = (torch.tanh((local + local[mirror]) / 2) * local_on + torch.tanh((flocal + flocal[mirror]) / 2) * head_on).expand(n, -1)  # left = right
         return {'phenotype_kwargs': p, 'local_changes_kwargs': lc}
 
     def run():
@@ -306,13 +311,31 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
             use = (e < max(.03, 2.5 * e.median().item())).float()
             log(f'{int(use.sum())} of {B} frames fit the landmarks')
 
+    if prof.get('face_scan') is not None:  # your face scan: the head's own controls, the body as fitted
+        lm, ids, wts = face_anchors('female' if female else 'male')
+        S = torch.tensor(np.array(prof['face_scan'])[lm], dtype=torch.float32, device=dev) @ torch.tensor([[1., 0, 0], [0, 0, -1], [0, 1, 0]], device=dev).T
+        S = S - S.mean(0)  # ARKit (x: the face's left, y up, z forward) -> Anny (x left, y back, z up), centred
+        ids, wts = torch.tensor(ids, device=dev), torch.tensor(wts, dtype=torch.float32, device=dev)
+        eye4 = torch.eye(4, device=dev)[None, None].repeat(1, model.bone_count, 1, 1)
+        opt = torch.optim.Adam([flocal], lr=.03)
+        for i in range(200):
+            opt.zero_grad()
+            P = (model(pose_parameters=eye4, **shape(1))['rest_vertices'][0][ids] * wts[..., None]).sum(1)
+            P = P - P.mean(0)
+            R = torch.tensor(kabsch(S.detach().cpu().numpy(), P.detach().cpu().numpy()), dtype=torch.float32, device=dev)  # turn only
+            e = ((P - S @ R.T) ** 2).sum(1)
+            (e.mean() + 1e-5 * (torch.tanh(flocal) ** 2).sum()).backward()
+            opt.step()
+            if i in (0, 199):
+                log(f'face {i:3d}  {e.sqrt().median().item() * 1000:.1f} mm off your scan (median)')
+
     with torch.no_grad():
         out = run()
         k3, v3 = project(out)
         rest = out['rest_vertices'][0].cpu().numpy()
         neck, limbs = axes(out)
         res = {'phenotypes': {k: round(torch.sigmoid(v).item(), 4) for k, v in phen.items()} | {'age': round(age_p, 4)},
-               'local': {k: round(v, 4) for k, v in zip(labels, (torch.tanh((local + local[mirror]) / 2) * local_on).tolist()) if abs(v) > 1e-3},
+               'local': {k: round(v, 4) for k, v in zip(labels, shape(1)['local_changes_kwargs'][0].tolist()) if abs(v) > 1e-3},
                'fit': {k: round(v, 2) for k, v in parts.items()}, 'neck_axis': neck, 'limb_axes': limbs}
         # Each camera's outline error (cm, median over its frames used): one drifting (bumped, refocused) shows here.
         cams, kept = np.array([f.get('cam', 0) for f in frames]), use.cpu().numpy() > 0
@@ -465,6 +488,37 @@ def assets():
     # the navel: the front-midline vertex furthest behind its neighbours 1-3 cm above and below
     navel = min(mid, key=lambda k: T[k, 2] - np.mean([T[q, 2] for q in mid if 1 < abs(T[q, 1] - T[k, 1]) < 3] or [T[k, 2]]))
     return F[~arm[F].any(1)], int(navel), F, arr('weights').reshape(-1, 6) / 255
+
+
+def face_anchors(sex):
+    """Where each face landmark (MediaPipe's 478) sits on the body mesh: (landmark indices, their triangles' base-mesh
+    vertex ids (K, 3), barycentric weights (K, 3)), from the UVs the face photo is mapped with (web assets)."""
+    meta = json.loads((ROOT / 'static/assets/body.json').read_text())
+    buf = (ROOT / 'static/assets/body.bin').read_bytes()
+    types = {'uint8': np.uint8, 'uint16': np.uint16, 'uint32': np.uint32, 'float32': np.float32}
+    arr = lambda k: np.frombuffer(buf, types[meta['arrays'][k][0]], meta['arrays'][k][2], meta['arrays'][k][1])  # noqa: E731
+    uv, src, tris = arr('body.uv').reshape(-1, 2), arr('body.src').astype(np.int64), arr('body.tris').reshape(-1, 3).astype(np.int64)
+    head = arr('weights').reshape(-1, 6)[:, 0] > 127
+    tris = tris[head[src[tris]].all(1)]
+    A = arr(f'face_uv.{sex}').reshape(-1, 2)
+    a, b, c = uv[tris[:, 0]], uv[tris[:, 1]], uv[tris[:, 2]]
+    v0, v1 = b - a, c - a
+    den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
+    lm, ids, wts = [], [], []
+    for k, q in enumerate(A):
+        if np.isnan(q).any():
+            continue
+        v2 = q - a
+        with np.errstate(divide='ignore', invalid='ignore'):
+            u = (v2[:, 0] * v1[:, 1] - v1[:, 0] * v2[:, 1]) / den
+            v = (v0[:, 0] * v2[:, 1] - v2[:, 0] * v0[:, 1]) / den
+        hit = np.flatnonzero((u >= -1e-6) & (v >= -1e-6) & (u + v <= 1 + 1e-6))
+        if len(hit):
+            t = hit[0]
+            lm.append(k)
+            ids.append(src[tris[t]])
+            wts.append([1 - u[t] - v[t], u[t], v[t]])
+    return np.array(lm), np.array(ids), np.clip(np.array(wts), 0, 1)
 
 
 def ring(V, at, n, tri):

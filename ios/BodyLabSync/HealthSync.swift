@@ -175,6 +175,17 @@ final class HealthSync: ObservableObject {
         }
     }
 
+    /// TrueDepth face scan (FaceScanView): shapes your avatar's face and sets its photo. Stays on your BodyLab server.
+    func uploadFaceScan(_ body: Data) async {
+        status = "Uploading face scan…"
+        do {
+            _ = try await post("api/face-scan", body, type: "application/json")
+            status = "Face scan saved ✓ — your face updates with the next body fit"
+        } catch {
+            status = "Face scan upload failed: \(error.localizedDescription)"
+        }
+    }
+
     private func post(_ path: String, _ body: Data, type: String) async throws -> [String: Any] {
         try await request(path, method: "POST", body: body, type: type)
     }

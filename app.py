@@ -1,4 +1,5 @@
 """BodyLab: local body-composition tracker fed by a network camera. Run: uv run app.py"""
+import base64
 import hmac
 import json
 import os
@@ -192,6 +193,47 @@ def post_face(raw):
     hair = measure.hair_style(masks[-1].numpy_view().squeeze(), img, pts)  # last mask = hair
     meta.write_text(json.dumps({'w': w, 'h': h, 'ts': time.time(), 'landmarks': (pts / [w, h]).round(5).tolist(), 'hair': hair,
                                 'embedding': None if emb is None else emb.round(5).tolist()}))
+
+
+def post_face_scan(b):
+    """TrueDepth face scan from the iPhone (FaceScanView): ARKit's face mesh (metres; x: the face's left, y: up, z: forward)
+    and frames with where each mesh point lands in them. The straightest frame becomes your face photo, and each of its
+    478 face landmarks gets its 3D place on the mesh (face_scan.json), which the body fit shapes your face to."""
+    V, tris = np.array(b['vertices'], float), np.array(b['triangles'], int).reshape(-1, 3)
+    if V.ndim != 2 or V.shape[1] != 3 or len(V) < 100 or tris.min() < 0 or tris.max() >= len(V) or not b.get('frames'):
+        raise ValueError('Not a face scan')
+    f = min(b['frames'], key=lambda f: abs(f['yaw']))
+    img = cv2.imdecode(np.frombuffer(base64.b64decode(f['jpg']), np.uint8), cv2.IMREAD_COLOR)
+    px = np.array(f['px'], float)
+    if img is None or px.shape != (len(V), 2):
+        raise ValueError('Not a face scan')
+    # The frame is the camera sensor's landscape image: turn it until the face is upright (its up axis points up).
+    h, w = img.shape[:2]
+    up = px[np.argmax(V[:, 1])] - px[np.argmin(V[:, 1])]
+    turn = int(round(np.degrees(np.arctan2(up[0], -up[1])) / 90)) % 4  # quarter turns clockwise that put it upright
+    for _ in range(turn):  # quarter turns counter-clockwise
+        img, px = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE), np.stack([px[:, 1], img.shape[1] - 1 - px[:, 0]], 1)
+    post_face(cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes())
+    lm = np.array(json.loads(face_files()[1].read_text())['landmarks']) * [img.shape[1], img.shape[0]]
+    # each landmark: the mesh triangle it falls in (barycentric), else the nearest mesh point
+    a_, b_, c_ = px[tris[:, 0]], px[tris[:, 1]], px[tris[:, 2]]
+    v0, v1 = b_ - a_, c_ - a_
+    den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
+    pts = []
+    for q in lm:
+        v2 = q - a_
+        with np.errstate(divide='ignore', invalid='ignore'):
+            u = (v2[:, 0] * v1[:, 1] - v1[:, 0] * v2[:, 1]) / den
+            v = (v0[:, 0] * v2[:, 1] - v2[:, 0] * v0[:, 1]) / den
+        inside = np.flatnonzero((u >= 0) & (v >= 0) & (u + v <= 1))
+        if len(inside):
+            t = inside[np.argmax(V[tris[inside]].mean(1)[:, 2])]  # the front-most, if the sheet folds over itself
+            k = np.flatnonzero(inside == t)[0]
+            uu, vv = u[inside][k], v[inside][k]
+            pts.append((1 - uu - vv) * V[tris[t, 0]] + uu * V[tris[t, 1]] + vv * V[tris[t, 2]])
+        else:
+            pts.append(V[np.argmin(np.linalg.norm(px - q, axis=1))])
+    (DB_PATH.parent / 'face_scan.json').write_text(json.dumps({'points': np.round(pts, 5).tolist(), 'ts': time.time()}))
 
 
 def get_logs():
@@ -852,11 +894,11 @@ def post_predict(b):
             'maintenance': kcal and round(kcal), 'maintenance_source': source}
 
 
-POST = {'/api/profile': post_profile, '/api/logs': post_log, '/api/goals': post_goal,
+POST = {'/api/face-scan': post_face_scan, '/api/profile': post_profile, '/api/logs': post_log, '/api/goals': post_goal,
         '/api/clear-today': lambda b: cap.clear_today(), '/api/sync': post_sync,
         '/api/predict': post_predict}
 LOCAL = ('localhost', '127.0.0.1')
-TOKEN_PATHS = ('/api/sync', '/api/face', '/api/logs')  # what the paired iPhone may call
+TOKEN_PATHS = ('/api/sync', '/api/face', '/api/face-scan', '/api/logs')  # what the paired iPhone may call
 
 
 class Handler(BaseHTTPRequestHandler):
