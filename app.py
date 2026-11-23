@@ -13,6 +13,7 @@ import stat
 import secrets
 import sqlite3
 import statistics
+import struct
 import subprocess
 import sys
 import threading
@@ -286,7 +287,7 @@ class Judge:
             while self.want:
                 cam, (ts, jpg) = self.want.popitem()
                 v = judge.ask(jpg)
-                if v is None:  # no Ollama or model: the rule-based checks stand alone; ask again in a minute
+                if v is None:  # no vision model installed: the rule-based checks stand alone; ask again in a minute
                     self.off = time.time() + 60
                     continue
                 why = judge.problem(v, (get_profile() or {}).get('bare_only', True))
@@ -359,6 +360,7 @@ class Capture:
         self.want_clear, self.dirty = False, True
         self.prof, self.weight, self.prof_ts, self.me = {}, None, 0.0, None
         self.gate, self.skin, self.match, self.last_id, self.stored, self.last_ref = Gate(), None, None, 0.0, [None, 0], 0.0
+        self.apple, self.last_apple = None, 0.0
         threading.Thread(target=self.read_loop, daemon=True).start()
         threading.Thread(target=self.process_loop, daemon=True).start()
 
@@ -389,6 +391,7 @@ class Capture:
             base_options=BaseOptions(model_asset_path=str(MODEL)), num_poses=2,
             running_mode=vision.RunningMode.VIDEO, output_segmentation_masks=True))
         self.faces = Faces()
+        self.apple = apple_masks()
         self.clothes = vision.ImageSegmenter.create_from_options(vision.ImageSegmenterOptions(
             base_options=BaseOptions(model_asset_path=str(CLOTHES_MODEL[0])), output_category_mask=True))
         last, ts_ms = None, 0
@@ -474,6 +477,16 @@ class Capture:
             if r['obs']:
                 rec = {'ts': now, 'cam': self.cam, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
                        'sil': silhouette(mask, pts, world, r['origin'], r['H'], cat=cat, box=box)} | ({'skin': skin} if skin else {})
+                if self.apple and now - self.last_apple > .25:  # shortcut: A/B of the two masks' outlines; keep the better one once fits compare
+                    self.last_apple = now
+                    try:
+                        am = apple_mask(self.apple, f, mask)
+                    except (OSError, ValueError) as e:
+                        print('Apple person mask stopped:', e, flush=True)
+                        self.apple, am = None, None
+                    if am is not None:
+                        rec['sil2'] = silhouette(am, pts, world, r['origin'], r['H'], cat=cat, box=box)
+                        mask = np.maximum(mask, am)  # reference crops keep both edges
                 if self.prof.get('reference') and now - self.last_ref > 1:
                     try:  # a developer extra: never costs the frame
                         self.last_ref, rec['jpg'] = now, reference_crop(f, mask, r, skin)  # saved only if it's you
@@ -620,6 +633,27 @@ def person_box(mask, margin=.1):
         return None
     m, (h, w) = margin * (ys.max() - ys.min()), mask.shape[:2]
     return max(int(ys.min() - m), 0), min(int(ys.max() + m), h), max(int(xs.min() - m), 0), min(int(xs.max() + m), w)
+
+
+def apple_masks():
+    """Apple's Vision person masks (tools/person_mask.swift, built on first use), or None where they aren't available."""
+    exe = ROOT / 'models' / 'person_mask'
+    if not exe.exists() and (sys.platform != 'darwin' or subprocess.run(
+            ['swiftc', '-O', str(ROOT / 'tools' / 'person_mask.swift'), '-o', str(exe)], capture_output=True).returncode):
+        return None
+    return subprocess.Popen([str(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+
+def apple_mask(proc, f, mask):
+    """The person's mask (0..1) by Apple's Vision: of the people it finds, the one MediaPipe's mask overlaps most."""
+    h, w = f.shape[:2]
+    proc.stdin.write(struct.pack('<II', w, h) + cv2.cvtColor(f, cv2.COLOR_BGR2BGRA).tobytes())
+    proc.stdin.flush()
+    head = proc.stdout.read(4)
+    if len(head) < 4:
+        raise OSError('helper exited')
+    ms = [np.frombuffer(proc.stdout.read(w * h), np.uint8).reshape(h, w) for _ in range(struct.unpack('<I', head)[0])]
+    return max(ms, key=lambda m: ((m > 127) & (mask > .5)).sum()) / 255. if ms else None
 
 
 def bare_skin(segmenter, f, mask, pts):

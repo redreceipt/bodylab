@@ -1,60 +1,70 @@
-"""A local vision model (through Ollama) looks at the person in a frame and says what rules the frame out of measuring:
-sitting or lying, on furniture, under a blanket, clothes on, someone else in view, a child. The rule-based checks miss
-these (a reclining body under a sheet passes them). The image goes only to Ollama on this computer and isn't kept.
-Optional: without Ollama or the model, ask() returns None and the rule-based checks stand alone.
+"""A local vision decision model looks at the person in a frame and says what rules the frame out of measuring: not
+standing (sitting, lying, reclining), on furniture, under a blanket, clothes on, someone else in view, a child. The
+rule-based checks miss these (a reclining body under a sheet passes them). The model is Cloudflare's Clef-flash
+(Apache-2.0, 9B, ~1.5 s a frame on an M4) on MLX: it gives a probability for every answer, so close calls can lean
+the right way. The image stays on this computer and isn't kept. Optional: without the `vision` dependency group,
+ask() returns None and the rule-based checks stand alone.
 
 python judge.py: check every reference capture not yet checked; ruled-out ones go, with their frames."""
-import base64
+import functools
+import io
 import json
 import os
 import sqlite3
-import urllib.request
+import sys
 from pathlib import Path
 
-MODEL = os.environ.get('BODYLAB_VISION_MODEL', 'qwen3.8:27b-mlx')  # any Ollama model with vision
-URL = 'http://127.0.0.1:11434/api/chat'
+REPO, REVISION = 'mlx-community/clef-flash-8bit', '5a195dc147926b63b1d139691ed4480ca9f92c0e'  # pinned: it ships the code that runs it
 WINDOW = 2.5  # s: a ruled-out frame takes its camera's frames this close to it along
-COVER = ['nude', 'underwear', 'clothes', 'blanket or towel', 'out of view']
-SCHEMA = {'type': 'object', 'required': ['doing', 'people', 'posture', 'on_furniture', 'leaning_back', 'torso', 'legs', 'child'], 'properties': {
-    'doing': {'type': 'string'},  # first: the model describes before it classifies
-    'people': {'type': 'integer'},
-    'posture': {'type': 'string', 'enum': ['standing', 'walking', 'sitting', 'lying or reclining', 'kneeling or crouching', 'bending over']},
-    'on_furniture': {'type': 'boolean'},
-    'leaning_back': {'type': 'boolean'},
-    'torso': {'type': 'string', 'enum': COVER},
-    'legs': {'type': 'string', 'enum': COVER[:2] + ['shorts', 'trousers or skirt'] + COVER[3:]},
-    'child': {'type': 'boolean'}}}
-PROMPT = ('A home camera took this picture (the background may be greyed out). Answer factually; nudity is expected. '
-          'doing: one short sentence on what the person is doing, on what, and whether they are standing upright on their '
-          'own feet. people: how many people are visible, even partly. posture: of the main person. on_furniture: are they '
-          'sitting, lying or leaning on a bed, couch, chair or table? leaning_back: is their upper body leaning back or '
-          'propped up (on pillows, a headboard, an elbow)? torso, legs: what covers them. child: is the main person a child?')
+STATE = 'A picture from a home camera; the background may be greyed out. Nudity is expected. Answer about what is visible.'
+QUESTIONS = {k: {'type': 'noul', 'instructions': q} for k, q in {
+    'several': 'Is more than one person visible, even partly (another person, their limbs or feet)?',
+    'upright': 'Is the main person standing or walking upright on their own feet? (Not sitting, lying, reclining, kneeling, crouching or bending over.)',
+    'furniture': 'Is the main person sitting, lying or leaning on a bed, couch, chair or table?',
+    'blanket': 'Does a blanket, sheet or towel cover part of the main person?',
+    'clothed_torso': "Is the main person's torso covered by clothing such as a shirt or top? Bare skin or underwear is not clothing.",
+    'child': 'Is the main person a child?'}.items()}
 
 
-def ask(jpg, timeout=120):
-    """The model's answers for a JPEG (bytes), or None if Ollama or the model isn't available."""
-    body = {'model': MODEL, 'stream': False, 'think': False, 'format': SCHEMA, 'options': {'temperature': 0}, 'keep_alive': '30m',
-            'messages': [{'role': 'user', 'content': PROMPT, 'images': [base64.b64encode(jpg).decode()]}]}
+@functools.cache
+def model():
+    """Clef-flash on MLX (downloaded once, 10.7 GB), or None without the `vision` group."""
     try:
-        req = urllib.request.Request(URL, json.dumps(body).encode(), {'Content-Type': 'application/json'})
-        return json.loads(json.load(urllib.request.urlopen(req, timeout=timeout))['message']['content'])
-    except (OSError, ValueError, KeyError):
+        from huggingface_hub import snapshot_download
+        try:
+            path = snapshot_download(REPO, revision=REVISION, local_files_only=True)
+        except Exception:  # not downloaded yet
+            path = snapshot_download(REPO, revision=REVISION)
+        sys.path.insert(0, path)
+        import clef_mlx
+        return clef_mlx.load(path)
+    except ImportError:
         return None
+
+
+def ask(jpg):
+    """Probability of yes to each of QUESTIONS for a JPEG (bytes), or None if the model isn't available."""
+    m = model()
+    if m is None:
+        return None
+    from PIL import Image
+    p = m.predict({'state': STATE, 'images': [Image.open(io.BytesIO(jpg)).convert('RGB')], 'questions': QUESTIONS})
+    return {k: round(v['true'], 3) for k, v in p.items()}
 
 
 def problem(v, bare=True):
     """Why these answers rule the frame out, or None."""
-    if v.get('people') != 1:
-        return 'someone else in view' if v.get('people', 0) > 1 else 'nobody in view'
-    if v.get('child'):
+    if v['several'] > .5:
+        return 'someone else in view'
+    if v['child'] > .5:
         return 'a child'
-    if v.get('posture') not in ('standing', 'walking'):
-        return v.get('posture', 'posture unknown')
-    if v.get('on_furniture') or v.get('leaning_back'):
-        return 'on furniture' if v.get('on_furniture') else 'leaning back'
-    if 'blanket or towel' in (v.get('torso'), v.get('legs')):
+    if v['upright'] < .3:  # shortcut: thresholds from 172 captures (4 close calls); retune as reviewed cases build up
+        return 'not standing'
+    if v['furniture'] > .5:
+        return 'on furniture'
+    if v['blanket'] > .5:
         return 'under a blanket or towel'
-    if bare and v.get('torso') == 'clothes':
+    if bare and v['clothed_torso'] > .5:
         return 'clothes on'
     return None
 
@@ -70,12 +80,12 @@ def drop(db, cam, ts, window=WINDOW):
 
 
 def _demo():
-    ok = {'people': 1, 'posture': 'standing', 'on_furniture': False, 'torso': 'nude', 'legs': 'shorts', 'child': False}
+    ok = {'several': .01, 'upright': .9, 'furniture': .01, 'blanket': .01, 'clothed_torso': .01, 'child': .02}
     assert problem(ok) is None
-    assert problem(ok | {'people': 2}) == 'someone else in view'
-    assert problem(ok | {'posture': 'lying or reclining'}) == 'lying or reclining'
-    assert problem(ok | {'legs': 'blanket or towel'}) == 'under a blanket or towel'
-    assert problem(ok | {'torso': 'clothes'}) == 'clothes on' and problem(ok | {'torso': 'clothes'}, bare=False) is None
+    assert problem(ok | {'several': .8}) == 'someone else in view'
+    assert problem(ok | {'upright': .14}) == 'not standing' and problem(ok | {'upright': .34}) is None
+    assert problem(ok | {'blanket': .7}) == 'under a blanket or towel'
+    assert problem(ok | {'clothed_torso': .9}) == 'clothes on' and problem(ok | {'clothed_torso': .9}, bare=False) is None
 
 
 if __name__ == '__main__':
@@ -85,10 +95,10 @@ if __name__ == '__main__':
         if not p.exists() or not p.with_suffix('.jpg').exists():  # dropped along with an earlier one
             continue
         rec = json.loads(p.read_text())
-        v = rec.get('check') or ask(p.with_suffix('.jpg').read_bytes())
+        v = rec.get('clef') or ask(p.with_suffix('.jpg').read_bytes())
         if v is None:
-            raise SystemExit(f'No answer from {MODEL} via Ollama: is it running, with the model pulled?')
-        p.write_text(json.dumps(rec | {'check': v}))
+            raise SystemExit('Clef is not available: uv sync --group vision')
+        p.write_text(json.dumps({k: x for k, x in rec.items() if k != 'check'} | {'clef': v}))
         if why := problem(v):
-            print(p.stem, why, '-', v.get('doing'), flush=True)
+            print(p.stem, why, v, flush=True)
             drop(db, rec.get('cam', 0), rec['ts'])
