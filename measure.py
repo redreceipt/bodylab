@@ -342,6 +342,12 @@ def predict(m, sex, weeks, kcal_delta, strength_per_week, protein_g_kg, height_c
         if trains:  # resistance training builds some muscle even at maintenance; less as you get leaner of new gains
             d_lean += min(strength_per_week, 5) / 5 * .25 / 30  # up to ~0.25 kg/month
         fat, lean = fat + d_fat, lean + d_lean
+    return {'path': path, 'm': at_composition(m, sex, fat, lean, height_cm, slopes), 'warning': warning}
+
+
+def at_composition(m, sex, fat, lean, height_cm, slopes=None):
+    """Today's body m (weight, bf, circumferences) with `fat` and `lean` kg instead: each part grows or shrinks by its
+    fat (your measured slope, else typical) and lean centimetres per kilogram."""
     final = {**m, 'weight': fat + lean, 'fat_kg': fat, 'lean_kg': lean, 'bf': 100 * fat / (fat + lean),
              'ffmi': lean / (height_cm / 100) ** 2}
     d_fat, d_lean = fat - m['weight'] * m['bf'] / 100, lean - m['weight'] * (1 - m['bf'] / 100)
@@ -352,7 +358,11 @@ def predict(m, sex, weeks, kcal_delta, strength_per_week, protein_g_kg, height_c
         final['shoulders'] = m['shoulders'] + LEAN_CM_PER_KG['shoulders'] * max(d_lean, 0)
     if 'waist' in final:
         final['whtr'] = final['waist'] / height_cm
-    return {'path': path, 'm': {k: round(v, 3) for k, v in final.items()}, 'warning': warning}
+    return {k: round(v, 3) for k, v in final.items()}
+
+
+# A lean, muscular look: what to aim for unless you choose otherwise (body fat %).
+RECOMMENDED_BF = {'male': 12, 'female': 22}
 
 
 def ellipse(w, d):

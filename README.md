@@ -23,7 +23,7 @@ Env: `PORT` (8765), `BODYLAB_DB` (default `data/bodylab.db`).
 
 ## iPhone: onboarding + Apple Health
 
-`ios/` is the **BodyLab** app, the product: your 3D body, Today, Progress and What if… (the same web UI, inside a native shell), plus Apple Health sync and logging food, weight and workouts. Scan the pairing QR, allow Health, take a face photo, done. Everything else comes from the camera; nothing is tape-measured. It sends 90 days of data on open and in the background whenever Health changes; re-syncs update records rather than duplicating them. This Mac's web page is the backend console: camera setup and, under Settings → Developer, reference measurements and reference images for tuning the measuring (never used for your numbers). Icon and launch mark: `uv run python tools/brand.py`.
+`ios/` is the **BodyLab** app, the product: your 3D body, Today, Progress and What if… (the same web UI, inside a native shell), plus Apple Health sync and logging food, weight and workouts. Scan the pairing QR, allow Health, take a face photo, done. Everything else comes from the camera; nothing is tape-measured. It sends 90 days of data on open and in the background whenever Health changes; re-syncs update records rather than duplicating them. This Mac's web page (`/`) is the developer console: cameras, the body fit and skin bake, reference images, and reference measurements with where to take each (compared only with BodyLab's estimate from the same day, never used for your numbers). The app is `/?app=1`. Icon and launch mark: `uv run python tools/brand.py`.
 
 | | Apple Health data |
 |---|---|

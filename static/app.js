@@ -3,7 +3,6 @@ import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
 import { fitBody, fitProxy, genitalPositions, initBody, mesh, pose, underwear } from './body.js';
 import { loadImage, photoColors, skinCanvas } from './look.js';
-import { renderSVG } from './vendor/uqr.mjs';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -34,10 +33,6 @@ const HEALTH = {
   balance: ['Energy balance', 'kcal', 0],
 };
 Object.assign(HEALTH, { underbust: ['Underbust', 'cm', 1] });
-// Developer reference measurements: ground truth for tuning the camera, never used for your numbers.
-const REFS = [['ref_neck', 'Neck', 'cm'], ['ref_chest', 'Chest / bust', 'cm'], ['ref_underbust', 'Underbust', 'cm'], ['ref_waist', 'Waist at navel', 'cm'],
-  ['ref_hips', 'Hips', 'cm'], ['ref_arm', 'Upper arm', 'cm'], ['ref_thigh', 'Thigh', 'cm'], ['ref_calf', 'Calf', 'cm'], ['ref_weight', 'Weight', 'kg'],
-  ['ref_bf', 'Body fat (DEXA, calipers…)', '%'], ['ref_penis_len', 'Penis length, resting', 'cm'], ['ref_penis_girth', 'Penis girth, resting', 'cm']];
 for (const [k, [label, unit, dec]] of Object.entries(HEALTH)) META[k] ??= { label, unit, dec };
 // US cup letter from bust minus underbust (one letter per inch).
 const cupLetter = (cm) => ['AA', 'A', 'B', 'C', 'D', 'DD', 'DDD/F', 'G', 'H'][Math.max(0, Math.min(8, Math.round(cm / 2.54)))];
@@ -55,7 +50,6 @@ function healthTable() {
     : '<p class="muted">Pair the iPhone app (Profile) to bring in Apple Health data.</p>';
 }
 const imperial = () => S?.profile?.units === 'imperial';
-const inApp = new URLSearchParams(location.search).has('app'); // inside the iPhone app: no backend tools (camera setup, pairing, developer)
 const K = { cm: 1 / 2.54, kg: 2.20462 };
 const toUnit = (v, u) => (imperial() && K[u] ? v * K[u] : v);
 const fromUnit = (v, u) => (imperial() && K[u] ? v / K[u] : v);
@@ -417,7 +411,8 @@ function pick(e) {
   ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(ndc, camera);
   const hit = ray.intersectObjects(avatar.children, false)[0];
-  return hit ? hit.object.userData.part ?? hit.object.geometry.userData.parts?.[A.src[hit.face.a]] ?? 'overall' : null;
+  const part = hit && (hit.object.userData.part ?? hit.object.geometry.userData.parts?.[A.src[hit.face.a]]);
+  return part && part !== 'overall' ? part : null; // the head isn't a part to measure
 }
 const canvas = renderer.domElement;
 let downAt = null;
@@ -453,11 +448,19 @@ function todayCard() {
   return `<div class="row"><b>Today</b><span class="muted">${done} of ${items.length}</span></div>
     <ul>${items.map(([k, label, hint]) => `<li class="${t[k] ? 'ok' : ''}"><span>${t[k] ? '✓' : '○'}</span><div>${label}${t[k] ? '' : `<small>${hint}</small>`}</div></li>`).join('')}</ul>`;
 }
+// Your goal: a weight at a body fat (recommended unless you choose); what it takes in lean and fat mass.
+function goalNumbers() {
+  const w = valueOf('weight'), bf = cur().bf, gw = S.goals.weight?.target, gbf = S.goals.bf?.target ?? S.recommended_bf;
+  if (w == null || bf == null || gw == null) return null;
+  return { gw, gbf, lean: gw * (1 - gbf / 100) - w * (1 - bf / 100), fat: gw * gbf / 100 - w * bf / 100 };
+}
 function renderHud() {
-  const m = cur(), c = S.insights.summary.changes;
+  const m = cur(), w = valueOf('weight'), g = goalNumbers();
   $('#summary').innerHTML = m.bf != null
-    ? `<div class="k">Body fat</div><div class="v">${fmt('bf', m.bf)}</div>
-       <div class="muted">${[valueOf('weight') != null && fmt('weight', valueOf('weight')), c.bf != null && `${fmt('bf', c.bf, true)} in 4 weeks`].filter(Boolean).join(' · ')}</div>`
+    ? `<div class="row"><div><div class="k">Body fat</div><div class="v">${fmt('bf', m.bf)}</div></div>
+         <div><div class="k">Weight</div><div class="v">${w != null ? fmt('weight', w) : '—'}</div></div></div>
+       <div class="muted">${g ? `Goal ${fmt('weight', g.gw)} at ${fmt('bf', g.gbf)}: ${fmt('lean_kg', g.lean, true)} muscle, ${fmt('fat_kg', g.fat, true)} fat`
+         : 'Tap to set a goal'}</div>`
     : '<div class="k">Your body</div><div class="muted">No estimate yet. Walk past the camera — every view helps.</div>';
   $('#today').innerHTML = todayCard();
 }
@@ -466,7 +469,7 @@ function renderTimeline() {
   $('#scrub').max = Math.max(0, n - 1);
   $('#scrub').value = idx;
   $('#scrub').hidden = $('#ghostLabel').hidden = n < 2 || !!predicted;
-  $('#scanLabel').textContent = predicted ? `predicted · in ${plan.weeks} weeks` : n ? day(S.scans[idx].ts) : 'no estimate yet';
+  $('#scanLabel').textContent = predicted?.goal ? 'your goal' : predicted ? `predicted · in ${plan.weeks} weeks` : n ? day(S.scans[idx].ts) : 'no estimate yet';
 }
 $('#scrub').addEventListener('input', (e) => { idx = +e.target.value; renderAll(); });
 $('#ghost').addEventListener('change', () => rebuildAvatar(true));
@@ -475,7 +478,7 @@ $('#censored').addEventListener('change', async (e) => {
   rebuildAvatar(true);
   await api('POST', '/api/profile', { clothes: look.clothes });
 });
-$('#summary').addEventListener('click', () => open({ part: 'overall' }));
+$('#summary').addEventListener('click', () => open({ tab: 'goal' }));
 
 // ---------- panels ----------
 function spark(k) {
@@ -506,16 +509,32 @@ function metricBlock(k, withGoal = true) {
     ${since != null || c28 != null ? `<div class="muted">${c28 != null ? `last 4 weeks <span class="${tone(k, c28)}">${fmt(k, c28, true)}</span>` : ''}${since != null ? ` · since you started <span class="${tone(k, since)}">${fmt(k, since, true)}</span>` : ''}</div>` : ''}
     ${spark(k)}${withGoal ? goalBlock(k) : ''}</div>`;
 }
+function goalPanel() {
+  const m = cur(), g = goalNumbers(), gw = S.goals.weight?.target, gbf = S.goals.bf?.target;
+  return `<h2>Your goal</h2>
+    <form id="fGoalBody" class="stack"><div class="grid2">
+      <label>Goal weight (${uLabel('kg')})<input name="weight" type="number" step="any" required value="${gw != null ? +toUnit(gw, 'kg').toFixed(1) : ''}"></label>
+      <label>Body fat (%)<input name="bf" type="number" step="any" value="${gbf ?? ''}" placeholder="${S.recommended_bf} recommended"></label></div>
+      <p class="muted">${S.recommended_bf}% body fat is a lean, muscular look; leave it empty to use that.</p>
+      <button>Save goal</button></form>
+    ${g ? `<p>To get there: <b>${fmt('lean_kg', g.lean, true)}</b> muscle and other lean mass, <b>${fmt('fat_kg', g.fat, true)}</b> fat.</p>
+      <button type="button" id="showGoal">${predicted?.goal ? 'Back to today' : 'Show my goal body'}</button>` : ''}
+    ${['bf', 'weight', 'lean_kg'].map((x) => metricBlock(x, false)).join('')}
+    <details><summary>More numbers</summary>
+      <table>${['fat_kg', 'ffmi', 'whtr', 'whr'].map((x) => `<tr><td>${META[x].label}</td><td>${fmt(x, m[x])}</td></tr>`).join('')}</table>
+      ${healthTable()}
+      <p class="muted">Body fat uses the US Navy circumference formula on your fitted body. Expect ±3–4 points.</p>
+    </details>`;
+}
+async function showGoal() {
+  if (predicted?.goal) { predicted = null; renderTimeline(); rebuildAvatar(); return renderPanel(); }
+  const g = goalNumbers(), out = await api('POST', '/api/predict', { goal_weight: g.gw, goal_bf: g.gbf });
+  predicted = { dims: out.dims, m: out.m, goal: true };
+  renderTimeline();
+  rebuildAvatar();
+  renderPanel();
+}
 function partPanel(k) {
-  if (k === 'overall') {
-    const m = cur();
-    return `<h2>Overall</h2>${['bf', 'weight', 'lean_kg'].map((x) => metricBlock(x)).join('')}
-      <details><summary>More numbers</summary>
-        <table>${['fat_kg', 'ffmi', 'whtr', 'whr'].map((x) => `<tr><td>${META[x].label}</td><td>${fmt(x, m[x])}</td></tr>`).join('')}</table>
-        ${healthTable()}
-        <p class="muted">Body fat uses the US Navy circumference formula on your fitted body. Expect ±3–4 points.</p>
-      </details>`;
-  }
   const p = S.insights.parts[k] || {};
   const breasts = k === 'chest' && S.profile?.sex === 'female' ? (() => {
     const m = cur();
@@ -526,7 +545,7 @@ function partPanel(k) {
     <details><summary>Goal</summary>${goalBlock(k)}</details>`;
 }
 function logItem(l) {
-  const txt = l.kind === 'reference' ? '🔬 Reference: ' + REFS.filter(([k]) => l[k] != null).map(([k, label, u]) => `${label} ${refText(l[k], u)}`).join(' · ')
+  const txt = l.kind === 'reference' ? '🔬 Reference measurements (see the console)'
     : l.kind === 'workout'
     ? `🏋️ ${l.type} · ${l.minutes} min${l.focus?.length ? ' · ' + l.focus.join(', ') : ''}${l.notes ? ' · ' + l.notes : ''}`
     : '📋 ' + [l.weight && fmt('weight', l.weight), l.kcal && `${Math.round(l.kcal)} kcal`, l.protein && `${Math.round(l.protein)} g protein`,
@@ -593,64 +612,24 @@ async function runPlan() {
   rebuildAvatar();
 }
 const EYES = ['brown', 'brownlight', 'blue', 'deepblue', 'bluegreen', 'green', 'grey', 'lightblue', 'ice'];
-function pairBlock() {
-  if (!S.sync.url) return '<p class="muted">Run <code>tailscale serve --bg --https=8443 http://127.0.0.1:8765</code> so your iPhone can reach BodyLab, then reload.</p>';
-  const link = `bodylab://pair?server=${encodeURIComponent(S.sync.url)}&token=${encodeURIComponent(S.sync.token)}`;
-  return `<div class="qr" title="Pairing code">${renderSVG(link, { pixelSize: 4 })}</div>
-    <p class="muted">Scan with the iPhone Camera to pair the BodyLab app. Apple Health fills in your height, sex and age, then keeps everything flowing in.</p>`;
-}
 function settingsPanel() {
-  const p = S.profile || {}, imp = p.units ? imperial() : true, first = !p.height_cm;
-  const h = p.height_cm ? (imp ? p.height_cm / 2.54 : p.height_cm).toFixed(1) : '';
-  const opt = (value, label, on) => `<option value="${value}" ${on ? 'selected' : ''}>${label}</option>`;
-  return `<h2>${first ? 'Welcome to BodyLab' : 'Settings'}</h2>
-    ${first ? `<p>Install the BodyLab app on your iPhone and scan this code. Everything about you comes from Apple Health and the app.</p>${pairBlock()}`
-    : `<p class="muted">${[h && `${h} ${imp ? 'in' : 'cm'}`, p.sex, p.birth_date && `born ${esc(p.birth_date)}`, imp ? 'imperial units' : 'metric units'].filter(Boolean).join(' · ')}
-       — from Apple Health and your phone.</p>`}
-    <details><summary>Your look</summary>
-      <div class="row" style="justify-content:flex-start">${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
-        <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
-        ${S.face ? '<button type="button" class="link" data-delface="1">remove</button>' : ''}</div>
-      <p class="muted">Straight on, even light, neutral face, mouth closed. Sets your face, skin, eyes and hair.</p>
-      <form id="fLook" class="stack"><div class="grid2">
-        <label>Hair<select name="hair">${[['none', 'None'], ...Object.entries(HAIRS)].map(([k, v]) => opt(k, v, look.hair === k)).join('')}</select></label>
-        <label>Hair colour<input type="color" name="hair_color" value="${esc(p.hair_color ?? look.auto?.hair ?? '#3b2a20')}"></label>
-        <label>Eyes<select name="eye_color">${opt('auto', S.face ? 'From photo' : 'Brown', !p.eye_color || p.eye_color === 'auto')}${EYES.map((e) => opt(e, e, p.eye_color === e)).join('')}</select></label>
-        ${S.face ? '' : `<label>Skin tone<input type="color" name="skin" value="${esc(p.skin ?? '#c99478')}"></label>`}
-      </div><button>Save look</button></form></details>
-    ${inApp ? '' : `<details><summary>Camera</summary>
-      <form id="fCamera" class="stack">
-        <label>Camera URL<input name="camera_url" value="${esc(p.camera_url ?? '')}" placeholder="http://&lt;pi-tailscale-ip&gt;:8000/stream.mjpg"></label>
-        <label>Rotation<select name="rotate">${[0, 90, 180, 270].map((r) => opt(r, r ? r + '° clockwise' : 'None', (p.rotate ?? 0) === r)).join('')}</select></label>
-        <label>Second camera URL (optional: another angle on the same spot)<input name="camera2_url" value="${esc(p.camera2_url ?? '')}" placeholder="http://&lt;tailscale-ip&gt;:8000/stream.mjpg"></label>
-        <label>Second camera rotation<select name="rotate2">${[0, 90, 180, 270].map((r) => opt(r, r ? r + '° clockwise' : 'None', (p.rotate2 ?? 0) === r)).join('')}</select></label>
-        <label class="check"><input type="checkbox" name="bare_only" ${p.bare_only === false ? '' : 'checked'}> Only measure bare skin (underwear is fine): clothes inflate measurements</label>
-        <label>Preview<select name="preview">${opt('silhouette', 'Silhouette only (private)', p.preview !== 'camera')}${opt('camera', 'Camera image (for aiming)', p.preview === 'camera')}</select></label>
-        <button>Save</button></form>
-      <p class="muted">Only you are measured (your face must match your photo; one person in view). Frames are never stored, unless you turn on reference images under Developer.</p>
-      <button type="button" id="clear">Discard today's measurements</button></details>
-    ${first ? '' : `<details><summary>iPhone and Apple Health</summary>${pairBlock()}</details>`}`}
-    ${inApp ? '' : `<details><summary>Developer</summary>
-      <p class="muted">For tuning BodyLab's measuring. Nothing here changes your numbers.</p>
-      <label class="check"><input type="checkbox" id="refImages" ${p.reference ? 'checked' : ''}> Save reference images: the best frames of you
-        from every angle (cropped to you), up to 1 GB on this Mac. ${S.reference_images ? `${S.reference_images} saved.` : ''}</label>
-      ${S.skin ? `<p class="muted">Skin baked from ${S.skin.captures} captures, ${Math.round(S.skin.seen * 100)} % of the body seen${S.skin.seen < 0.5 ? ' (shown from 50 %)' : ''}.</p>` : ''}
-      <form id="fRef" class="stack"><div class="grid2">${REFS.filter(([k]) => !(k === 'ref_underbust' && p.sex !== 'female') && !(k.startsWith('ref_penis') && p.sex === 'female'))
-        .map(([k, label, u]) => `<label>${label} (${u === '%' ? '%' : uLabel(u)})<input name="${k}" type="number" step="any"></label>`).join('')}</div>
-        <button>Save reference measurements</button></form></details>`}`;
+  return `<h2>Settings</h2><div class="row" style="justify-content:flex-start">
+      ${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
+      <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
+      ${S.face ? '<button type="button" class="link" data-delface="1">remove</button>' : ''}</div>
+    <p class="muted">Straight on, even light, neutral face, mouth closed. Sets your face, skin, eyes and hair.</p>`;
 }
-const refText = (v, u) => (u === '%' ? `${v}%` : `${+toUnit(v, u).toFixed(1)} ${uLabel(u)}`);
 function renderPanel() {
   if (!view) return ($('#panel').hidden = true);
   $('#panel').hidden = false;
   $('#pbody').innerHTML = view.part ? partPanel(view.part)
-    : { progress: progressPanel, whatif: whatifPanel, settings: settingsPanel }[view.tab]();
+    : { progress: progressPanel, whatif: whatifPanel, settings: settingsPanel, goal: goalPanel }[view.tab]();
   if (view.tab === 'whatif') runPlan();
   document.querySelectorAll('#nav button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.tab === view.tab));
 }
 function open(v) {
   if (v?.part || (!v && view?.part)) focusOn(v?.part);
-  if (view?.tab === 'whatif' && v?.tab !== 'whatif') { predicted = null; renderTimeline(); rebuildAvatar(); }
+  if ((view?.tab === 'whatif' || view?.tab === 'goal') && v?.tab !== view.tab) { predicted = null; renderTimeline(); rebuildAvatar(); }
   view = v;
   selectedPart = v?.part && v.part !== 'overall' ? v.part : null;
   renderPanel();
@@ -675,23 +654,16 @@ $('#panel').addEventListener('change', async (e) => {
     toast('Face photo saved ✓');
     return refresh();
   }
-  if (e.target.id === 'refImages') {
-    await api('POST', '/api/profile', { reference: e.target.checked });
-    toast(e.target.checked ? 'Saving reference images' : 'Reference images off (saved ones kept)');
-  }
 });
 $('#panel').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target, fd = new FormData(f), o = Object.fromEntries(fd);
   try {
-    if (f.id === 'fLook') await api('POST', '/api/profile', o);
-    else if (f.id === 'fCamera') await api('POST', '/api/profile', { ...o, bare_only: fd.has('bare_only') });
-    else if (f.id === 'fRef') {
-      await api('POST', '/api/logs', { kind: 'reference', ...Object.fromEntries(Object.entries(o).filter(([, v]) => v !== '')
-        .map(([k, v]) => [k, fromUnit(+v, REFS.find(([r]) => r === k)[2])])) });
-      f.reset();
-    }
-    else if (f.id === 'fGoal' || f.dataset.goal) {
+    if (f.id === 'fGoalBody') {
+      await api('POST', '/api/goals', { metric: 'weight', target: fromUnit(+o.weight, 'kg') });
+      if (o.bf !== '') await api('POST', '/api/goals', { metric: 'bf', target: +o.bf });
+      else if (S.goals.bf) await api('DELETE', '/api/goals/bf'); // empty: the recommended body fat
+    } else if (f.id === 'fGoal' || f.dataset.goal) {
       const k = f.dataset.goal || o.metric;
       await api('POST', '/api/goals', { metric: k, target: fromUnit(+o.target, META[k].unit) });
     }
@@ -700,11 +672,7 @@ $('#panel').addEventListener('submit', async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 $('#panel').addEventListener('click', async (e) => {
-  if (e.target.id === 'clear') {
-    if (!confirm("Discard everything measured today? Earlier days aren't touched.")) return;
-    await api('POST', '/api/clear-today', {});
-    return toast("Today's measurements cleared");
-  }
+  if (e.target.id === 'showGoal') return showGoal().catch((err) => toast(err.message, true));
   const b = e.target.closest('button[data-dellog],button[data-delscan],button[data-delgoal],button[data-delface]');
   if (!b) return;
   const { dellog, delscan, delgoal, delface } = b.dataset;

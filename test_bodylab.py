@@ -109,6 +109,9 @@ assert M.hair_style(buzz, photo, face)['style'] == 'short04'
 assert abs(M.ellipse(10, 10) - math.pi * 10) < 1e-9
 assert abs(M.navy_bf('male', 178, 38, 86, 0) - 17.2) < .1
 assert 'whtr' in m
+# A goal: 84 kg at 12 % from 80 kg at 20 %: 6 kg less fat, 10 kg more lean; parts follow their cm/kg.
+g = M.at_composition({'weight': 80, 'bf': 20, 'chest': 100, 'waist': 90}, 'male', 84 * .12, 84 * .88, 180)
+assert abs(g['fat_kg'] - 10.08) < .01 and abs(g['chest'] - (100 + .5 * -5.92 + .8 * 9.92)) < .01 and abs(g['waist'] - (90 - 1.1 * 5.92 + .1 * 9.92)) < .01, g
 
 # Insights: steady 0.1 %/day drop toward a goal projects an ETA; weekly table has 8 rows.
 now = time.time()

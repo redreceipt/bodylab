@@ -265,9 +265,9 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
 
 
 def arm_directions(frames):
-    """How you hold your arms when standing: median unit vectors of the upper arm and forearm in your body's frame
-    (Anny axes: x your left, y back, z up), left arm (right arm mirrored), from MediaPipe's 3D landmarks of frames
-    facing the camera within 35°. None without enough frames."""
+    """How your arms hang when relaxed: median unit vectors of the upper arm and forearm in your body's frame (Anny
+    axes: x your left, y back, z up), left arm (right arm mirrored), from MediaPipe's 3D landmarks of frames facing
+    the camera within 35° whose arm hangs (elbow nearly straight, hand below the hips). None without enough frames."""
     ups, fores = [], []
     for f in frames:
         if abs(f['theta']) > 35:
@@ -280,9 +280,12 @@ def arm_directions(frames):
         left /= np.linalg.norm(left)
         frame = np.stack([left, np.cross(up, left), up])  # rows: x left, y back, z up
         for s, e, h, m in ((11, 13, 15, 1), (12, 14, 16, -1)):
-            for a, b, out in ((s, e, ups), (e, h, fores)):
-                v = frame @ (w[b] - w[a])
-                out.append(v / np.linalg.norm(v) * [m, 1, 1])
+            u, fo = frame @ (w[e] - w[s]), frame @ (w[h] - w[e])
+            u, fo = u / np.linalg.norm(u), fo / np.linalg.norm(fo)
+            if u @ fo < math.cos(math.radians(25)) or (frame @ (w[h] - w[[23, 24]].mean(0)))[2] > 0:
+                continue  # not hanging: elbow bent (hands on hips, phone in hand) or hand above the hips
+            ups.append(u * [m, 1, 1])
+            fores.append(fo * [m, 1, 1])
     if len(ups) < 10:
         return None
     return [np.median(np.array(x), 0) / np.linalg.norm(np.median(np.array(x), 0)) for x in (ups, fores)]

@@ -211,6 +211,18 @@ def median(frames):
     return out
 
 
+def console_state():
+    """What the developer console shows beyond the app's state: the latest fit, today's frames, reference images."""
+    c, refs = db(), sorted(reference_dir().glob('*.jpg'), key=lambda p: p.stat().st_mtime) if reference_dir().exists() else []
+    f = c.execute('select day, params from fits order by day desc limit 1').fetchone()
+    info = json.loads(f['params']) if f else None
+    frames = c.execute("select coalesce(json_extract(data, '$.cam'), 0), count(*) from frames where ts >= ? group by 1",
+                       (day_start(time.time()),)).fetchall()
+    return {'fit_info': info and {'day': f['day'], **{k: info.get(k) for k in ('frames', 'fit', 'phenotypes', 'tape')}},
+            'frames_today': {r[0]: r[1] for r in frames}, 'weight': (weights(get_logs()) or [(0, None)])[-1][1],
+            'references': {'count': len(refs), 'mb': sum(p.stat().st_size for p in refs) / 2 ** 20, 'latest': [p.name for p in refs[-24:][::-1]]}}
+
+
 def app_state():
     prof, logs, c = get_profile(), get_logs(), db()
     goals = {r['metric']: {'target': r['target'], 'start': r['start'], 'ts': r['ts']} for r in c.execute('select * from goals')}
@@ -234,7 +246,8 @@ def app_state():
         face.pop('embedding', None)  # stays server-side
     sync = f'https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else None
     return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': sync},
-            'face': face, 'hidden_scans': hidden, 'reference_images': len(list(reference_dir().glob('*.jpg'))),
+            'face': face, 'hidden_scans': hidden, 'recommended_bf': measure.RECOMMENDED_BF[(prof or {}).get('sex') or 'male'],
+            **console_state(), 'reference_images': len(list(reference_dir().glob('*.jpg'))),
             'skin_baked': (DB_PATH.parent / 'skin.jpg').stat().st_mtime if (DB_PATH.parent / 'skin.jpg').exists() else None,
             'skin': json.loads((DB_PATH.parent / 'skin.json').read_text()) if (DB_PATH.parent / 'skin.json').exists() else None,
             'insights': measure.insights(scans, logs, goals)}
@@ -755,9 +768,14 @@ def post_predict(b):
     if not m['weight']:
         raise ValueError('Needs a recent weigh-in (log one, or sync a smart scale through Apple Health)')
     sex = prof.get('sex', 'male')
-    out = measure.predict(m, sex, int(num(b.get('weeks', 12), 1, 104, 'weeks')), num(b.get('kcal', 0), -1500, 1500, 'kcal'),
-                          num(b.get('strength', 0), 0, 7, 'strength'), num(b.get('protein', 1.2), .5, 3.5, 'protein'),
-                          prof['height_cm'], measure.personal_slopes(st['scans'], sex))
+    if 'goal_weight' in b:  # your goal: that weight at that body fat
+        w, bf = num(b['goal_weight'], 30, 300, 'goal weight'), num(b.get('goal_bf', measure.RECOMMENDED_BF[sex]), 3, 60, 'goal body fat')
+        out = {'m': measure.at_composition(m, sex, w * bf / 100, w * (1 - bf / 100), prof['height_cm'],
+                                           measure.personal_slopes(st['scans'], sex)), 'warning': None}
+    else:
+        out = measure.predict(m, sex, int(num(b.get('weeks', 12), 1, 104, 'weeks')), num(b.get('kcal', 0), -1500, 1500, 'kcal'),
+                              num(b.get('strength', 0), 0, 7, 'strength'), num(b.get('protein', 1.2), .5, 3.5, 'protein'),
+                              prof['height_cm'], measure.personal_slopes(st['scans'], sex))
     dims = dict(scan['dims'])  # the predicted body: each part's width and depth scaled by its circumference change
     for part in [*measure.TORSO, *measure.LIMBS]:
         if part in m and part in out['m'] and m[part]:
@@ -811,8 +829,10 @@ class Handler(BaseHTTPRequestHandler):
         if not (self.token_ok() or self.allowed()):  # the paired iPhone, or you in the browser
             return
         path = urlparse(self.path).path
-        if path == '/':
-            path = '/static/index.html'
+        if path == '/':  # this Mac's developer console; the app (iPhone) asks for ?app=1
+            path = '/static/index.html' if 'app' in parse_qs(urlparse(self.path).query) else '/static/console.html'
+        if re.fullmatch(r'/api/reference/[\w.-]+\.jpg', path) and (reference_dir() / path.rsplit('/', 1)[1]).exists():
+            return self.send(200, (reference_dir() / path.rsplit('/', 1)[1]).read_bytes(), 'image/jpeg')
         if path == '/api/state':
             return self.reply(app_state())
         if path == '/api/status':
