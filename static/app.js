@@ -183,10 +183,24 @@ function fabric() {
   x.fillStyle = '#7d838c'; x.fillRect(0, 1.0 * px, 256, 2); x.fillRect(3.4 * px, 0, 2, 256); // stitches
   return Object.assign(new THREE.CanvasTexture(c), { colorSpace: THREE.SRGBColorSpace, flipY: false, anisotropy: 8 });
 }
+// Skin scatters light under its surface: diffuse light wraps past the shadow line, red furthest (a cheap stand-in
+// for subsurface scattering), so shading turns soft and warm instead of plastic. Specular highlights are untouched.
+function scatter(material) {
+  const chunk = THREE.ShaderChunk.lights_physical_pars_fragment, line = 'reflectedLight.directDiffuse += irradiance * diffuseBRDF * ( 1.0 - F );';
+  if (!chunk.includes(line)) return material; // a three.js update changed the chunk: plain shading
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace('#include <lights_physical_pars_fragment>', chunk.replace(line, `
+      float ndlSkin = dot( geometryNormal, directLight.direction );
+      vec3 wrapSkin = saturate( ( vec3( ndlSkin ) + vec3( 0.5, 0.28, 0.18 ) ) / vec3( 1.5, 1.28, 1.18 ) );
+      reflectedLight.directDiffuse += wrapSkin * directLight.color * diffuseBRDF * ( 1.0 - F );`));
+  };
+  material.customProgramCacheKey = () => 'skin-scatter';
+  return material;
+}
 const mats = {
   // Skin: soft specular, a warm sheen standing in for light scattering under the skin, pores for micro-detail.
-  skin: new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.52, specularIntensity: 0.45, sheen: 0.35, sheenRoughness: 0.55,
-    sheenColor: '#ff9a7a', normalMap: poreNormals(), normalScale: new THREE.Vector2(0.35, 0.35) }),
+  skin: scatter(new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.52, specularIntensity: 0.45, sheen: 0.25, sheenRoughness: 0.55,
+    sheenColor: '#ff9a7a', normalMap: poreNormals(), normalScale: new THREE.Vector2(0.35, 0.35) })),
   // Additive glow over the selected / hovered part, so the skin itself stays untouched.
   selected: glowMaterial(0.45), hovered: glowMaterial(0.25),
   hair: strands(null, '#3b2a20'), brows: strands(texture('/static/assets/eyebrow001.png'), '#3b2a20'),
@@ -417,12 +431,12 @@ function pick(e) {
 const canvas = renderer.domElement;
 let downAt = null;
 canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerType !== 'mouse') return; // touch has no hover: a finger would leave a part lit
   const p = pick(e), tip = $('#tip');
   if (p !== hovered) { hovered = p; paint(); }
   canvas.style.cursor = p ? 'pointer' : 'grab';
   if (!p) return (tip.style.display = 'none');
-  const k = p === 'overall' ? 'bf' : p;
-  tip.innerHTML = `<b>${p === 'overall' ? 'Overall' : META[p].label}</b> · ${fmt(k, cur()[k])}`;
+  tip.innerHTML = `<b>${META[p].label}</b> · ${fmt(p, cur()[p])}`;
   Object.assign(tip.style, { display: 'block', left: e.clientX + 14 + 'px', top: e.clientY + 14 + 'px' });
 });
 canvas.addEventListener('pointerdown', (e) => (downAt = [e.clientX, e.clientY]));
@@ -430,7 +444,9 @@ canvas.addEventListener('pointerup', (e) => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
   const p = pick(e);
   if (p) open({ part: p });
+  else if (view?.part) open(null); // tapping off the body lets go of the part
 });
+canvas.addEventListener('pointerleave', () => { if (hovered) { hovered = null; paint(); } $('#tip').style.display = 'none'; });
 
 // ---------- main screen: summary, today, timeline ----------
 const LOGGED = new Set(['weight']);
@@ -457,10 +473,8 @@ function goalNumbers() {
 function renderHud() {
   const m = cur(), w = valueOf('weight'), g = goalNumbers();
   $('#summary').innerHTML = m.bf != null
-    ? `<div class="row"><div><div class="k">Body fat</div><div class="v">${fmt('bf', m.bf)}</div></div>
-         <div><div class="k">Weight</div><div class="v">${w != null ? fmt('weight', w) : '—'}</div></div></div>
-       <div class="muted">${g ? `Goal ${fmt('weight', g.gw)} at ${fmt('bf', g.gbf)}: ${fmt('lean_kg', g.lean, true)} muscle, ${fmt('fat_kg', g.fat, true)} fat`
-         : 'Tap to set a goal'}</div>`
+    ? `<div class="k">Body fat</div><div class="v">${fmt('bf', m.bf)}</div>
+       <div class="muted">${[w != null && fmt('weight', w), g ? `goal ${fmt('weight', g.gw)}` : 'set a goal'].filter(Boolean).join(' · ')}</div>`
     : '<div class="k">Your body</div><div class="muted">No estimate yet. Walk past the camera — every view helps.</div>';
   $('#today').innerHTML = todayCard();
 }

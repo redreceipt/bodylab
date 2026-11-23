@@ -17,6 +17,8 @@ import numpy as np
 ROOT = Path(__file__).parent
 os.environ.setdefault('ANNY_CACHE_DIR', str(ROOT / 'models' / 'anny'))
 MIN_FRAMES = 30
+KP_SHAPE = .3  # landmarks' weight once frames are posed
+KP_FREE = ('left_shoulder', 'right_shoulder', 'left_hip', 'right_hip')  # ...and none for these: the outline places those edges
 DENSITY = 1.04  # kg/L of a whole body including the air in the lungs (tissue alone ~1.06)
 
 # COCO keypoint -> MediaPipe pose landmark
@@ -127,12 +129,21 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     bd = torch.tensor(np.array([borders(np.array(f['sil']['c'])) for f in frames]), dtype=torch.float32, device=dev) * H
     knee = [float(np.mean(np.array(f['sil']['l'])[[25, 26], 1])) for f in frames]
     covered = lambda f, k: (f.get('skin', {}).get(k) if f.get('skin', {}).get(k) is not None else 1) < .5  # noqa: E731
-    band = torch.tensor([[.04, np.inf if covered(f, 'shins') else kn if covered(f, 'thighs') else .04]
+    # Older frames without per-point clothing: shorts cover from just above the hip line (their bulk would widen your
+    # hips) to the knees; trousers to the feet.
+    band = torch.tensor([[-.02, np.inf if covered(f, 'shins') else kn if covered(f, 'thighs') else -.02] if 'off' not in f['sil'] else [0, 0]
                          for f, kn in zip(frames, knee)], dtype=torch.float32, device=dev) * H
     in_view = lambda p: ((p[..., 0] > bd[:, None, 0] + .01) & (p[..., 0] < bd[:, None, 1] - .01)  # noqa: E731
                          & (p[..., 1] > bd[:, None, 2] + .01) & (p[..., 1] < bd[:, None, 3] - .01)
                          & ~((p[..., 1] > band[:, None, 0]) & (p[..., 1] < band[:, None, 1])))
-    edge_ok = in_view(C)  # outline points on an image edge aren't body edges
+    off = torch.tensor([f['sil'].get('off', [0] * len(f['sil']['c'])) for f in frames], device=dev) > 0
+    # Forearms and hands: hanging by the hips they merge with the torso's outline, and wherever the posed arm is a
+    # little off the torso would grow to cover it. Near them (7 cm), the outline says nothing about the body.
+    el, wr = L[:, [5, 6]], L[:, [7, 8]]
+    hand = wr + (wr - el) / (wr - el).norm(dim=-1, keepdim=True).clamp_min(1e-6) * .1 * H
+    arm_a, arm_b = torch.cat([el, wr], 1), torch.cat([wr, hand], 1)
+    near_arm = lambda p: seg_dist2(p, arm_a, arm_b).min(-1).values < (.04 * H) ** 2  # noqa: E731
+    edge_ok = in_view(C) & ~off & ~near_arm(C)  # nor are outline points on an image edge, clothes or hair
     kp_ok = in_view(L).float()
 
     # Shape (shared) and pose (per frame).
@@ -179,6 +190,7 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     a, b = C, torch.roll(C, -1, 1)
 
     use = torch.ones(B, device=dev)  # frames the shape is fitted to
+    kp_shape = torch.tensor([0 if k in KP_FREE else KP_SHAPE for k in KP], device=dev)
     # shortcut: linear maps from body fat % and fat-free mass index to Anny's fat and muscle axes, eyeballed on its
     # renders (lean ~10 % men show definition near muscle .65 / fat .3); refine against reference captures.
     off = (10, 3) if female else (0, 0)
@@ -191,7 +203,10 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
         k2, v2 = k3[..., :2], v3[..., :2]
         # 2D landmarks where they're in view; 3D landmarks (scale-free) for depth and turn.
         e_kp = ((k2 - L) ** 2).sum(-1).mul(kp_ok)
-        l_kp = (e_kp * use[:, None]).sum() / (kp_ok * use[:, None]).sum()
+        # Once each frame is posed, MediaPipe's shoulder and hip points (not quite where the body's edges are) mustn't
+        # pull the shape: the outline decides it.
+        kw = kp_shape if stage else torch.ones(len(KP), device=dev)
+        l_kp = (e_kp * use[:, None] * kw).sum() / (kp_ok * use[:, None] * kw).sum()
         w = Wt * (k3.norm(dim=-1).mean(1) / Wt.norm(dim=-1).mean(1))[:, None, None]
         l_3d = (((k3 - w) ** 2).sum(-1).mean(1) * use).sum() / use.sum()
         rest = out['rest_vertices'][0]
@@ -208,7 +223,7 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
         if stage:
             # Mesh outside the outline (where the camera sees) is too big; outline nowhere near the mesh is too small.
             d2 = seg_dist2(v2, a, b).min(-1).values
-            out_m = (~inside(v2, a, b) & in_view(v2)).float() * use[:, None]
+            out_m = (~inside(v2, a, b) & in_view(v2) & ~near_arm(v2)).float() * use[:, None]
             l_out = (d2 * out_m).sum() / use.sum() / v2.shape[1]
             near = ((C[:, :, None] - v2[:, None]) ** 2).sum(-1).min(-1).values
             l_in = (near * edge_ok * use[:, None]).sum() / (edge_ok * use[:, None]).sum()
@@ -252,6 +267,11 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
         res = {'phenotypes': {k: round(torch.sigmoid(v).item(), 4) for k, v in phen.items()} | {'age': round(age_p, 4)},
                'local': {k: round(v, 4) for k, v in zip(labels, (torch.tanh((local + local[mirror]) / 2) * local_on).tolist()) if abs(v) > 1e-3},
                'fit': {k: round(v, 2) for k, v in parts.items()}, 'neck_axis': neck, 'limb_axes': limbs}
+        # Each camera's outline error (cm, median over its frames used): one drifting (bumped, refocused) shows here.
+        cams, kept = np.array([f.get('cam', 0) for f in frames]), use.cpu().numpy() > 0
+        res['fit_cams'] = {int(c): round(float(np.median(e_sil.cpu().numpy()[(cams == c) & kept])) * 100, 2)
+                           for c in set(cams.tolist()) if ((cams == c) & kept).any()}
+        res['dropped'] = int(B - kept.sum())
         if plot:
             draw(plot, frames, C.cpu().numpy(), out['vertices'], model, verts, project, out)
         fixed = shape(1)  # computed without gradients: the stance only moves bones
@@ -261,40 +281,14 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
             q = (v - k3[9:11].mean(0)) * torch.exp(cam[j, 0])
             q[:, :2] += cam[j, 1:]
             views[j] = q.cpu().numpy()
-    return res, rest, stance(model, fixed, kreg, arm_directions(frames)), views
+    return res, rest, stance(model, fixed, kreg), views
 
 
-def arm_directions(frames):
-    """How your arms hang when relaxed: median unit vectors of the upper arm and forearm in your body's frame (Anny
-    axes: x your left, y back, z up), left arm (right arm mirrored), from MediaPipe's 3D landmarks of frames facing
-    the camera within 35° whose arm hangs (elbow nearly straight, hand below the hips). None without enough frames."""
-    ups, fores = [], []
-    for f in frames:
-        if abs(f['theta']) > 35:
-            continue
-        w = np.array(f['sil']['w'])
-        up = w[[11, 12]].mean(0) - w[[23, 24]].mean(0)
-        up /= np.linalg.norm(up)
-        left = w[23] - w[24]
-        left -= left @ up * up
-        left /= np.linalg.norm(left)
-        frame = np.stack([left, np.cross(up, left), up])  # rows: x left, y back, z up
-        for s, e, h, m in ((11, 13, 15, 1), (12, 14, 16, -1)):
-            u, fo = frame @ (w[e] - w[s]), frame @ (w[h] - w[e])
-            u, fo = u / np.linalg.norm(u), fo / np.linalg.norm(fo)
-            if u @ fo < math.cos(math.radians(25)) or (frame @ (w[h] - w[[23, 24]].mean(0)))[2] > 0:
-                continue  # not hanging: elbow bent (hands on hips, phone in hand) or hand above the hips
-            ups.append(u * [m, 1, 1])
-            fores.append(fo * [m, 1, 1])
-    if len(ups) < 10:
-        return None
-    return [np.median(np.array(x), 0) / np.linalg.norm(np.median(np.array(x), 0)) for x in (ups, fores)]
-
-
-def stance(model, shape, kreg, arms=None):
-    """Bone transforms (posed × rest⁻¹, Anny frame) for your relaxed stance: arms held the way you hold them (arms:
-    arm_directions(); else hanging ~12° out, a slight bend), never inside the hips; palms toward the thighs; a relaxed
-    curl in the fingers. The shoulder bone shares the arm's turn so the deltoid keeps its shape."""
+def stance(model, shape, kreg):
+    """Bone transforms (posed × rest⁻¹, Anny frame) for a natural relaxed stance: arms hanging 7° out, elbows a little
+    bent with the forearm's natural outward carrying angle, never inside the hips; palms toward the thighs; fingers
+    together with a slight curl. The shoulder bone shares the arm's turn so the deltoid keeps its shape. (Your own arm
+    angles from MediaPipe's 3D landmarks were too noisy to look natural.)"""
     import roma
     import torch
     dev = shape['local_changes_kwargs'].device
@@ -343,11 +337,27 @@ def stance(model, shape, kreg, arms=None):
                             curl[b] = e * sign * .4
                             d = run()['vertices'][0][end].mean(0) - V0[end].mean(0)
                             best = max(best, (-d[2].item() - 2 * abs((d @ across).item()), e * sign), key=lambda x: x[0])
-                    curl[b] = best[1] * math.radians(deg) * (1 / 3 if f == 1 else 1)
+                    curl[b] = best[1] * math.radians(deg) * (1 / 3 if f == 1 else .8)
         tips = [(part(f'finger1-3.{s}'), part(f'finger5-3.{s}')) for s in 'LR']  # thumb, little finger
-        if arms is None:
-            a, b = math.radians(12), math.radians(20)
-            arms = [np.array([math.sin(a), 0, -math.cos(a)]), np.array([math.sin(a), -math.sin(b), -math.cos(b)])]
+        unit = lambda v: np.array(v) / np.linalg.norm(v)  # noqa: E731  x out (your left), y back, z up
+        r = math.radians
+        arms = [unit([math.tan(r(7)), -math.tan(r(3)), -1]), unit([math.tan(r(9)), -math.tan(r(12)), -1])]
+        for s in 'LR':  # fingers together: each one turns about the local axis that brings it toward the middle finger
+            mid = V0[part(f'finger3-3.{s}')].mean(0) - V0[part(f'finger3-1.{s}')].mean(0)
+            for f in (2, 4, 5):
+                b = model.bone_labels.index(f'finger{f}-1.{s}')
+                end, base = part(f'finger{f}-3.{s}'), part(f'finger{f}-1.{s}')
+                d0 = V0[end].mean(0) - V0[base].mean(0)
+                splay = torch.arccos(torch.clamp(d0 @ mid / d0.norm() / mid.norm(), -1, 1)).item()
+                best, curl0 = (-1e9, None), curl.get(b, torch.zeros(3, device=dev))
+                for e in torch.eye(3, device=dev):
+                    for sign in (1, -1):
+                        curl[b] = curl0 + e * sign * .2
+                        V1 = run()['vertices'][0]
+                        d1 = V1[end].mean(0) - V1[base].mean(0)
+                        closer = splay - torch.arccos(torch.clamp(d1 @ mid / d1.norm() / mid.norm(), -1, 1)).item()
+                        best = max(best, (closer - abs((V1[end].mean(0) - V0[end].mean(0))[2].item()), e * sign), key=lambda x: x[0])
+                curl[b] = curl0 + best[1] * .6 * splay
         targets = []
         for side, (s, e, w) in ((1, (3, 5, 7)), (-1, (4, 6, 8))):  # KP order: shoulders 3/4, elbows 5/6, wrists 7/8
             S, Lu, Ll = k[s], (k[e] - k[s]).norm(), (k[w] - k[e]).norm()
@@ -456,7 +466,7 @@ def restance(db, day, frames, prof):
     for k, v in res['local'].items():
         lc[0, model.local_change_labels.index(k)] = v
     p = {k: torch.tensor([v]) for k, v in res['phenotypes'].items()} | {'gender': torch.tensor([1. if prof.get('sex') == 'female' else 0.])}
-    G = stance(model, {'phenotype_kwargs': p, 'local_changes_kwargs': lc}, anny.KeypointsRegressor.coco(model, labels=list(KP)), arm_directions(frames))
+    G = stance(model, {'phenotype_kwargs': p, 'local_changes_kwargs': lc}, anny.KeypointsRegressor.coco(model, labels=list(KP)))
     rest = model(pose_parameters=torch.eye(4)[None, None].repeat(1, model.bone_count, 1, 1), phenotype_kwargs=p,
                  local_changes_kwargs=lc)['rest_vertices'][0].detach().numpy()
     store(db, day, res, rest, G)
@@ -483,7 +493,7 @@ def bake_skin(db, prof, views):
     import cv2
     import bake
     H = prof['height_cm'] / 100
-    src, uv, tris = bake.assets()
+    src, uv, tris, head = bake.assets()
     vs = []
     for ts, (path, cam3) in views.items():
         if not path.exists():  # replaced by a better capture meanwhile
@@ -496,7 +506,7 @@ def bake_skin(db, prof, views):
         vs.append({'img': img, 'px': px, 'cam': cam3, 'skin': bake.skin_mask(img), 'weight': info.get('score', 1)})
     if not vs:
         return
-    tex, cover = bake.bake(vs, src, uv, tris, base=cv2.imread(str(ROOT / f"static/assets/skin_{prof.get('sex', 'male')}.jpg")))
+    tex, cover = bake.bake(vs, src, uv, tris, base=cv2.imread(str(ROOT / f"static/assets/skin_{prof.get('sex', 'male')}.jpg")), skip=head)
     ys, xs = bake.texels(uv, tris, 256)[:2]
     seen = cv2.resize(cover, (256, 256), interpolation=cv2.INTER_AREA)[ys, xs].mean()  # share of the body's surface, not of the image
     print(f'skin baked from {len(vs)} captures, {seen * 100:.0f} % of the body seen')

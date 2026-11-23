@@ -214,11 +214,13 @@ def median(frames):
 def console_state():
     """What the developer console shows beyond the app's state: the latest fit, today's frames, reference images."""
     c, refs = db(), sorted(reference_dir().glob('*.jpg'), key=lambda p: p.stat().st_mtime) if reference_dir().exists() else []
+    history = [{'day': r['day'], **{k: json.loads(r['params']).get(k) for k in ('frames', 'dropped', 'fit', 'fit_cams')}}
+               for r in c.execute('select day, params from fits order by day desc limit 7')]
     f = c.execute('select day, params from fits order by day desc limit 1').fetchone()
     info = json.loads(f['params']) if f else None
     frames = c.execute("select coalesce(json_extract(data, '$.cam'), 0), count(*) from frames where ts >= ? group by 1",
                        (day_start(time.time()),)).fetchall()
-    return {'fit_info': info and {'day': f['day'], **{k: info.get(k) for k in ('frames', 'fit', 'phenotypes', 'tape')}},
+    return {'fit_info': info and {'day': f['day'], **{k: info.get(k) for k in ('frames', 'fit', 'phenotypes', 'tape')}}, 'fit_history': history,
             'frames_today': {r[0]: r[1] for r in frames}, 'weight': (weights(get_logs()) or [(0, None)])[-1][1],
             'references': {'count': len(refs), 'mb': sum(p.stat().st_size for p in refs) / 2 ** 20, 'latest': [p.name for p in refs[-24:][::-1]]}}
 
@@ -417,7 +419,7 @@ class Capture:
                 msg, r['obs'] = 'Not you — BodyLab only measures the profile owner', {}
             elif bare and self.skin is None:
                 msg, r['obs'] = 'Face the camera for a moment so BodyLab can see your skin tone', {}
-            skin = cat = None
+            skin = cat = box = None
             if r['obs'] and bare:  # clothes inflate every outline: the torso must be bare (underwear is fine)
                 skin, cat, box = bare_skin(self.clothes, f, mask, pts)
                 if (skin['torso'] or 0) < .6:  # unseen isn't bare
@@ -428,7 +430,7 @@ class Capture:
                     r['obs'].pop(k, None)
             if r['obs']:
                 rec = {'ts': now, 'cam': self.cam, 'theta': round(r['theta'], 1), 'full': r['full'], 'obs': {k: round(v, 5) for k, v in r['obs'].items()},
-                       'sil': silhouette(mask, pts, world, r['origin'], r['H'])} | ({'skin': skin} if skin else {})
+                       'sil': silhouette(mask, pts, world, r['origin'], r['H'], cat=cat, box=box)} | ({'skin': skin} if skin else {})
                 if self.prof.get('reference') and now - self.last_ref > 1:
                     try:  # a developer extra: never costs the frame
                         self.last_ref, rec['jpg'] = now, reference_crop(f, mask, r, skin)  # saved only if it's you
@@ -520,15 +522,23 @@ class Capture:
         self.jpeg = cv2.imencode('.jpg', f, [cv2.IMWRITE_JPEG_QUALITY, 70])[1].tobytes()
 
 
-def silhouette(mask, pts, world, origin, H, n=160):
+def silhouette(mask, pts, world, origin, H, n=160, cat=None, box=None):
     """A scale-free outline of the body (n points along the mask's outer contour) plus the 2D and 3D landmarks,
-    relative to the hip centre in units of standing height: what fitting a full body shape needs. No image."""
+    relative to the hip centre in units of standing height: what fitting a full body shape needs. No image. With
+    the clothes segmenter's categories (cat, over the crop box): which outline points lie on clothes or hair ('off'),
+    where the outline isn't the body's."""
     contours = cv2.findContours((mask > .5).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0]
     c = max(contours, key=cv2.contourArea)[:, 0].astype(float) if contours else np.zeros((1, 2))
     seg = np.r_[0, np.cumsum(np.linalg.norm(np.diff(c, axis=0, append=c[:1]), axis=1))]
     t = np.linspace(0, seg[-1], n, endpoint=False)
     outline = np.stack([np.interp(t, seg, np.r_[c[:, k], c[0, k]]) for k in (0, 1)], 1)
-    return {'c': ((outline - origin) / H).round(4).tolist(), 'l': ((pts - origin) / H).round(4).tolist(), 'w': world.round(3).tolist()}
+    out = {'c': ((outline - origin) / H).round(4).tolist(), 'l': ((pts - origin) / H).round(4).tolist(), 'w': world.round(3).tolist()}
+    if cat is not None:  # a few px inside the outline: clothes (4) or hair (1) there means it's not the body's edge
+        centre = np.array(c.mean(0))
+        inner = outline + (centre - outline) / np.maximum(np.linalg.norm(centre - outline, axis=1, keepdims=True), 1) * 6
+        q = np.clip(np.round(inner - [box[2], box[0]]).astype(int), 0, [cat.shape[1] - 1, cat.shape[0] - 1])
+        out['off'] = np.isin(cat[q[:, 1], q[:, 0]], (1, 4)).astype(int).tolist()
+    return out
 
 
 def refit_loop():

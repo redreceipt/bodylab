@@ -55,6 +55,9 @@ function fit() {
     <p class="muted">Frames today: ${Object.entries(S.frames_today).map(([c, n]) => `camera ${+c + 1}: ${n}`).join(', ') || 'none'}.
       ${f ? `Fit ${esc(f.day)} from ${f.frames} frames; outline within ${f.fit?.out?.toFixed(1)} / ${f.fit?.in?.toFixed(1)} cm (mesh outside / outline unreached); body ${kg(f.fit?.kg)}; muscle ${f.phenotypes?.muscle?.toFixed(2)}, fat ${f.phenotypes?.weight?.toFixed(2)}.` : 'No body fit yet.'}</p>
     <table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>
+    ${S.fit_history.length ? `<details><summary>Fit history (outline error, cm)</summary><table><tr><th>Day</th><th>Frames</th><th>Dropped</th><th>Mesh out / outline in</th><th>Per camera</th></tr>
+      ${S.fit_history.map((h) => `<tr><td>${h.day}</td><td>${h.frames ?? ''}</td><td>${h.dropped ?? ''}</td><td>${h.fit ? `${h.fit.out} / ${h.fit.in}` : ''}</td>
+        <td>${h.fit_cams ? Object.entries(h.fit_cams).map(([c, v]) => `cam ${+c + 1}: ${v}`).join(', ') : ''}</td></tr>`).join('')}</table></details>` : ''}
     <p class="muted">Skin: ${S.skin ? `baked from ${S.skin.captures} captures, ${Math.round(S.skin.seen * 100)}% of the body seen${S.skin.seen < 0.5 ? ' (used from 50%)' : ''}` : 'not baked yet'}.</p></section>`;
 }
 function references() {

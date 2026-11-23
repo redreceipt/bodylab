@@ -195,21 +195,43 @@ export function fitBody(dims, H, sex, shape = {}, fitted = null, ref = {}) {
   return { pos: out, parts: t.parts };
 }
 
-// Linear blend skinning: G = 3×4 bone transforms (posed × rest⁻¹), skin = 8 (bone, weight) bytes per vertex.
+// Dual-quaternion skinning: G = 3×4 rigid bone transforms (posed × rest⁻¹), skin = 8 (bone, weight) bytes per
+// vertex. Unlike averaging matrices (linear blend), blending rotations keeps volume at joints: shoulders and
+// elbows don't collapse when the arms come down from the rest pose's spread.
 export function pose(pos, G, skin) {
-  const out = Float32Array.from(pos), n = pos.length / 3, w = skin.subarray(n * 8);
+  const B = G.length / 12, dq = new Float32Array(B * 8);
+  for (let b = 0; b < B; b++) { // rotation matrix -> quaternion (w, x, y, z); translation -> dual part
+    const m = (r, c) => G[b * 12 + r * 4 + c], tr = m(0, 0) + m(1, 1) + m(2, 2);
+    let w, x, y, z;
+    if (tr > 0) { const s = Math.sqrt(tr + 1) * 2; w = s / 4; x = (m(2, 1) - m(1, 2)) / s; y = (m(0, 2) - m(2, 0)) / s; z = (m(1, 0) - m(0, 1)) / s; }
+    else if (m(0, 0) > m(1, 1) && m(0, 0) > m(2, 2)) { const s = Math.sqrt(1 + m(0, 0) - m(1, 1) - m(2, 2)) * 2; w = (m(2, 1) - m(1, 2)) / s; x = s / 4; y = (m(0, 1) + m(1, 0)) / s; z = (m(0, 2) + m(2, 0)) / s; }
+    else if (m(1, 1) > m(2, 2)) { const s = Math.sqrt(1 + m(1, 1) - m(0, 0) - m(2, 2)) * 2; w = (m(0, 2) - m(2, 0)) / s; x = (m(0, 1) + m(1, 0)) / s; y = s / 4; z = (m(1, 2) + m(2, 1)) / s; }
+    else { const s = Math.sqrt(1 + m(2, 2) - m(0, 0) - m(1, 1)) * 2; w = (m(1, 0) - m(0, 1)) / s; x = (m(0, 2) + m(2, 0)) / s; y = (m(1, 2) + m(2, 1)) / s; z = s / 4; }
+    const tx = m(0, 3), ty = m(1, 3), tz = m(2, 3);
+    dq.set([w, x, y, z, -0.5 * (tx * x + ty * y + tz * z), 0.5 * (tx * w + ty * z - tz * y), 0.5 * (-tx * z + ty * w + tz * x), 0.5 * (tx * y - ty * x + tz * w)], b * 8);
+  }
+  const out = Float32Array.from(pos), n = pos.length / 3, wt = skin.subarray(n * 8), q = new Float32Array(8);
   for (let i = 0; i < n; i++) {
-    const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
-    let X = 0, Y = 0, Z = 0, sum = 0;
+    q.fill(0);
+    let first = -1;
     for (let k = i * 8; k < i * 8 + 8; k++) {
-      if (!w[k]) continue;
-      const g = skin[k] * 12;
-      X += w[k] * (G[g] * x + G[g + 1] * y + G[g + 2] * z + G[g + 3]);
-      Y += w[k] * (G[g + 4] * x + G[g + 5] * y + G[g + 6] * z + G[g + 7]);
-      Z += w[k] * (G[g + 8] * x + G[g + 9] * y + G[g + 10] * z + G[g + 11]);
-      sum += w[k];
+      if (!wt[k]) continue;
+      const d = skin[k] * 8;
+      if (first < 0) first = d;
+      const sgn = dq[first] * dq[d] + dq[first + 1] * dq[d + 1] + dq[first + 2] * dq[d + 2] + dq[first + 3] * dq[d + 3] < 0 ? -1 : 1; // shortest arc
+      for (let c = 0; c < 8; c++) q[c] += sgn * wt[k] * dq[d + c];
     }
-    if (sum) { out[i * 3] = X / sum; out[i * 3 + 1] = Y / sum; out[i * 3 + 2] = Z / sum; }
+    if (first < 0) continue;
+    const len = Math.hypot(q[0], q[1], q[2], q[3]);
+    const [w, x, y, z] = [q[0] / len, q[1] / len, q[2] / len, q[3] / len], [e0, e1, e2, e3] = [q[4] / len, q[5] / len, q[6] / len, q[7] / len];
+    const px = pos[i * 3], py = pos[i * 3 + 1], pz = pos[i * 3 + 2];
+    // rotate: v + 2 r × (r × v + w v), r = (x, y, z)
+    const cx = y * pz - z * py + w * px, cy = z * px - x * pz + w * py, cz = x * py - y * px + w * pz;
+    const rx = px + 2 * (y * cz - z * cy), ry = py + 2 * (z * cx - x * cz), rz = pz + 2 * (x * cy - y * cx);
+    // translate: t = 2 (w e - e0 r + r × e), e = (e1, e2, e3)
+    out[i * 3] = rx + 2 * (w * e1 - e0 * x + y * e3 - z * e2);
+    out[i * 3 + 1] = ry + 2 * (w * e2 - e0 * y + z * e1 - x * e3);
+    out[i * 3 + 2] = rz + 2 * (w * e3 - e0 * z + x * e2 - y * e1);
   }
   return out;
 }

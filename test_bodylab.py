@@ -40,6 +40,9 @@ seated = world.copy()
 seated[[25, 26], 1], seated[[25, 26], 2] = 0, -.45  # thighs forward, level with the hips
 seated[[27, 28], 1], seated[[27, 28], 2] = .45, -.45  # shins down
 assert not M.bent(world) and M.bent(seated)
+facing_seat = pts.copy()
+facing_seat[[25, 26], 1] = pts[[23, 24], 1] + 40  # knees only a little below the hips: thighs toward the camera
+assert not M.foreshortened(pts) and M.foreshortened(facing_seat)
 r = M.observe(pts, np.ones(33), world, img / 255.0)
 assert not r['problem'] and r['full'] and r['theta'] == 0, r['problem']
 obs = r['obs']
@@ -220,6 +223,12 @@ assert kept == [.9, 1.2, 1.5], kept
 bent_over = world.copy()
 bent_over[[11, 12], 2] = -.45  # shoulders forward over the hips
 assert M.bent(bent_over)
+# Per outline point: on clothes or hair, it isn't the body's edge (the segmenter's categories over the crop box).
+cat_full = np.full((1000, 800), 2, np.uint8)
+cat_full[560:] = 4  # clothes below the waist
+sil_c = app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0, cat=cat_full, box=(0, 1000, 0, 800))
+c_y = np.array(sil_c['c'])[:, 1] * 700 + pts[23:25].mean(0)[1]
+assert len(sil_c['off']) == 160 and all(o == (y > 575) for o, y in zip(sil_c['off'], c_y) if abs(y - 560) > 15)
 # The stored silhouette is scale-free: same body twice the size gives the same outline.
 sil = app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0)
 big = app.silhouette(cv2.resize(img, None, fx=2, fy=2) / 255.0, pts * 2, world, pts[23:25].mean(0) * 2, 1400.0)

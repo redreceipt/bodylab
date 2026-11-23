@@ -93,7 +93,8 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
     if abs(down[0]) > .25:
         return fail('Leaning — only upright frames are measured')
     knees = pts[[KN_L, KN_R]].mean(0)
-    if bent(world) or (vis[[KN_L, KN_R]].min() > .5 and np.dot(knees - hp, down) < .55 * torso):  # thighs not hanging down
+    if bent(world) or (vis[[KN_L, KN_R]].min() > .5 and np.dot(knees - hp, down) < .55 * torso) or (
+            vis[[KN_L, KN_R, AN_L, AN_R]].min() > .5 and foreshortened(pts)):  # thighs not hanging, or pointing at the camera
         return fail('Sitting, crouching or bending — only standing frames are measured')
     quad = np.zeros(m.shape, np.uint8)
     cv2.fillConvexPoly(quad, np.round(pts[[SH_L, SH_R, HIP_R, HIP_L]]).astype(np.int32), 1)
@@ -191,6 +192,16 @@ def observe(pts, vis, world, mask, female=False, torso_ratio=.29, ycc=None, skin
         del obs[k]  # one misread part shouldn't cost the rest of the frame
     out['H'], out['origin'] = H, hp  # px per standing height, hip centre: to store a scale-free silhouette
     return out if obs else fail('Nothing measurable in this frame')
+
+
+def foreshortened(pts, limit=.7):
+    """Both thighs look much shorter than the shins, or one very much shorter: they point at the camera, as when
+    sitting facing it (2D, so MediaPipe's flattened depth can't hide it). Walking keeps one leg straight and never
+    lifts a thigh that far."""
+    thigh = [np.linalg.norm(pts[k] - pts[h]) for h, k in ((HIP_L, KN_L), (HIP_R, KN_R))]
+    shin = [np.linalg.norm(pts[a] - pts[k]) for k, a in ((KN_L, AN_L), (KN_R, AN_R))]
+    r = [t / max(s, 1e-6) for t, s in zip(thigh, shin)]
+    return max(r) < limit or min(r) < limit - .1
 
 
 def bent(world, limit=45):

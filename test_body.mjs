@@ -1,7 +1,7 @@
 // Self-check for static/body.js (template fitting). Run: node test_body.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fitBody, fitProxy, genitalPositions, initBody, underwear } from './static/body.js';
+import { fitBody, fitProxy, genitalPositions, initBody, pose, underwear } from './static/body.js';
 
 const file = (f) => readFileSync(new URL(`./static/assets/${f}`, import.meta.url));
 const bin = file('body.bin');
@@ -70,3 +70,14 @@ const thinner = fitBody({ waist_w: 27, waist_d: 22 }, t.H, 'male', {}, base, tod
 near(width(thinner, t.waist.y, notArm), width({ pos: base, parts: same.parts }, t.waist.y, notArm) * 0.9, 0.03);
 // Underwear is built on any body: every vertex placed, standing off the skin.
 for (const g of ['trunks', 'briefs', 'bra']) { const u = underwear(g, same.pos); assert(u.length === A.arr(`${g}.t`).length * 3 && u.every(Number.isFinite), g); }
+{ // Dual-quaternion skinning: one rigid bone moves every vertex exactly by its transform (and two equal ones do too).
+  const a = Math.PI / 6, c = Math.cos(a), s = Math.sin(a), G = new Float32Array(24);
+  G.set([c, 0, s, 1, 0, 1, 0, 2, -s, 0, c, 3], 0); G.set([c, 0, s, 1, 0, 1, 0, 2, -s, 0, c, 3], 12);
+  const P = new Float32Array([1, 2, 3, -4, 5, 0.5]), sk = new Uint8Array(32);
+  sk[0] = 0; sk[8 + 0] = 0; sk[8 + 1] = 1; sk[16 + 0] = 255; sk[24 + 0] = 128; sk[24 + 1] = 127; // vertex 0: bone 0; vertex 1: bones 0 and 1
+  const out = pose(P, G, sk);
+  for (let i = 0; i < 2; i++) {
+    const [x, y, z] = [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]];
+    near(out[i * 3] + 10, c * x + s * z + 1 + 10, 1e-4); near(out[i * 3 + 1] + 10, y + 2 + 10, 1e-4); near(out[i * 3 + 2] + 10, -s * x + c * z + 3 + 10, 1e-4);
+  }
+}
