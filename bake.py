@@ -3,6 +3,7 @@ where the fitted, posed body shows it (visible, facing the camera, on skin rathe
 blended, best-facing and sharpest first, and only their fine detail is kept (on the template's even lighting) so the
 room's light doesn't show. Parts no camera saw keep the template skin.
 Used by fit.py --store; only the texture is kept."""
+import functools
 import json
 from pathlib import Path
 
@@ -36,15 +37,21 @@ def texels(uv, tris, size):
     den = np.where(np.abs(den) < 1e-9, 1e-9, den)
     w1 = (v2[:, 0] * v1[:, 1] - v1[:, 0] * v2[:, 1]) / den
     w2 = (v0[:, 0] * v2[:, 1] - v2[:, 0] * v0[:, 1]) / den
-    return ys, xs, t, np.clip(np.stack([1 - w1 - w2, w1, w2], 1), 0, 1)
+    w = np.clip(np.stack([1 - w1 - w2, w1, w2], 1), 0, 1)  # texels at a triangle's rim fall just outside it
+    return ys, xs, t, w / w.sum(1, keepdims=True)  # a point on the triangle: weights sum to 1
+
+
+@functools.cache
+def segmenter():
+    import mediapipe as mp
+    from mediapipe.tasks.python import BaseOptions, vision
+    return mp, vision.ImageSegmenter.create_from_options(vision.ImageSegmenterOptions(
+        base_options=BaseOptions(model_asset_path=str(ROOT / 'models/selfie_multiclass_256x256.tflite')), output_category_mask=True))
 
 
 def skin_mask(img):
     """Bare skin (body or face) per pixel, by MediaPipe's multiclass person segmenter; edges trimmed."""
-    import mediapipe as mp
-    from mediapipe.tasks.python import BaseOptions, vision
-    seg = vision.ImageSegmenter.create_from_options(vision.ImageSegmenterOptions(
-        base_options=BaseOptions(model_asset_path=str(ROOT / 'models/selfie_multiclass_256x256.tflite')), output_category_mask=True))
+    mp, seg = segmenter()
     cat = seg.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(img[..., ::-1]))).category_mask.numpy_view()
     m = np.isin(cat.reshape(img.shape[:2]), (2, 3)).astype(np.uint8)
     return cv2.erode(m, np.ones((7, 7), np.uint8)) > 0
@@ -73,24 +80,28 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
         # Facing: outward normal toward the camera (it looks along +z).
         n = np.cross(c3[tris[:, 1]] - c3[tris[:, 0]], c3[tris[:, 2]] - c3[tris[:, 0]])
         facing = -n[:, 2] / np.maximum(np.linalg.norm(n, axis=1), 1e-12)
-        # Visibility: a depth buffer of the projected body, nearest triangle wins (painter's order).
-        zbuf = np.full((h, w), np.inf, np.float32)
-        depth = c3[tris].mean(1)[:, 2]
-        for k in np.argsort(-depth):
-            if facing[k] > 0:
-                cv2.fillConvexPoly(zbuf, np.round(px[tris[k]] * 4).astype(np.int32), float(depth[k]), cv2.LINE_8, shift=2)
-        body = np.zeros((h, w), np.uint8)
-        for tri in tris[facing > 0]:
-            cv2.fillConvexPoly(body, np.round(px[tri] * 4).astype(np.int32), 1, cv2.LINE_8, shift=2)
-        person = (np.abs(img.astype(int) - 128).sum(2) > 6).astype(np.uint8)  # the crop greys out all but you
+        f = np.flatnonzero(facing[t] > 0)  # texels facing the camera: the rest can't be seen
+        p = np.einsum('nk,nkd->nd', bary[f], px[tris[t[f]]])  # projected
+        z = np.einsum('nk,nk->n', bary[f], c3[tris[t[f]]][:, :, 2])
+        # Visibility: the nearest depth per cell of a half-resolution grid (a few texels land in each, so no holes).
+        hh, ww = (h + 1) // 2, (w + 1) // 2
+        cell = np.floor(p / 2).astype(int)
+        on = (cell[:, 0] >= 0) & (cell[:, 0] < ww) & (cell[:, 1] >= 0) & (cell[:, 1] < hh)
+        zbuf = np.full(hh * ww, np.inf, np.float32)
+        np.minimum.at(zbuf, cell[on, 1] * ww + cell[on, 0], z[on])
+        zbuf = zbuf.reshape(hh, ww)
+        body = cv2.morphologyEx(np.isfinite(zbuf).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        person = cv2.resize((np.abs(img.astype(int) - 128).sum(2) > 6).astype(np.uint8), (ww, hh), interpolation=cv2.INTER_NEAREST)  # the crop greys out all but you
         if (body & person).sum() / max((body | person).sum(), 1) < .8:
             continue  # the fit's pose doesn't line up with this capture
-        p = (bary[:, :, None] * px[tris[t]]).sum(1)
-        z = (bary * c3[tris[t]][:, :, 2]).sum(1)
         inside = (p[:, 0] >= 0) & (p[:, 0] < w - 1) & (p[:, 1] >= 0) & (p[:, 1] < h - 1)
         pi = np.clip(np.round(p).astype(int), 0, [w - 1, h - 1])
-        ok = keep & inside & (facing[t] > .5) & (z <= zbuf[pi[:, 1], pi[:, 0]] + .015) & v['skin'][pi[:, 1], pi[:, 0]]
-        col = sample(img, p[ok])
+        ci = np.clip(cell, 0, [ww - 1, hh - 1])
+        sel = keep[f] & inside & (facing[t[f]] > .5) & (z <= zbuf[ci[:, 1], ci[:, 0]] + .015) & v['skin'][pi[:, 1], pi[:, 0]]
+        ok = np.zeros(len(t), bool)
+        ok[f[sel]] = True
+        p = p[sel]
+        col = sample(img, p)
         per_view.append((ok, col, facing[t][ok] ** 2 * v['weight']))
     # Each view's colour balance matched to all views' median (the two cameras see different white balance).
     allc = np.concatenate([c for _, c, _ in per_view]) if per_view else np.zeros((0, 3))

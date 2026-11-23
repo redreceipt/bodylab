@@ -18,7 +18,6 @@ import sys
 import threading
 import time
 import urllib.request
-from collections import deque
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,6 +28,7 @@ import mediapipe as mp
 import numpy as np
 from mediapipe.tasks.python import BaseOptions, vision
 
+import judge
 import measure
 
 ROOT = Path(__file__).parent
@@ -77,7 +77,8 @@ def init_db():
             create table if not exists logs(id integer primary key, ts real, kind text, data text, ext_id text unique);
             create table if not exists goals(metric text primary key, target real, start real, ts real);
             create table if not exists settings(k text primary key, v text);
-            create table if not exists fits(day text primary key, ts real, params text, mesh blob);''')
+            create table if not exists fits(day text primary key, ts real, params text, mesh blob);
+            create table if not exists checks(ts real, cam integer, data text);''')
         if 'day' not in [r[1] for r in c.execute('pragma table_info(scans)')]:  # one fused estimate per day
             c.execute('alter table scans add column day text')
         c.execute('create unique index if not exists scans_day on scans(day)')
@@ -220,8 +221,9 @@ def console_state():
     info = json.loads(f['params']) if f else None
     frames = c.execute("select coalesce(json_extract(data, '$.cam'), 0), count(*) from frames where ts >= ? group by 1",
                        (day_start(time.time()),)).fetchall()
+    checks = c.execute("select json_extract(data, '$.problem'), count(*) from checks where ts >= ? group by 1", (day_start(time.time()),)).fetchall()
     return {'fit_info': info and {'day': f['day'], **{k: info.get(k) for k in ('frames', 'fit', 'phenotypes', 'tape')}}, 'fit_history': history,
-            'frames_today': {r[0]: r[1] for r in frames}, 'weight': (weights(get_logs()) or [(0, None)])[-1][1],
+            'frames_today': {r[0]: r[1] for r in frames}, 'checks_today': {r[0] or 'fine': r[1] for r in checks}, 'weight': (weights(get_logs()) or [(0, None)])[-1][1],
             'references': {'count': len(refs), 'mb': sum(p.stat().st_size for p in refs) / 2 ** 20, 'latest': [p.name for p in refs[-24:][::-1]]}}
 
 
@@ -253,6 +255,47 @@ def app_state():
             'skin_baked': (DB_PATH.parent / 'skin.jpg').stat().st_mtime if (DB_PATH.parent / 'skin.jpg').exists() else None,
             'skin': json.loads((DB_PATH.parent / 'skin.json').read_text()) if (DB_PATH.parent / 'skin.json').exists() else None,
             'insights': measure.insights(scans, logs, goals)}
+
+
+class Judge:
+    """The vision check (judge.py) of accepted frames, in the background, one every EVERY s per camera: a frame it rules
+    out takes its camera's frames and reference captures within judge.WINDOW s with it."""
+    EVERY = 4
+
+    def __init__(self):
+        self.want, self.last, self.bad, self.off, self.wake = {}, {}, [], 0.0, threading.Event()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def offer(self, cam, ts, f, mask):
+        box = person_box(mask, .25)  # the room around you too: a bed, a chair, someone else
+        if not box or ts - self.last.get(cam, 0) < self.EVERY or ts < self.off:
+            return
+        y0, y1, x0, x1 = box
+        k = min(1, 768 / (y1 - y0))
+        jpg = cv2.imencode('.jpg', cv2.resize(f[y0:y1, x0:x1], None, fx=k, fy=k, interpolation=cv2.INTER_AREA))[1].tobytes()
+        self.last[cam], self.want[cam] = ts, (ts, jpg)  # only the latest per camera waits
+        self.wake.set()
+
+    def ruled_out(self, rec):
+        return any(c == rec.get('cam', 0) and abs(t - rec['ts']) < judge.WINDOW for c, t in self.bad)
+
+    def loop(self):
+        while True:
+            self.wake.wait()
+            self.wake.clear()
+            while self.want:
+                cam, (ts, jpg) = self.want.popitem()
+                v = judge.ask(jpg)
+                if v is None:  # no Ollama or model: the rule-based checks stand alone; ask again in a minute
+                    self.off = time.time() + 60
+                    continue
+                why = judge.problem(v, (get_profile() or {}).get('bare_only', True))
+                with db() as c:
+                    c.execute('insert into checks(ts, cam, data) values (?, ?, ?)', (ts, cam, json.dumps(v | {'problem': why})))
+                if why:
+                    self.bad = [b for b in self.bad if b[1] > time.time() - 60] + [(cam, ts)]
+                    judge.drop(DB_PATH, cam, ts)
+                    cap.dirty = True
 
 
 class Gate:
@@ -436,6 +479,7 @@ class Capture:
                         self.last_ref, rec['jpg'] = now, reference_crop(f, mask, r, skin)  # saved only if it's you
                     except Exception as e:
                         print('reference image failed:', e, flush=True)
+                JUDGE.offer(self.cam, now, f, mask)
                 for x in self.gate.frame(rec):
                     self.keep(x)
                 if self.gate.enrolled and not self.gate.me:
@@ -459,6 +503,8 @@ class Capture:
             self.keep(rec)
 
     def keep(self, rec):
+        if JUDGE.ruled_out(rec):
+            return
         if 'jpg' in rec:
             save_reference(rec.pop('jpg'), rec)
         day = date.fromtimestamp(rec['ts'])
@@ -650,6 +696,7 @@ def tidy():
     """Keep BodyLab's disk use bounded: raw frames for 45 days, and its own log under 5 MB."""
     with db() as c:  # freed pages are reused, so the file stops growing once it holds 45 days
         c.execute('delete from frames where ts < ?', (time.time() - KEEP_FRAMES_DAYS * 86400,))
+        c.execute('delete from checks where ts < ?', (time.time() - KEEP_FRAMES_DAYS * 86400,))
     out = os.fstat(1)
     if stat.S_ISREG(out.st_mode) and out.st_size > 5_000_000:
         os.ftruncate(1, 0)
@@ -927,6 +974,7 @@ if __name__ == '__main__':
         except ValueError as e:
             print(f'Face photo needs replacing: {e}', flush=True)
     TS_HOST, TS_OWNER = tailnet()
+    JUDGE = Judge()
     cap, cap2 = Capture(), Capture(1)
     threading.Thread(target=refit_loop, daemon=True).start()
     print(f'BodyLab → http://localhost:{PORT}' + (f'  ·  tailnet: https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else ''), flush=True)

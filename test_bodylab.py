@@ -258,3 +258,11 @@ tf = np.frombuffer((FIT.ROOT / 'static/assets/body.bin').read_bytes(), np.float3
 tpf = FIT.tape(np.stack([tf[:, 0], -tf[:, 2], tf[:, 1]], 1) / 100, female=True)
 assert 65 < tpf['underbust'] < tpf['chest'] - 5, tpf  # under the bust, clearly smaller than round it
 print('fit helpers ok', tp, '| female', {k: tpf[k] for k in ('chest', 'underbust')})
+
+import bake  # noqa: E402
+import judge  # noqa: E402
+judge._demo()
+src, uv, tris, _ = bake.assets()
+bary = bake.texels(uv, tris, 512)[3]
+assert np.allclose(bary.sum(1), 1) and bary.min() >= 0  # every texel a point on its triangle
+print('vision-check rules and texel weights ok')

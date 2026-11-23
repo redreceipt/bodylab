@@ -53,6 +53,7 @@ function fit() {
     ['Waist', cm(m.waist)], ['Hips', cm(m.hips)], ['Upper arm', cm(m.arm_l)], ['Thigh', cm(m.thigh_l)], ['Calf', cm(m.calf_l)]].filter(([, v]) => v);
   return `<section><h2>Body fit</h2>
     <p class="muted">Frames today: ${Object.entries(S.frames_today).map(([c, n]) => `camera ${+c + 1}: ${n}`).join(', ') || 'none'}.
+      Vision check today: ${Object.entries(S.checks_today ?? {}).map(([k, n]) => `${esc(k)} ${n}`).join(', ') || 'nothing checked (Ollama off?)'}.
       ${f ? `Fit ${esc(f.day)} from ${f.frames} frames; outline within ${f.fit?.out?.toFixed(1)} / ${f.fit?.in?.toFixed(1)} cm (mesh outside / outline unreached); body ${kg(f.fit?.kg)}; muscle ${f.phenotypes?.muscle?.toFixed(2)}, fat ${f.phenotypes?.weight?.toFixed(2)}.` : 'No body fit yet.'}</p>
     <table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>
     ${S.fit_history.length ? `<details><summary>Fit history (outline error, cm)</summary><table><tr><th>Day</th><th>Frames</th><th>Dropped</th><th>Mesh out / outline in</th><th>Per camera</th></tr>
