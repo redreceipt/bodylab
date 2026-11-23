@@ -545,7 +545,12 @@ def bake_skin(db, prof, views):
     print(f'skin baked from {len(vs)} captures, {seen * 100:.0f} % of the body seen')
     if seen >= .5:  # patchier than that looks worse than the template
         cv2.imwrite(str(Path(db).parent / 'skin.jpg'), tex, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    (Path(db).parent / 'skin.json').write_text(json.dumps({'captures': len(vs), 'seen': round(float(seen), 3), 'ts': time.time()}))
+    # Your body's own tone (a face is pinker than a torso): median skin colour of the well-exposed captures (backlit or
+    # blown-out ones don't show it)
+    tones = [np.median(v['img'][v['skin']], 0) for v in vs if v['skin'].sum() > 2000]
+    tones = [t for t in tones if 80 < t.mean() < 220]
+    tone = [int(c) for c in np.median(tones, 0)[::-1]] if tones else None  # RGB
+    (Path(db).parent / 'skin.json').write_text(json.dumps({'captures': len(vs), 'seen': round(float(seen), 3), 'ts': time.time(), 'tone': tone}))
 
 
 def store(db, day, res, rest, G, model_skin=None):
@@ -604,6 +609,9 @@ if __name__ == '__main__':
         np.save(a.save, rest)
     if a.store:
         import anny
+        if prof.get('sex') != 'female':  # the cameras' own estimate, for the console's reference comparison
+            import genital
+            res['tape'] |= genital.measure(Path(a.db).parent / 'reference', prof['height_cm'], day)
         m = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default')
         store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()))
         bake_all(a.db, prof)

@@ -24,15 +24,19 @@ h2 { margin:0 0 12px; font-size:20px } h3 { margin:16px 0 8px; font-size:15px } 
 p { margin:6px 0 } .muted { color:var(--dim); font-size:12.5px } .good { color:var(--good) } .bad { color:var(--bad) }
 .row { display:flex; align-items:center; justify-content:space-between; gap:10px }
 
-#hud { position:fixed; top:16px; left:16px; width:240px; display:flex; flex-direction:column; gap:10px }
+#hud { position:fixed; top:16px; left:16px; right:16px; display:flex; justify-content:space-between; align-items:flex-start; gap:10px; pointer-events:none }
+#hud > * { pointer-events:auto } #lead { display:flex; flex-direction:column; gap:10px; width:240px }
+#chips { display:flex; gap:8px; align-items:center; min-width:0 }
+.chip { display:flex; align-items:center; gap:8px; padding:7px 13px; border-radius:20px; font-size:12.5px; background:var(--panel); white-space:nowrap }
+.chip[aria-expanded=true] { border-color:var(--acc) }
+.ring { width:16px; height:16px; flex:none } .ring circle { fill:none; stroke-width:3 } .ring .bg { stroke:rgba(255,255,255,.12) } .ring .fg { stroke:var(--good) }
 #summary { text-align:left; padding:12px 16px; cursor:pointer; background:var(--panel) } #summary:hover { border-color:var(--acc) }
 #summary .k { color:var(--dim); font-size:10.5px; text-transform:uppercase; letter-spacing:.14em } #summary .v { font-size:30px; font-weight:700 }
-#today { padding:10px 14px } #today ul { list-style:none; margin:6px 0 0; padding:0; font-size:13px }
+#today { position:fixed; top:62px; right:16px; width:270px; max-height:70vh; overflow:auto; padding:10px 14px; z-index:2 } #today ul { list-style:none; margin:6px 0 0; padding:0; font-size:13px }
 #today li { display:flex; gap:8px; padding:4px 0; color:var(--fg) } #today li > span { width:14px; color:var(--dim) } #today li.ok > span { color:var(--good) }
 #today li.ok { color:var(--dim) } #today small { display:block; color:var(--dim); font-size:11.5px }
-#camBar { position:fixed; top:16px; right:16px; display:flex; gap:8px; align-items:center }
-#cam { display:flex; align-items:center; gap:8px; max-width:340px; padding:8px 14px; border-radius:20px; font-size:12.5px; background:var(--panel); text-align:left }
-#preview { position:fixed; top:60px; right:16px; width:300px; padding:8px; display:flex; flex-direction:column; gap:7px }
+#cam { max-width:300px; text-align:left } #camMsg { overflow:hidden; text-overflow:ellipsis }
+#preview { position:fixed; top:62px; right:16px; z-index:2; width:300px; padding:8px; display:flex; flex-direction:column; gap:7px }
 details { border-top:1px solid var(--line); padding:8px 0 } details > summary { cursor:pointer; color:var(--fg); font-weight:600; padding:4px 0 }
 details[open] > summary { margin-bottom:6px } .callout + .callout { margin-top:10px }
 table.days td, table.days th { text-align:center; padding:3px 2px } table.days td:first-child { text-align:left; color:var(--dim) } .miss { color:var(--bad) }
@@ -53,7 +57,7 @@ table.days td, table.days th { text-align:center; padding:3px 2px } table.days t
 
 #timeline { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); padding:9px 16px; display:flex; align-items:center; gap:14px; width:min(560px, 46vw) }
 #timeline input[type=range] { flex:1; accent-color:var(--acc); padding:0; border:none; background:none }
-#timeline label { display:flex; gap:6px; align-items:center; white-space:nowrap; font-size:12.5px; color:var(--dim) }
+#timeline label { display:flex; flex-direction:row; gap:6px; align-items:center; white-space:nowrap; font-size:12.5px; color:var(--dim) }
 #timeline label input { width:auto }
 #scanLabel { white-space:nowrap; font-size:12.5px; font-variant-numeric:tabular-nums }
 
@@ -97,25 +101,28 @@ ul.tips { padding-left:18px; color:var(--dim); font-size:12.5px }
 #toast.err { border-color:var(--bad) }
 /* Phone: status on top, compact cards, tabs as a bottom bar, panels as a bottom sheet. */
 @media (max-width: 600px) {
-  #camBar { top:8px; left:8px; right:8px } #cam { width:100%; font-size:12px } #camMsg { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-  #hud { top:52px; left:8px; right:8px; width:auto; flex-direction:row; align-items:flex-start; gap:8px }
-  #hud .brand { display:none } #summary { flex:0 0 auto; padding:8px 12px } #summary .v { font-size:22px }
-  #today { flex:1; padding:8px 12px } #today li.ok { display:none } #today ul { font-size:12px }
+  #hud { top:8px; left:8px; right:8px } #lead { width:auto } #hud .brand { display:none }
+  #summary { padding:7px 12px } #summary .v { font-size:22px } #summary .muted { font-size:11.5px }
+  #chips { flex-direction:column; align-items:flex-end; gap:6px } .chip { padding:6px 11px; font-size:12px } #cam { max-width:46vw }
+  #today { top:96px; right:8px; left:auto; width:min(270px, calc(100vw - 16px)) }
   #nav { left:8px; right:8px; bottom:8px; flex-direction:row } #nav button { width:auto; flex:1; text-align:center; padding:9px 4px }
   #timeline { bottom:58px; left:8px; right:8px; width:auto; transform:none; padding:7px 12px; gap:10px }
   #timeline label { flex-shrink:0 } #scanLabel { flex:1 }
   #panel { top:auto; left:0; right:0; bottom:0; width:auto; max-height:78vh; border-radius:14px 14px 0 0 }
-  #preview { top:52px; right:8px; left:auto }
+  #preview { top:96px; right:8px; left:auto; width:min(300px, calc(100vw - 16px)) }
 }
 </style>
 </head>
 <body>
 <canvas id="c" tabindex="0" aria-label="3D body model. Click a body part for details."></canvas>
-<header id="hud"><div class="brand">BODY<b>LAB</b></div>
-  <button id="summary" class="card" aria-label="Overall numbers"></button>
-  <section id="today" class="card" aria-label="Today's data"></section>
+<header id="hud">
+  <div id="lead"><div class="brand">BODY<b>LAB</b></div><button id="summary" class="card" aria-label="Your goal"></button></div>
+  <div id="chips">
+    <button id="cam" class="card chip" title="Show the camera preview"><span id="dot"></span><span id="camMsg" role="status">Connecting…</span></button>
+    <button id="todayBtn" class="card chip" aria-expanded="false" aria-controls="today">Today</button>
+  </div>
 </header>
-<div id="camBar"><button id="cam" class="card" title="Show the camera preview"><span id="dot"></span><span id="camMsg" role="status">Connecting…</span></button></div>
+<section id="today" class="card" aria-label="Today's data" hidden></section>
 <aside id="preview" class="card" hidden><img id="live" alt="Camera preview (private silhouette unless switched in Settings)">
   <div class="bar" id="evidence"><i id="barF" style="width:0"></i><i id="barS" style="width:0"></i></div></aside>
 <nav id="nav">
@@ -126,7 +133,6 @@ ul.tips { padding-left:18px; color:var(--dim); font-size:12.5px }
 <footer id="timeline" class="card">
   <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Day">
   <span id="scanLabel"></span>
-  <label id="ghostLabel"><input type="checkbox" id="ghost" checked> vs first day</label>
   <label><input type="checkbox" id="censored"> censored</label>
 </footer>
 <section id="panel" class="card" hidden><button id="close" aria-label="Close">×</button><div id="pbody"></div></section>

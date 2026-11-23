@@ -44,7 +44,8 @@ function warpTriangle(ctx, img, s, d) {
   ctx.restore();
 }
 
-// Skin texture canvas for `sex`: tinted to the photo's cheeks (or `tone`), with the photo's face baked in.
+// Skin texture canvas for `sex`: tinted to `tone` (your body's, from the cameras) or else the photo's cheeks, with the
+// photo's face baked in.
 // Separable box blur, 3 passes ≈ Gaussian. buf: Float32Array of w*h*ch.
 function blur(buf, w, h, ch, r) {
   r = Math.max(1, Math.round(r));
@@ -110,7 +111,7 @@ export async function skinCanvas(sex, { face, photo, tone, hairColor, baseUrl })
   ic.drawImage(c, bx, by, bw, bh, 0, 0, bw, bh);
   const base = median(ic.getImageData(0, 0, bw, bh).data);
   let target = tone ? hex(tone) : null;
-  if (face) {
+  if (face && !tone) { // no body tone yet: the face's
     ic.clearRect(0, 0, bw, bh);
     ic.globalCompositeOperation = 'source-over';
     ovalPath(ic, 0.75, bx, by);

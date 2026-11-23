@@ -218,13 +218,13 @@ async function updateLook() {
   const p = S.profile || {}, sex = p.sex === 'female' ? 'female' : 'male', face = S.face;
   look.clothes = p.clothes === true; // nude unless censored
   $('#censored').checked = look.clothes;
-  const key = JSON.stringify([sex, p.skin, p.hair, p.hair_color, p.eye_color, face?.ts, S.skin_baked]);
+  const key = JSON.stringify([sex, p.skin, p.hair, p.hair_color, p.eye_color, face?.ts, S.skin_baked, S.skin?.tone]);
   if (key === lookKey) return;
   lookKey = key;
   const photo = face && await loadImage(`/api/face.jpg?${face.ts}`);
   const auto = { ...(face ? photoColors(photo, face) : {}), hair: face?.hair?.color };
   const hair = p.hair ?? face?.hair?.style ?? (sex === 'female' ? 'long01' : 'short02'), hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
-  const { canvas: skinTex, tone } = await skinCanvas(sex, { face, photo, tone: p.skin, hairColor: HAIRS[hair] ? hairColor : null,
+  const { canvas: skinTex, tone } = await skinCanvas(sex, { face, photo, tone: p.skin ?? (S.skin?.tone && '#' + S.skin.tone.map((v) => v.toString(16).padStart(2, '0')).join('')), hairColor: HAIRS[hair] ? hairColor : null,
     baseUrl: S.skin_baked ? `/api/skin.jpg?${S.skin_baked}` : null });
   mats.genitals.color.set(`rgb(${tone.map(Math.round).join(',')})`).multiplyScalar(0.93); // a touch darker than the face's tone
   const skin = new THREE.CanvasTexture(skinTex);
@@ -371,9 +371,7 @@ function rebuildAvatar(force = false) {
   for (const g of [avatar, ghost]) if (g) { scene.remove(g); g.traverse((o) => o.geometry?.dispose()); }
   avatar = buildAvatar(dims, sex, false, m, mesh, predicted ? today : dims);
   scene.add(avatar);
-  const showGhost = predicted || ($('#ghost').checked && S.scans.length > 1 && idx > 0);
-  ghost = showGhost ? (predicted ? buildAvatar(today, sex, true, {}, mesh, today) // predicted: outline = today
-    : buildAvatar(S.scans[0].dims, sex, true, {}, fitted(S.scans[0]), S.scans[0].dims)) : null;
+  ghost = predicted ? buildAvatar(today, sex, true, {}, mesh, today) : null; // a prediction shows today as an outline
   if (ghost) scene.add(ghost);
   paint();
 }
@@ -460,7 +458,9 @@ function todayCard() {
     ['sleep', 'Sleep', 'Wear your Watch to bed'],
     ['activity', 'Activity', 'Wear your Watch'],
   ];
-  const done = items.filter(([k]) => t[k]).length;
+  const done = items.filter(([k]) => t[k]).length, c = 2 * Math.PI * 6;
+  $('#todayBtn').innerHTML = `<svg class="ring" viewBox="0 0 16 16"><circle class="bg" cx="8" cy="8" r="6"/><circle class="fg" cx="8" cy="8" r="6"
+    stroke-dasharray="${c * done / items.length} ${c}" transform="rotate(-90 8 8)"/></svg>Today ${done}/${items.length}`;
   return `<div class="row"><b>Today</b><span class="muted">${done} of ${items.length}</span></div>
     <ul>${items.map(([k, label, hint]) => `<li class="${t[k] ? 'ok' : ''}"><span>${t[k] ? '✓' : '○'}</span><div>${label}${t[k] ? '' : `<small>${hint}</small>`}</div></li>`).join('')}</ul>`;
 }
@@ -482,11 +482,19 @@ function renderTimeline() {
   const n = S.scans.length;
   $('#scrub').max = Math.max(0, n - 1);
   $('#scrub').value = idx;
-  $('#scrub').hidden = $('#ghostLabel').hidden = n < 2 || !!predicted;
+  $('#scrub').hidden = n < 2 || !!predicted;
   $('#scanLabel').textContent = predicted?.goal ? 'your goal' : predicted ? `predicted · in ${plan.weeks} weeks` : n ? day(S.scans[idx].ts) : 'no estimate yet';
 }
 $('#scrub').addEventListener('input', (e) => { idx = +e.target.value; renderAll(); });
-$('#ghost').addEventListener('change', () => rebuildAvatar(true));
+$('#todayBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const open = $('#today').hidden;
+  $('#today').hidden = !open;
+  $('#todayBtn').setAttribute('aria-expanded', open);
+});
+document.addEventListener('click', (e) => { // the checklist closes when you tap anywhere else
+  if (!$('#today').hidden && !$('#today').contains(e.target)) { $('#today').hidden = true; $('#todayBtn').setAttribute('aria-expanded', false); }
+});
 $('#censored').addEventListener('change', async (e) => {
   look.clothes = e.target.checked;
   rebuildAvatar(true);
@@ -709,8 +717,13 @@ $('#cam').addEventListener('click', () => {
 async function poll() {
   try {
     const st = await (await fetch('/api/status')).json();
-    $('#camMsg').textContent = st.msg + ['cam2', 'cam3'].filter((k) => st[k]).map((k) => ` · camera ${k[3]}: ${st[k].state === 'offline' ? 'offline' : st[k].state === 'scanning' ? 'measuring' : 'on'}`).join('');
-    $('#dot').className = st.state;
+    const cams = [st, st.cam2, st.cam3].filter(Boolean), on = cams.filter((c) => c.state !== 'offline').length;
+    // short in the chip (the camera that's measuring or needs you says so); every camera's full message on hover
+    const lead = cams.find((c) => c.state === 'scanning') ?? cams.find((c) => c.state === 'adjust') ?? st;
+    $('#camMsg').textContent = lead.state === 'scanning' ? 'Measuring' : lead.state === 'adjust' ? lead.msg
+      : on ? `Watching${cams.length > 1 ? ` · ${on} cameras` : ''}` : lead.msg;
+    $('#cam').title = cams.map((c, i) => `Camera ${i + 1}: ${c.msg}`).join('\n');
+    $('#dot').className = lead.state;
     $('#barF').style.width = Math.min(1, (st.frames ?? 0) / 150) * 50 + '%'; // views today (150 = plenty)
     $('#barS').style.width = Math.min(1, (st.angle ?? 0) / 75) * 50 + '%'; // how far you've turned: sets depth
     $('#evidence').title = `${st.frames ?? 0} views today, turned up to ${st.angle ?? 0}°`;

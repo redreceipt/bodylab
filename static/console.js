@@ -32,8 +32,8 @@ const REFS = [
   ['ref_calf', 'Calf', 'cm', 'Left calf at its widest, weight on both feet', 'calf_l'],
   ['ref_weight', 'Weight', 'kg', 'Morning, after the bathroom, before eating', 'weight'],
   ['ref_bf', 'Body fat', '%', 'From DEXA, calipers or a smart scale (note which)', 'bf'],
-  ['ref_penis_len', 'Penis length, resting', 'cm', 'Standing, from the base at the pubic bone along the top to the tip; not stretched', null],
-  ['ref_penis_girth', 'Penis girth, resting', 'cm', 'Around the middle of the shaft', null]];
+  ['ref_penis_len', 'Penis length, resting', 'cm', 'Standing, from the base at the pubic bone along the top to the tip; not stretched', 'penis_len'],
+  ['ref_penis_girth', 'Penis girth, resting', 'cm', 'Around the middle of the shaft', 'penis_girth']];
 
 function cameras() {
   const p = S.profile || {}, rot = (k) => [0, 90, 180, 270].map((r) => opt(r, r ? `${r}° clockwise` : 'None', (p[k] ?? 0) === r)).join('');
