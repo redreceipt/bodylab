@@ -650,7 +650,8 @@ function renderPanel() {
   document.querySelectorAll('#nav button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.tab === view.tab));
 }
 function open(v) {
-  if (v?.part || (!v && view?.part)) focusOn(v?.part);
+  if (v?.tab === 'settings') focusOn('overall'); // your face photo: the face, close up
+  else if (v?.part || (!v && (view?.part || view?.tab === 'settings'))) focusOn(v?.part);
   if ((view?.tab === 'whatif' || view?.tab === 'goal') && v?.tab !== view.tab) { predicted = null; renderTimeline(); rebuildAvatar(); }
   view = v;
   selectedPart = v?.part && v.part !== 'overall' ? v.part : null;

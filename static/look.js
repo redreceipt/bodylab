@@ -144,7 +144,7 @@ export async function skinCanvas(sex, { face, photo, tone, hairColor, baseUrl })
     const mg = canvas(sw, sh).getContext('2d', { willReadFrequently: true });
     mg.scale(q, q);
     mg.fillStyle = '#fff';
-    ovalPath(mg, 0.92, bx, by);
+    ovalPath(mg, 0.85, bx, by); // short of the outline: at the temples and ears a photo catches background and hair
     const mraw = mg.getImageData(0, 0, sw, sh).data, mask = new Float32Array(sw * sh);
     for (let i = 0; i < mask.length; i++) mask[i] = mraw[i * 4 + 3] / 255;
     const soft = blur(mask, sw, sh, 1, 0.04 * bw * q);

@@ -133,3 +133,4 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
         a = (a * np.clip(cv2.distanceTransform(island, cv2.DIST_L2, 3) / 12, 0, 1))[..., None]
         tex = base * (1 + (detail - 1) * a)
     return np.clip(tex, 0, 255).astype(np.uint8), cover
+
