@@ -101,6 +101,9 @@ def bake(views, src, uv, tris, size=2048, base=None):
         # Detail = your skin ÷ its own blur (~1.5 cm): marks, hair, pores, not the room's light falling across you.
         lit = cv2.GaussianBlur(tex * cover[..., None], (0, 0), 12) / np.maximum(cv2.GaussianBlur(cover, (0, 0), 12), 1e-3)[..., None]
         detail = np.clip(tex / np.maximum(lit, 1), .6, 1.6)
-        a = np.minimum(cv2.GaussianBlur(cover, (0, 0), 3), cover)[..., None]  # feathered inward from what was seen
+        a = np.minimum(cv2.GaussianBlur(cover, (0, 0), 3), cover)  # feathered inward from what was seen
+        island = np.zeros((size, size), np.uint8)
+        island[ys, xs] = 1  # texture sections: the blur above mixes across their edges, so detail fades out there
+        a = (a * np.clip(cv2.distanceTransform(island, cv2.DIST_L2, 3) / 12, 0, 1))[..., None]
         tex = base * (1 + (detail - 1) * a)
     return np.clip(tex, 0, 255).astype(np.uint8), cover
