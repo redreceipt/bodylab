@@ -234,6 +234,7 @@ def post_face_scan(b):
         else:
             pts.append(V[np.argmin(np.linalg.norm(px - q, axis=1))])
     (DB_PATH.parent / 'face_scan.json').write_text(json.dumps({'points': np.round(pts, 5).tolist(), 'ts': time.time()}))
+    REFIT.set()  # your face, on the body, within minutes
 
 
 def get_logs():
@@ -635,16 +636,20 @@ def silhouette(mask, pts, world, origin, H, n=160, cat=None, box=None):
     return out
 
 
+REFIT = threading.Event()
+
+
 def refit_loop():
     """Refit today's body shape (fit.py, PyTorch) as frames arrive: once there are enough, then whenever they've
     grown by a quarter. Skipped if the optional `fit` dependencies aren't installed (uv sync --group fit)."""
     while True:
-        time.sleep(600)
+        forced = REFIT.wait(600)  # set by a new face scan
+        REFIT.clear()
         day = date.today().isoformat()
         with db() as c:
             n = c.execute('select count(*) from frames where ts >= ?', (day_start(time.time()) - 2 * 86400,)).fetchone()[0]  # fit.py's window
             r = c.execute('select params from fits where day = ?', (day,)).fetchone()
-        if n < 30 or (r and n < 1.25 * json.loads(r[0])['frames']):
+        if n < 30 or (r and n < 1.25 * json.loads(r[0])['frames'] and not forced):
             continue
         p = subprocess.run(['nice', sys.executable, str(ROOT / 'fit.py'), '--db', str(DB_PATH), '--day', day, '--store'],
                            capture_output=True, text=True, timeout=3600)
