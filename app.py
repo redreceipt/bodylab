@@ -53,6 +53,7 @@ SYNC_PORT = 8443  # `tailscale serve --bg --https=8443 http://127.0.0.1:8765` pu
 TS_HOST = TS_OWNER = None  # set at startup from `tailscale status`
 DB_PATH = Path(os.environ.get('BODYLAB_DB') or ROOT / 'data' / 'bodylab.db')
 # Daily inputs (manual or Apple Health) and their sane ranges.
+CAMS = ('', '2', '3')  # profile keys: camera_url/rotate, camera2_url/rotate2, ...
 FRAMES_PER_DAY, KEEP_FRAMES_DAYS = 400, 45  # raw evidence for refits; daily body estimates are kept forever
 DAILY = {'weight': (20, 400), 'scale_bf': (2, 75), 'scale_lean': (10, 300), 'tape_waist': (30, 300),
          'kcal': (0, 15000), 'protein': (0, 1000), 'carbs': (0, 2000), 'fat': (0, 1000), 'fiber': (0, 300),
@@ -353,7 +354,7 @@ class Capture:
     torso length). Frames are stored (twice a second at most) and fused into one body estimate per day."""
 
     def __init__(self, cam=0):
-        self.cam, self.key = cam, '' if cam == 0 else str(cam + 1)  # profile keys camera_url/rotate, camera2_url/rotate2
+        self.cam, self.key = cam, CAMS[cam]
         self.frame = self.jpeg = self.url = None
         self.frame_ts = self.last_seen = self.last_store = self.last_fit = 0.0
         self.status = {'state': 'starting', 'msg': 'Connecting to camera…'}
@@ -405,7 +406,7 @@ class Capture:
                 self.gate.enrolled = self.me is not None
             if time.time() - self.frame_ts > 5:
                 self.status = {'state': 'offline', 'msg': f'Camera offline ({self.url}) — retrying…' if self.url
-                               else 'Set your camera URL in Settings → Camera' if self.cam == 0 else 'No second camera'}
+                               else 'Set your camera URL in Settings → Camera' if self.cam == 0 else 'Not set up'}
             if self.cam == 0 and self.dirty and time.time() - self.last_fit > 5 and self.prof.get('height_cm'):  # the first camera fuses all cameras' frames
                 self.fit(time.time())
             if f is None or f is last:
@@ -535,12 +536,13 @@ class Capture:
             c.execute('insert into frames(ts, data) values (?, ?)', (rec['ts'], json.dumps(rec)))
 
     def fit(self, now):
-        """Fuse today's frames into today's body estimate (one row in `scans` per day)."""
+        """Fuse the last three days' frames (fit.py's window) into today's body estimate (one row in `scans` per day)."""
         self.last_fit, self.dirty = now, False
         with db() as c:
-            frames = [json.loads(r[0]) for r in c.execute('select data from frames where ts >= ? order by ts', (day_start(now),))]
+            frames = [json.loads(r[0]) for r in c.execute('select data from frames where ts >= ? order by ts', (day_start(now) - 2 * 86400,))]
         raw = measure.estimate(frames) if frames else None
-        self.today = {'frames': len(frames), 'angle': max((f['theta'] for f in frames), default=0)}
+        today = [f for f in frames if f['ts'] >= day_start(now)]
+        self.today = {'frames': len(today), 'angle': max((f['theta'] for f in today), default=0)}
         if not raw or measure.implausible(raw):
             return
         with db() as c:
@@ -607,7 +609,7 @@ def refit_loop():
         time.sleep(600)
         day = date.today().isoformat()
         with db() as c:
-            n = c.execute('select count(*) from frames where ts >= ?', (day_start(time.time()),)).fetchone()[0]
+            n = c.execute('select count(*) from frames where ts >= ?', (day_start(time.time()) - 2 * 86400,)).fetchone()[0]  # fit.py's window
             r = c.execute('select params from fits where day = ?', (day,)).fetchone()
         if n < 30 or (r and n < 1.25 * json.loads(r[0])['frames']):
             continue
@@ -761,7 +763,7 @@ def post_profile(b):
         prof['sex'] = 'female' if b['sex'] == 'female' else 'male'
     if 'units' in b:
         prof['units'] = 'imperial' if b['units'] == 'imperial' else 'metric'
-    for key in ('camera_url', 'camera2_url'):
+    for key in [f'camera{k}_url' for k in CAMS]:
         if key not in b:
             continue
         url = str(b[key]).strip()
@@ -777,7 +779,7 @@ def post_profile(b):
             if not re.fullmatch(pattern, str(b[k])):
                 raise ValueError(f'Invalid {k}')
             prof[k] = b[k]
-    for key in ('rotate', 'rotate2'):
+    for key in [f'rotate{k}' for k in CAMS]:
         if key in b:
             prof[key] = int(b[key]) if int(b[key]) in ROTATE else 0
     for k in ('bare_only', 'clothes', 'reference'):
@@ -927,9 +929,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/state':
             return self.reply(app_state())
         if path == '/api/status':
-            return self.reply({**cap.status, 'rev': data_rev()} | ({'cam2': cap2.status} if cap2.url else {}))
+            return self.reply({**cap.status, 'rev': data_rev()} | {f'cam{i + 1}': c.status for i, c in enumerate(caps) if i and c.url})
         if path == '/api/live.mjpg':
-            return self.stream(cap2 if parse_qs(urlparse(self.path).query).get('cam') == ['2'] else cap)
+            n = parse_qs(urlparse(self.path).query).get('cam', ['1'])[0]
+            return self.stream(caps[int(n) - 1] if n in ('1', '2', '3') else cap)
         if path == '/api/skin.jpg' and (DB_PATH.parent / 'skin.jpg').exists():  # your skin, baked from the cameras (fit.py)
             return self.send(200, (DB_PATH.parent / 'skin.jpg').read_bytes(), 'image/jpeg')
         if path == '/api/skin' and (DB_PATH.parent / 'skin.bin').exists():  # bone weights for posing fitted bodies (fit.py)
@@ -1009,7 +1012,8 @@ if __name__ == '__main__':
             print(f'Face photo needs replacing: {e}', flush=True)
     TS_HOST, TS_OWNER = tailnet()
     JUDGE = Judge()
-    cap, cap2 = Capture(), Capture(1)
+    caps = [Capture(i) for i in range(len(CAMS))]
+    cap = caps[0]
     threading.Thread(target=refit_loop, daemon=True).start()
     print(f'BodyLab → http://localhost:{PORT}' + (f'  ·  tailnet: https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else ''), flush=True)
     ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()

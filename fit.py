@@ -25,7 +25,7 @@ DENSITY = 1.04  # kg/L of a whole body including the air in the lungs (tissue al
 KP = {'nose': 0, 'left_ear': 7, 'right_ear': 8, 'left_shoulder': 11, 'right_shoulder': 12, 'left_elbow': 13, 'right_elbow': 14,
       'left_wrist': 15, 'right_wrist': 16, 'left_hip': 23, 'right_hip': 24, 'left_knee': 25, 'right_knee': 26,
       'left_ankle': 27, 'right_ankle': 28}
-POSED = ['upperarm01.L', 'upperarm01.R', 'lowerarm01.L', 'lowerarm01.R', 'upperleg01.L', 'upperleg01.R',
+POSED = ['clavicle.L', 'clavicle.R', 'upperarm01.L', 'upperarm01.R', 'lowerarm01.L', 'lowerarm01.R', 'upperleg01.L', 'upperleg01.R',
          'lowerleg01.L', 'lowerleg01.R', 'spine03', 'spine01', 'neck01', 'head']
 FACE = ('eye', 'ear', 'nose', 'mouth', 'chin', 'cheek', 'forehead', 'head', 'brow', 'jaw', 'lip', 'finger', 'hand', 'foot',
         'toe', 'temple', 'genital', 'nipple')
@@ -36,7 +36,10 @@ TO_CAM = [[1., 0, 0], [0, 0, -1], [0, 1, 0]]
 def load(db, day=None):
     c = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
     day = day or c.execute("select max(date(ts, 'unixepoch', 'localtime')) from frames").fetchone()[0]
-    rows = [json.loads(r[0]) for r in c.execute("select data from frames where date(ts, 'unixepoch', 'localtime') = ?", (day,))]
+    # shortcut: the day and the two before (your shape barely changes in that time; many more angles and bare views
+    # than one day gives), so a trend shows a day or two late
+    rows = [json.loads(r[0]) for r in c.execute("select data from frames where date(ts, 'unixepoch', 'localtime') "
+                                                "between date(?, '-2 days') and ?", (day, day))]
     prof = json.loads(c.execute("select v from settings where k = 'profile'").fetchone()[0])
     noon = time.mktime(time.strptime(day + ' 12', '%Y-%m-%d %H'))
     w = c.execute("select json_extract(data, '$.weight'), abs(ts - ?) / 86400 from logs where kind = 'daily' "
@@ -128,10 +131,12 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     # (4 % of height below the hip centre) to the knees, or to the feet.
     bd = torch.tensor(np.array([borders(np.array(f['sil']['c'])) for f in frames]), dtype=torch.float32, device=dev) * H
     knee = [float(np.mean(np.array(f['sil']['l'])[[25, 26], 1])) for f in frames]
-    covered = lambda f, k: (f.get('skin', {}).get(k) if f.get('skin', {}).get(k) is not None else 1) < .5  # noqa: E731
-    # Older frames without per-point clothing: shorts cover from just above the hip line (their bulk would widen your
-    # hips) to the knees; trousers to the feet.
-    band = torch.tensor([[-.02, np.inf if covered(f, 'shins') else kn if covered(f, 'thighs') else -.02] if 'off' not in f['sil'] else [0, 0]
+    # Clothed where the clothes check saw clothes, or ran but couldn't tell: loose shorts fitted as your hips and thighs
+    # inflate them, and with your weight pinned the torso shrinks to pay for it.
+    covered = lambda f, k: 'skin' in f and (f['skin'].get(k) is None or f['skin'][k] < .5)  # noqa: E731
+    # Shorts cover from just above the hip line (their bulk would widen your hips) to the knees; trousers to the feet.
+    # (Per-point flags miss loose fabric at the edge, so this applies with them too.)
+    band = torch.tensor([[-.02, np.inf if covered(f, 'shins') else kn if covered(f, 'thighs') else -.02]
                          for f, kn in zip(frames, knee)], dtype=torch.float32, device=dev) * H
     in_view = lambda p: ((p[..., 0] > bd[:, None, 0] + .01) & (p[..., 0] < bd[:, None, 1] - .01)  # noqa: E731
                          & (p[..., 1] > bd[:, None, 2] + .01) & (p[..., 1] < bd[:, None, 3] - .01)
@@ -144,6 +149,12 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     arm_a, arm_b = torch.cat([el, wr], 1), torch.cat([wr, hand], 1)
     near_arm = lambda p: seg_dist2(p, arm_a, arm_b).min(-1).values < (.04 * H) ** 2  # noqa: E731
     edge_ok = in_view(C) & ~off & ~near_arm(C)  # nor are outline points on an image edge, clothes or hair
+    # Inside the outline, the body must be there too: contour points alone let the arms stand off a shrunken torso
+    # (the gap is hidden behind the arm's outer edge). A grid over each outline's box, kept where it's inside and seen.
+    lo, hi = C.min(1).values, C.max(1).values
+    g = torch.stack(torch.meshgrid(torch.linspace(0, 1, 10, device=dev), torch.linspace(0, 1, 20, device=dev), indexing='ij'), -1).reshape(1, -1, 2)
+    grid = lo[:, None] + g * (hi - lo)[:, None]
+    grid_ok = (inside(grid, C, torch.roll(C, -1, 1)) & in_view(grid) & ~near_arm(grid)).float()
     kp_ok = in_view(L).float()
 
     # Shape (shared) and pose (per frame).
@@ -224,12 +235,16 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
             # Mesh outside the outline (where the camera sees) is too big; outline nowhere near the mesh is too small.
             d2 = seg_dist2(v2, a, b).min(-1).values
             out_m = (~inside(v2, a, b) & in_view(v2) & ~near_arm(v2)).float() * use[:, None]
-            l_out = (d2 * out_m).sum() / use.sum() / v2.shape[1]
+            # past 5 mm: each frame's arm pose is a little off, and paying for every millimetre a thick arm strays
+            # outside would thin the limbs and shoulders to hedge
+            l_out = ((d2.clamp_min(1e-12).sqrt() - .005).clamp_min(0) ** 2 * out_m).sum() / use.sum() / v2.shape[1]
             near = ((C[:, :, None] - v2[:, None]) ** 2).sum(-1).min(-1).values
             l_in = (near * edge_ok * use[:, None]).sum() / (edge_ok * use[:, None]).sum()
             e_sil = ((d2 * out_m).mean(1) + (near * edge_ok).sum(1) / edge_ok.sum(1).clamp_min(1)).detach().sqrt()  # per frame
-            total = total + 20 * (l_out + l_in)
-            parts |= {'out': ((d2 * out_m).sum() / out_m.sum().clamp_min(1)).item() ** .5 * 100, 'in': l_in.item() ** .5 * 100}
+            gap = (((grid[:, :, None] - v2[:, None]) ** 2).sum(-1).min(-1).values.sqrt() - .02).clamp_min(0) ** 2  # >2 cm from any body point
+            l_fill = (gap * grid_ok * use[:, None]).sum() / (grid_ok * use[:, None]).sum().clamp_min(1)
+            total = total + 20 * (l_out + l_in + l_fill)
+            parts |= {'out': ((d2 * out_m).sum() / out_m.sum().clamp_min(1)).item() ** .5 * 100, 'in': l_in.item() ** .5 * 100, 'fill': l_fill.item() ** .5 * 100}
         return total, parts, out, e_kp, (e_sil if stage else None)
 
     t0 = time.time()
@@ -286,18 +301,20 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
 
 def stance(model, shape, kreg):
     """Bone transforms (posed × rest⁻¹, Anny frame) for a natural relaxed stance: arms hanging 7° out, elbows a little
-    bent with the forearm's natural outward carrying angle, never inside the hips; palms toward the thighs; fingers
-    together with a slight curl. The shoulder bone shares the arm's turn so the deltoid keeps its shape. (Your own arm
+    bent with the forearm's natural outward carrying angle, never inside the hips; palms toward the thighs, hands in
+    line with the forearms; fingers together with a slight curl; legs near vertical, feet flat. The shoulder bone shares the arm's turn so the deltoid keeps its shape. (Your own arm
     angles from MediaPipe's 3D landmarks were too noisy to look natural.)"""
     import roma
     import torch
     dev = shape['local_changes_kwargs'].device
-    names = [f'{b}.{s}' for b in ('upperarm01', 'lowerarm01', 'shoulder01') for s in 'LR']
+    names = [f'{b}.{s}' for b in ('upperarm01', 'lowerarm01', 'shoulder01', 'upperleg01', 'foot') for s in 'LR']
     bones = torch.tensor([model.bone_labels.index(b) for b in names], device=dev)
     rot = torch.zeros(len(names), 3, device=dev, requires_grad=True)
-    reg = torch.tensor([1, 1, 1, 1, 3, 3.], device=dev)[:, None]  # the shoulder takes about a quarter of the turn
+    reg = torch.tensor([1, 1, 1, 1, 3, 3, 1, 1, 1, 1.], device=dev)[:, None]  # the shoulder takes about a quarter of the turn
     twist_b = torch.tensor([model.bone_labels.index(f'lowerarm02.{s}') for s in 'LR'], device=dev)
-    twist = torch.zeros(2, device=dev, requires_grad=True)  # forearm twist only (a free wrist bends sideways)
+    twist = torch.zeros(2, device=dev, requires_grad=True)  # forearm twist turns the palm
+    wrist_b = torch.tensor([model.bone_labels.index(f'wrist.{s}') for s in 'LR'], device=dev)
+    wrot = torch.zeros(2, 3, device=dev, requires_grad=True)  # the wrist only straightens the hand (aimed below)
     axes = torch.zeros(2, 3, device=dev)
     curl = {}  # finger bone -> rotvec (set below)
 
@@ -305,6 +322,7 @@ def stance(model, shape, kreg):
         pose = torch.eye(4, device=dev).repeat(1, model.bone_count, 1, 1)
         pose[0, bones, :3, :3] = roma.rotvec_to_rotmat(rot)
         pose[0, twist_b, :3, :3] = roma.rotvec_to_rotmat(axes * (twist if tw is None else tw)[:, None])
+        pose[0, wrist_b, :3, :3] = roma.rotvec_to_rotmat(wrot)
         for b, rv in curl.items():
             pose[0, b, :3, :3] = roma.rotvec_to_rotmat(rv)
         return model(pose_parameters=pose, **shape)
@@ -341,7 +359,9 @@ def stance(model, shape, kreg):
         tips = [(part(f'finger1-3.{s}'), part(f'finger5-3.{s}')) for s in 'LR']  # thumb, little finger
         unit = lambda v: np.array(v) / np.linalg.norm(v)  # noqa: E731  x out (your left), y back, z up
         r = math.radians
-        arms = [unit([math.tan(r(7)), -math.tan(r(3)), -1]), unit([math.tan(r(9)), -math.tan(r(12)), -1])]
+        arms = [unit([math.tan(r(7)), -math.tan(r(3)), -1]), unit([math.tan(r(5)), -math.tan(r(10)), -1])]
+        hand = unit([math.tan(r(2)), -math.tan(r(8)), -1])  # the hand hangs on in line: fingers down, barely out
+        knuckles = [part(f'finger3-1.{s}') for s in 'LR']
         for s in 'LR':  # fingers together: each one turns about the local axis that brings it toward the middle finger
             mid = V0[part(f'finger3-3.{s}')].mean(0) - V0[part(f'finger3-1.{s}')].mean(0)
             for f in (2, 4, 5):
@@ -368,15 +388,28 @@ def stance(model, shape, kreg):
             if len(band):  # never inside the hips: the wrist at least 3 cm clear of them
                 W[0] = side * max(abs(W[0].item()), band[:, 0].abs().max().item() + .03)
             targets += [(e, E), (w, W)]
-    opt = torch.optim.Adam([rot, twist], lr=.03)
+        for a, h in ((13, 9), (14, 10)):  # legs near vertical: ankles just outside the hip joints (rest: splayed 35 cm apart)
+            A = k[a].clone()
+            A[0] = k[h, 0] * 1.1
+            targets.append((a, A))
+        soles = []
+        for s in 'LR':  # the lowest fifth of each foot: kept level, so the foot stays flat as the leg swings in
+            f = torch.nonzero(part(f'foot.{s}')).squeeze(1)
+            soles.append(f[V[f, 2] <= torch.quantile(V[f, 2], .2)])
+    opt = torch.optim.Adam([rot, twist, wrot], lr=.03)
     for _ in range(250):
         opt.zero_grad()
         o = run()
         kp, out_v = kreg(o)[0], o['vertices'][0]
-        loss = sum(((kp[i] - t) ** 2).sum() for i, t in targets) + 1e-4 * (reg * rot ** 2).sum()
-        for thumb, little in tips:  # palms toward the thighs: thumb 5 cm in front of the little finger, level with it
+        loss = sum(((kp[i] - t) ** 2).sum() for i, t in targets) + 1e-4 * (reg * rot ** 2).sum() + 1e-4 * (wrot ** 2).sum()
+        loss = loss + sum(out_v[f, 2].var() for f in soles)
+        for j, side in enumerate((1, -1)):  # Anny's rest pose cocks the hand out and forward: aim it down
+            d = out_v[knuckles[j]].mean(0) - kp[7 + j]
+            aim = torch.tensor(hand * [side, 1, 1], dtype=d.dtype, device=dev)
+            loss = loss + .05 * (1 - d @ aim / d.norm())
+        for thumb, little in tips:  # palms toward the thighs: thumb 5 cm in front of the little finger (a shorter thumb sits higher)
             d = out_v[thumb].mean(0) - out_v[little].mean(0)
-            loss = loss + .3 * ((d[1] + .05) ** 2 + d[2] ** 2)
+            loss = loss + .3 * (d[1] + .05) ** 2
         loss.backward()
         opt.step()
     with torch.no_grad():

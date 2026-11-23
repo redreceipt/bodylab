@@ -44,7 +44,7 @@ cd ios && BODYLAB_TEAM=<your team id> xcodegen && open BodyLabSync.xcodeproj   #
 
 ## Raspberry Pi camera
 
-`pi/camstream.py` serves `http://<tailscale-ip>:8000/stream.mjpg`, bound to the Tailscale address only: a Pi camera via picamera2, or any Linux webcam via ffmpeg (`DEVICE`, `SIZE`, `FPS`). A second camera at another angle (Settings → Camera) sees width and depth at once, so you needn't turn; each camera checks your face itself.
+`pi/camstream.py` serves `http://<tailscale-ip>:8000/stream.mjpg`, bound to the Tailscale address only: a Pi camera via picamera2, or any Linux webcam via ffmpeg (`DEVICE`, `SIZE`, `FPS`). Up to three cameras at different angles (console → Cameras) see width and depth at once, so you needn't turn; each camera checks your face itself. Any MJPEG or RTSP stream works, including a Wi-Fi IP camera or a spare phone running an IP-camera app (no computer needed); keep them off the internet.
 
 ```sh
 PI=you@raspberrypi

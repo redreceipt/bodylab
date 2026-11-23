@@ -98,10 +98,11 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
         pi = np.clip(np.round(p).astype(int), 0, [w - 1, h - 1])
         ci = np.clip(cell, 0, [ww - 1, hh - 1])
         sel = keep[f] & inside & (facing[t[f]] > .5) & (z <= zbuf[ci[:, 1], ci[:, 0]] + .015) & v['skin'][pi[:, 1], pi[:, 0]]
+        col = sample(img, p[sel])
+        sel[sel] = col.max(1) - col.min(1) > 8  # colourless: the crop's grey fill or a blown highlight, not skin
+        col = col[col.max(1) - col.min(1) > 8]
         ok = np.zeros(len(t), bool)
         ok[f[sel]] = True
-        p = p[sel]
-        col = sample(img, p)
         per_view.append((ok, col, facing[t][ok] ** 2 * v['weight']))
     # Each view's colour balance matched to all views' median (the two cameras see different white balance).
     allc = np.concatenate([c for _, c, _ in per_view]) if per_view else np.zeros((0, 3))

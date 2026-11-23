@@ -40,12 +40,11 @@ function cameras() {
   return `<section><h2>Cameras</h2>
     <div id="camStatus" class="muted">…</div>
     <form id="fCamera"><div class="grid">
-      <label>Camera 1 URL<input name="camera_url" value="${esc(p.camera_url)}"></label><label>Rotation<select name="rotate">${rot('rotate')}</select></label>
-      <label>Camera 2 URL<input name="camera2_url" value="${esc(p.camera2_url)}"></label><label>Rotation<select name="rotate2">${rot('rotate2')}</select></label></div>
+      ${['', '2', '3'].map((k, i) => `<label>Camera ${i + 1} URL<input name="camera${k}_url" value="${esc(p[`camera${k}_url`])}"></label><label>Rotation<select name="rotate${k}">${rot(`rotate${k}`)}</select></label>`).join('')}</div>
       <label><input type="checkbox" name="bare_only" ${p.bare_only === false ? '' : 'checked'}> Only measure a bare torso (underwear is fine)</label>
       <label>Preview<select name="preview">${opt('silhouette', 'Silhouette only (private)', p.preview !== 'camera')}${opt('camera', 'Camera image (for aiming)', p.preview === 'camera')}</select></label>
       <button>Save</button> <button type="button" id="clear">Discard today's frames</button></form>
-    <details id="preview"><summary>Preview</summary><select id="previewCam">${opt(1, 'Camera 1')}${opt(2, 'Camera 2')}</select><img id="live" alt=""></details></section>`;
+    <details id="preview"><summary>Preview</summary><select id="previewCam">${opt(1, 'Camera 1')}${opt(2, 'Camera 2')}${opt(3, 'Camera 3')}</select><img id="live" alt=""></details></section>`;
 }
 function fit() {
   const f = S.fit_info, scan = S.scans.at(-1), m = scan?.m ?? {};
@@ -101,7 +100,7 @@ async function load() {
 async function poll() {
   try {
     const st = await (await fetch('/api/status')).json(), line = (n, s) => `<div><span class="dot ${s.state}"></span>Camera ${n}: ${esc(s.msg)}${s.match != null ? ` (face match ${s.match})` : ''}</div>`;
-    if ($('#camStatus')) $('#camStatus').innerHTML = line(1, st) + (st.cam2 ? line(2, st.cam2) : '');
+    if ($('#camStatus')) $('#camStatus').innerHTML = line(1, st) + (st.cam2 ? line(2, st.cam2) : '') + (st.cam3 ? line(3, st.cam3) : '');
   } catch { /* restarting */ }
   setTimeout(poll, 2000);
 }

@@ -709,7 +709,7 @@ $('#cam').addEventListener('click', () => {
 async function poll() {
   try {
     const st = await (await fetch('/api/status')).json();
-    $('#camMsg').textContent = st.msg + (st.cam2 ? ` · 2nd camera: ${st.cam2.state === 'offline' ? 'offline' : st.cam2.state === 'scanning' ? 'measuring' : 'on'}` : '');
+    $('#camMsg').textContent = st.msg + ['cam2', 'cam3'].filter((k) => st[k]).map((k) => ` · camera ${k[3]}: ${st[k].state === 'offline' ? 'offline' : st[k].state === 'scanning' ? 'measuring' : 'on'}`).join('');
     $('#dot').className = st.state;
     $('#barF').style.width = Math.min(1, (st.frames ?? 0) / 150) * 50 + '%'; // views today (150 = plenty)
     $('#barS').style.width = Math.min(1, (st.angle ?? 0) / 75) * 50 + '%'; // how far you've turned: sets depth
