@@ -236,6 +236,10 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     off = (10, 3) if female else (0, 0)
     fat_t = float(np.clip(.2 + (prof['bf'] - 8 - off[0]) / 40, .1, .9)) if 'bf' in prof else .45
     muscle_t = float(np.clip(.5 + (prof['ffmi'] - 19 + off[1]) / 8, .2, 1)) if 'ffmi' in prof else .6
+    # Definition the outlines can't see (the pecs' lower edge, a toned stomach): leaner shows more, ~.5 at 13 % for men.
+    # shortcut: eyeballed on Anny's renders; your tape and the side views still win where they constrain it
+    define = {labels.index(k): float(np.clip((18 + off[0] - prof['bf']) / 10, 0, .7)) if 'bf' in prof else 0. for k in
+              ('stomach-tone-incr', *(() if female else ('torso-muscle-pectoral-incr',))) if k in labels}
 
     def loss(stage):
         out = run()
@@ -254,7 +258,8 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
         mass = volume(rest) * DENSITY
         # Outlines can't separate muscle from fat: lean on your body composition (last fit), else a fit adult.
         l_reg = (rot ** 2).mean() * .01 + (cam[:, 0] ** 2).mean() * .1 + (torch.tanh(local) ** 2).mean() * .02 \
-            + .004 * ((torch.sigmoid(phen['muscle']) - muscle_t) ** 2 + (torch.sigmoid(phen['weight']) - fat_t) ** 2)
+            + .004 * ((torch.sigmoid(phen['muscle']) - muscle_t) ** 2 + (torch.sigmoid(phen['weight']) - fat_t) ** 2) \
+            + .01 * sum((torch.tanh(local[i]) - t) ** 2 for i, t in define.items())
         total = l_kp + .3 * l_3d + 10 * l_h + l_reg
         if prof.get('weight') and stage:  # outlines leave volume loose (±10 %); a weigh-in pins it, trusted less with age
             trust = min(1, max(0, 1 - (prof.get('weight_age', 0) - 4) / 180)) * (.2 if len(targets) >= 3 else 1)  # your tape sets it

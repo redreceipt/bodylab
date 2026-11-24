@@ -114,18 +114,21 @@ Object.assign(controls, { enableDamping: true, autoRotate: true, autoRotateSpeed
 controls.target.set(0, 0.88, 0);
 if (innerWidth < 600) { camera.position.multiplyScalar(1.15); controls.target.y = 0.8; } // phone: the whole body between the bars
 controls.addEventListener('start', () => { controls.autoRotate = false; focus.target = null; });
-// Lit like a person, not a mannequin: a warm key with soft shadows, a cool fill, warm bounce from below, a subtle rim.
-scene.add(new THREE.HemisphereLight('#f4f1ee', '#4a3a32', 0.7));
-const keyLight = new THREE.DirectionalLight('#ffeedd', 2.6);
-keyLight.position.set(2, 4, 3);
+// Lit like a portrait: a warm key from above your viewpoint's right (it moves with the view, so muscle reads from every side)
+// with soft shadows, a cool fill from the left, warm bounce from below, a subtle rim; little flat ambient to wash out form.
+scene.add(new THREE.HemisphereLight('#f4f1ee', '#4a3a32', 0.35));
+const keyLight = new THREE.DirectionalLight('#ffeedd', 3);
+keyLight.position.set(2.2, 3.6, 0.5); // camera space: right, up, slightly behind you
+camera.add(keyLight);
+scene.add(camera);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(2048, 2048);
 Object.assign(keyLight.shadow, { radius: 4, bias: -0.0004, normalBias: 0.02 });
 Object.assign(keyLight.shadow.camera, { left: -1.5, right: 1.5, top: 2.5, bottom: -0.5 });
-scene.add(keyLight);
-const fill = new THREE.DirectionalLight('#dfe8ff', 0.7);
-fill.position.set(-3, 2, 2.5);
-scene.add(fill);
+const fill = new THREE.DirectionalLight('#dfe8ff', 0.55);
+fill.position.set(-3, 0.8, 0.5);
+camera.add(fill);
+for (const l of [keyLight, fill]) { l.target.position.set(0, 0.9, 0); scene.add(l.target); } // at your middle
 const rim = new THREE.DirectionalLight('#9feeff', 0.9);
 rim.position.set(-3, 2.5, -3);
 scene.add(rim);
@@ -148,7 +151,7 @@ const A = initBody(...await Promise.all([fetch('/static/assets/body.json').then(
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.9;
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.55;
+scene.environmentIntensity = 0.35;
 
 // Skin micro-detail: a tiling normal map of pores and fine creases (procedural), much finer than any texture texel.
 function poreNormals(size = 512) {
@@ -224,7 +227,7 @@ const mats = {
   eyes: new THREE.MeshPhysicalMaterial({ roughness: 0.05, clearcoat: 1 }),
   ...Object.fromEntries(['trunks', 'briefs', 'bra'].map((g) => [g, new THREE.MeshPhysicalMaterial({ map: fabric(), roughness: 0.85,
     sheen: 0.5, sheenRoughness: 0.8, sheenColor: '#9aa3b5', side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })])),
-  genitals: new THREE.MeshPhysicalMaterial({ roughness: 0.6, sheen: 0.3, sheenRoughness: 0.7, sheenColor: '#ffcfb8' }),
+  genitals: new THREE.MeshPhysicalMaterial({ roughness: 0.55, sheen: 0.08, sheenRoughness: 0.7, sheenColor: '#e8a890', vertexColors: true }),
   ghost: new THREE.MeshBasicMaterial({ color: '#3ef0ff', transparent: true, opacity: 0.22, depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 8 }),
 };
@@ -242,7 +245,7 @@ async function updateLook() {
   const hair = p.hair ?? face?.hair?.style ?? (sex === 'female' ? 'long01' : 'short02'), hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
   const { canvas: skinTex, tone } = await skinCanvas(sex, { face, photo, tone: p.skin ?? (S.skin?.tone && '#' + S.skin.tone.map((v) => v.toString(16).padStart(2, '0')).join('')), hairColor: HAIRS[hair] ? hairColor : null,
     baseUrl: S.skin_baked ? `/api/skin.jpg?${S.skin_baked}` : null });
-  mats.genitals.color.set(`rgb(${tone.map(Math.round).join(',')})`).multiplyScalar(0.8); // genital skin is darker than the body's
+  mats.genitals.color.set(`rgb(${tone.map(Math.round).join(',')})`).multiply(new THREE.Color(0.8, 0.72, 0.7)); // darker and redder than the body's
   const skin = new THREE.CanvasTexture(skinTex);
   Object.assign(skin, { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 });
   mats.skin.map?.dispose();
@@ -330,8 +333,23 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
       group.add(Object.assign(new THREE.Mesh(cloth, mats[g]), { castShadow: true }));
     }
     if (!look.clothes && sex !== 'female') {
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(genitalPositions(fit.pos), 3));
+      const g = new THREE.BufferGeometry(), P = genitalPositions(fit.pos), n = P.length / 3, col = new Float32Array(n * 3);
+      // At rest it hangs: what reaches forward of its base swings ~12° toward vertical (the scrotum below stays put), and
+      // the skin darkens and reddens toward the tip.
+      let top = -Infinity, low = Infinity, bz = 0, by = 0, nb = 0;
+      for (let i = 0; i < n; i++) { top = Math.max(top, P[i * 3 + 1]); low = Math.min(low, P[i * 3 + 1]); }
+      for (let i = 0; i < n; i++) if (P[i * 3 + 1] > top - 2) { by += P[i * 3 + 1]; bz += P[i * 3 + 2]; nb++; }
+      by /= nb; bz /= nb;
+      for (let i = 0; i < n; i++) {
+        const dy = P[i * 3 + 1] - by, dz = P[i * 3 + 2] - bz, a = (-12 * Math.PI) / 180 * Math.min(1, Math.max(0, dz / 6));
+        P[i * 3 + 1] = by + dy * Math.cos(a) + dz * Math.sin(a);
+        P[i * 3 + 2] = bz - dy * Math.sin(a) + dz * Math.cos(a);
+        const t = Math.min(1, Math.max(0, (top - P[i * 3 + 1]) / (top - low)));
+        const tip = t < 0.75 ? 0 : (t - 0.75) / 0.25;
+        col.set([1 - 0.12 * tip, 1 - 0.25 * tip, 1 - 0.22 * tip], i * 3);
+      }
+      g.setAttribute('position', new THREE.BufferAttribute(P, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
       g.setIndex(new THREE.BufferAttribute(A.arr('genital.tris'), 1));
       g.computeVertexNormals();
       group.add(Object.assign(new THREE.Mesh(g, mats.genitals), { userData: { part: 'penis_len' } })); // tap: length and girth

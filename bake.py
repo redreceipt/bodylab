@@ -127,6 +127,9 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
         # Detail = your skin ÷ its own blur (~1.5 cm): marks, hair, pores, not the room's light falling across you.
         lit = cv2.GaussianBlur(tex * cover[..., None], (0, 0), 12) / np.maximum(cv2.GaussianBlur(cover, (0, 0), 12), 1e-3)[..., None]
         detail = 1 + (np.clip(tex / np.maximum(lit, 1), .8, 1.25) - 1) * .8  # gentle: skin detail, not grime
+        # Muscle definition (~2-5 cm: ab grooves, the pecs' lower edge): shading every view agrees on, gentler still.
+        broad = cv2.GaussianBlur(tex * cover[..., None], (0, 0), 36) / np.maximum(cv2.GaussianBlur(cover, (0, 0), 36), 1e-3)[..., None]
+        detail = detail * (1 + (np.clip(lit / np.maximum(broad, 1), .85, 1.18) - 1) * .7)
         a = np.minimum(cv2.GaussianBlur(cover, (0, 0), 3), cover)  # feathered inward from what was seen
         island = np.zeros((size, size), np.uint8)
         island[ys, xs] = 1  # texture sections: the blur above mixes across their edges, so detail fades out there
