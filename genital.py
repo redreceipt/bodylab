@@ -70,7 +70,7 @@ def measure(ref_dir, height_cm, day):
         if p.name[:10] not in days or not p.with_suffix('.jpg').exists():
             continue
         rec = json.loads(p.read_text())
-        if (rec.get('ref') and abs(rec.get('theta', 90)) < 25 and (rec.get('skin') or {}).get('thighs', 0) >= .9
+        if (rec.get('ref') and abs(rec.get('theta', 90)) < 25 and ((rec.get('skin') or {}).get('thighs') or 0) >= .9
                 and (r := shaft(cv2.imread(str(p.with_suffix('.jpg'))), rec, height_cm)) and r[2] >= .6):
             found.append(r)
     if len(found) < 3:
