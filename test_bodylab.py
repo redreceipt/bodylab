@@ -190,10 +190,9 @@ wl = [{'kind': 'daily', 'ts': now - d * 86400, 'weight': 80 - (27 - d) * .05 + (
 assert abs(M.insights([], wl, {}, now)['summary']['changes']['weight'] + 1.35) < .1  # true -1.35; last-minus-first says +0.15
 # Today's checklist: a weigh-in and a short food log show as done / incomplete.
 d = [{'kind': 'daily', 'ts': now - k * 86400, 'kcal': 2200, 'steps': 8000} for k in range(1, 8)]
-d += [{'kind': 'daily', 'ts': now, 'kcal': 600, 'weight': 80}, {'kind': 'reference', 'ts': now, 'ref_waist': 84}]
+d += [{'kind': 'daily', 'ts': now, 'kcal': 600, 'weight': 80}]
 day = M.insights([], d, {}, now)['days'][-1]
 assert day['weight'] and not day['food'] and not day['sleep'] and not day['scan'] and day['kcal'] == 600, day
-assert M.series('ref_waist', [], d) == [(now, 84)]
 # Predictions: a 500 kcal/day deficit for 12 weeks loses ~5 kg, mostly fat; lifting + protein keeps more lean mass.
 start = {'weight': 90, 'bf': 25, 'waist': 95, 'hips': 102, 'chest': 104, 'neck': 40, 'arm_l': 35}
 rest = M.predict(start, 'male', 12, -500, 0, 1.0, 180)
@@ -234,6 +233,13 @@ assert all(app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0, ca
 sil = app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0)
 big = app.silhouette(cv2.resize(img, None, fx=2, fy=2) / 255.0, pts * 2, world, pts[23:25].mean(0) * 2, 1400.0)
 assert len(sil['c']) == 160 and abs(np.array(sil['c']).min(0) - np.array(big['c']).min(0)).max() < .01
+# One impossible Apple Health value (another app's) is skipped, not the whole sync; typed in, it's an error.
+assert app.daily_data({'water': 30, 'kcal': 2000}, strict=False) == {'kcal': 2000.0}
+try:
+    app.daily_data({'water': 30})
+    raise AssertionError('typed water of 30 L accepted')
+except ValueError:
+    pass
 print('sync ok')
 
 # Body-shape fit helpers (fit.py; the fit itself needs the optional PyTorch group).

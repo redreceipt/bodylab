@@ -3,7 +3,7 @@
 - base mesh + default young male/female shapes (base + 1/3 each ethnicity target, as MakeHuman does)
 - per-vertex rig region weights and joint positions (cm, feet at y=0, facing +z, character's left at +x)
 - skin textures, hair styles, eyebrows, eyelashes, eyes and workout clothes (proxies anchored to the base mesh,
-  so they follow the fit); breast and genital morphs; MakeHuman's genital helper mesh
+  so they follow the fit); breast morphs; male genitals (a CC0 community proxy, see genitals())
 - face anchors: the template head is rendered front-on and run through MediaPipe's face landmarker, giving each
   of the 478 face landmarks a UV on the skin texture. A selfie's landmarks then map the photo onto the skin.
 
@@ -40,9 +40,7 @@ SHAPES = {'cup+': 'breast/female-young-averagemuscle-averageweight-maxcup-averag
           'cup-': 'breast/female-young-averagemuscle-averageweight-mincup-averagefirmness',
           'firm+': 'breast/female-young-averagemuscle-averageweight-averagecup-maxfirmness',
           'firm-': 'breast/female-young-averagemuscle-averageweight-averagecup-minfirmness',
-          'length+': 'genitals/penis-length-incr', 'length-': 'genitals/penis-length-decr',
-          'girth+': 'genitals/penis-circ-incr', 'girth-': 'genitals/penis-circ-decr',
-          'testicles+': 'genitals/penis-testicles-incr', 'testicles-': 'genitals/penis-testicles-decr'}
+}
 EYE_COLORS = ['brown', 'brownlight', 'blue', 'deepblue', 'bluegreen', 'green', 'grey', 'lightblue', 'ice']
 
 
@@ -298,8 +296,8 @@ def subdivide(faces, levels=2):
                 boundary.setdefault(b, []).append(a)
         vp = {}
         for v, fs in around.items():
-            if v in boundary:  # open edge (where it meets the body): cubic B-spline along the border
-                vp[v] = mix([(.75, rows[v])] + [(.125, rows[u]) for u in boundary[v][:2]])
+            if v in boundary:  # open edge (where it meets the body): stays put, so no gap opens there
+                vp[v] = rows[v]
             else:  # (F + 2R + (n-3)P) / n: F = mean face point, R = mean edge midpoint, n = valence
                 nb = [e for e in edges if v in e]
                 n = len(nb)
@@ -383,32 +381,11 @@ def main():
         oval.append(edges[oval[-1]])
     meta['face_oval'] = oval
 
-    # Breast and genital shape morphs, sparse, in cm.
+    # Breast shape morphs, sparse, in cm.
     for name, path in SHAPES.items():
         t = target(f'targets/{path}.target') * 10
         idx = np.flatnonzero(np.abs(t).sum(1))
         arrays[f'morph.{name}.idx'], arrays[f'morph.{name}.d'] = idx.astype('<u2'), t[idx].astype('<f4')
-
-    # Genitals: MakeHuman's helper geometry, plus the template's size and what each full morph does to it,
-    # so a length or girth in cm maps to morph weights.
-    rows, quads = subdivide([[v for v, _ in f] for f in faces['helper-genital']])  # the helper is low-poly; smooth it
-    arrays |= {'genital.ptr': np.cumsum([0] + [len(r) for r in rows]).astype('<u4'),
-               'genital.idx': np.array([k for r in rows for k in r], '<u2'), 'genital.w': np.array([w for r in rows for w in r.values()], '<f4'),
-               'genital.tris': np.array([[q[0], q[k], q[k + 1]] for q in quads for k in (1, 2)], '<u2')}
-    shaft = np.flatnonzero(np.abs(target('targets/genitals/penis-circ-incr.target')).sum(1))
-    axis = (target('targets/genitals/penis-length-incr.target')[shaft]).sum(0)
-    axis /= np.linalg.norm(axis)
-
-    def size(v):
-        p = v[shaft]
-        t = p @ axis
-        length = t.max() - t.min()
-        mid = np.abs(t - (t.min() + t.max()) / 2) < .15 * length
-        q = p[mid] - np.outer(t[mid], axis)
-        return [round(float(length), 2), round(float(2 * np.pi * np.linalg.norm(q - q.mean(0), axis=1).mean()), 2)]
-    vm = tmpl['male']
-    meta['genital'] = {'base': size(vm)} | {k: size(vm + 10 * target(f'targets/{SHAPES[k]}.target')) for k in ('length+', 'length-', 'girth+', 'girth-')}
-    print('genital template size (length, girth cm):', meta['genital'])
 
     # Underwear made from the body itself: a region of its surface, cut along smooth edges (see underwear()).
     body_tris = src[tris].reshape(-1, 3)
@@ -435,6 +412,7 @@ def main():
             rgba = image(path.rsplit('/', 1)[0] + '/' + tex)
             out = gray_rgba(rgba, 1024 if kind == 'hair' else 256) if kind != 'eyelashes' else cv2.resize(rgba, (256, 256))
             cv2.imwrite(str(OUT / f'{name}.png'), out, [cv2.IMWRITE_PNG_COMPRESSION, 9])  # iOS WebKit rejects alpha WebP
+    arrays |= genitals(meta)
     # Eye colours: texture + mean iris colour (irises sit at fixed spots in every MakeHuman eye texture).
     meta['eyes'] = {}
     for color in EYE_COLORS:
@@ -459,6 +437,44 @@ def main():
 # Muscle relief and body hair: Mindfront's "skin male african middleage" (CC0, MakeHuman community), in the same UV layout.
 DETAIL = 'http://files.makehumancommunity.org/sites/default/files/skins/1422/'
 DETAIL_NORMALS, DETAIL_SPECULAR = DETAIL + '2059795311/skin_male_african_middleage_NRM.png', DETAIL + '414990480/skin_male_african_middleage_SPEC.png'
+
+
+def genitals(meta):
+    """Male genitals: Slayer227's "Erect Penis" topology (CC0, MakeHuman community): a shaft with glans and a scrotum,
+    bound to the body like any proxy; kept: the part it adds to the body. The browser bends the shaft down at rest and
+    sizes it (static/app.js), so 'genitals.shaft' says how much each (smoothed) vertex follows the shaft (1) or stays (0: scrotum);
+    its axis runs through the centres of 'rings' (two cross-sections), and it leaves the body 'base' × their distance
+    behind the first."""
+    url = 'http://files.makehumancommunity.org/sites/default/files/proxies/7088/'
+    refs, w, d, scale = parse_mhclo(fetch(url + '1641454131/Male_Gen-Heal1.proxy').read_text())
+    pv, _, pfaces = parse_obj(fetch(url + '1641454127/Male_Gen-Heal1.obj').read_text())
+    new = ~((w[:, 0] == 1) & (refs[:, 0] == refs[:, 1]))  # not one of the body's own vertices
+    faces = [[v for v, _ in f] for g in pfaces.values() for f in g if any(new[v] for v, _ in f)]
+    keep = sorted({v for f in faces for v in f})
+    at = {v: i for i, v in enumerate(keep)}
+    P, gen = pv[keep], new[keep]
+    tip = int(np.argmax(np.where(gen, P[:, 2], -np.inf)))
+    rings = [np.flatnonzero(gen & (np.abs(P[:, 2] - P[tip, 2] + back) < .015)) for back in (.16, .07)]  # free-shaft cross-sections
+    c, c2 = P[rings[0]].mean(0), P[rings[1]].mean(0)  # the axis runs through their centres (the scrotum ends ~20 cm behind the tip)
+    ax = (c2 - c) / np.linalg.norm(c2 - c)
+    along = (P - c) @ ax
+    rad = np.linalg.norm(P - c - np.outer(along, ax), axis=1)
+    rel = pv[~new] - c
+    s_body = rel @ ax
+    surface = s_body[np.linalg.norm(rel - np.outer(s_body, ax), axis=1) < .03].max()  # where the axis meets the body
+    # the shaft is within ~2.8 cm of its axis, the scrotum 5+ cm below it: blend between; past the scrotum (6 cm out), all of it
+    shaft = np.where(gen, np.where(along > surface + .06, 1, np.clip((.045 - rad) / .013, 0, 1)), 0)
+    meta['proxies']['genitals'] = {'kind': 'genitals', 'scale': scale}
+    meta['genitals'] = {'tip': tip, 'rings': [r.tolist() for r in rings], 'base': round(float(-surface / np.linalg.norm(c2 - c)), 3),
+                        'license': 'Erect Penis by Slayer227, MakeHuman community (CC0 1.0)'}
+    # The model's shaft has a ring every ~3 cm: too coarse to bend. Smoothed twice (a ring every ~0.75 cm), as weights over
+    # its vertices, so the browser smooths the fitted mesh, then bends it.
+    rows, quads = subdivide([[at[v] for v in f] for f in faces])
+    return {'genitals.refs': refs[keep].astype('<u2'), 'genitals.w': w[keep].astype('<f4'), 'genitals.d': d[keep].astype('<f4'),
+            'genitals.ptr': np.cumsum([0] + [len(r) for r in rows]).astype('<u4'),
+            'genitals.idx': np.array([k for r in rows for k in r], '<u2'), 'genitals.mix': np.array([x for r in rows for x in r.values()], '<f4'),
+            'genitals.tris': np.array([[q[0], q[k], q[k + 1]] for q in quads for k in (1, 2)], '<u2'),
+            'genitals.shaft': np.array([round(255 * sum(x * shaft[k] for k, x in r.items())) for r in rows], 'u1')}
 
 
 def detail_maps():

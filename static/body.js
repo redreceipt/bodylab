@@ -92,19 +92,13 @@ function template(pos, J, sex) {
   return t;
 }
 
-// Breast and genital morph weights from sizes: cup = bust minus underbust (cm), penis length/girth (cm),
-// firmness and testicles -1..1. Lengths are converted to the template's scale first.
-function morphWeights(sex, shape, s) {
+// Breast morph weights: cup = bust minus underbust (cm), firmness -1..1.
+function morphWeights(sex, shape) {
   const w = {}, set = (k, v) => { if (v > 0) w[`${k}+`] = Math.min(v, 1.5); else if (v < 0) w[`${k}-`] = Math.min(-v, 1.5); };
   if (sex === 'female') {
     // shortcut: MakeHuman's "average cup" taken as ~2.5 in of difference, min ~0 in, max ~6 in; refine against tape fits
     if (shape.cup != null) { const inch = shape.cup / 2.54; set('cup', inch >= 2.5 ? (inch - 2.5) / 3.5 : (inch - 2.5) / 2.5); }
     set('firm', shape.firmness ?? 0);
-  } else {
-    const g = T.meta.genital, toward = (v, base, up, down) => (v >= base ? (v - base) / (up - base) : (v - base) / (base - down));
-    if (shape.length) set('length', toward(shape.length / s, g.base[0], g['length+'][0], g['length-'][0]));
-    if (shape.girth) set('girth', toward(shape.girth / s, g.base[1], g['girth+'][1], g['girth-'][1]));
-    set('testicles', shape.testicles ?? 0);
   }
   return w;
 }
@@ -117,7 +111,7 @@ export function fitBody(dims, H, sex, shape = {}, fitted = null, ref = {}) {
   const ratio = (scan, tmpl) => (scan && tmpl ? clamp(scan / (tmpl * s), 0.6, 1.8) : 1);
   const size = (k, tmpl) => (fitted ? ref[k] / s : tmpl);
   let pos = fitted ? Float32Array.from(fitted, (v) => v / s) : t.pos;
-  const morphs = Object.entries(morphWeights(sex, shape, s)).filter(([k]) => !(fitted && /^(cup|firm)/.test(k))); // fit has the bust
+  const morphs = Object.entries(morphWeights(sex, shape)).filter(([k]) => !(fitted && /^(cup|firm)/.test(k))); // fit has the bust
   if (morphs.length) {
     pos = Float32Array.from(pos);
     for (const [name, wt] of morphs) {
@@ -301,11 +295,37 @@ export function underwear(name, pos) {
   return p;
 }
 
-// Smoothed genital mesh: each vertex is a fixed mix of helper vertices (Catmull-Clark weights from the build).
-export function genitalPositions(pos) {
-  const ptr = T.arr('genital.ptr'), idx = T.arr('genital.idx'), w = T.arr('genital.w'), out = new Float32Array((ptr.length - 1) * 3);
-  for (let r = 0; r < ptr.length - 1; r++) for (let j = ptr[r]; j < ptr[r + 1]; j++) for (let k = 0; k < 3; k++) out[r * 3 + k] += w[j] * pos[idx[j] * 3 + k];
-  return out;
+// Genitals: a CC0 community model (modelled erect, ~22 cm) on the fitted body (cm), its shaft sized to length and girth
+// (cm) and bent: up 0 hangs, 1 is erect. The first few cm curve; the rest follows straight. Returns the smoothed mesh's
+// positions and each vertex's place along the shaft (0 base … 1 tip; -1: scrotum).
+export function genitalMesh(pos, { length, girth, up }) {
+  const P0 = fitProxy('genitals', pos), w = T.arr('genitals.shaft'), { tip, rings, base } = T.meta.genitals, n = w.length;
+  const v = (P, i) => [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]], dot = (x, y) => x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+  const add = (x, y, k = 1) => [x[0] + k * y[0], x[1] + k * y[1], x[2] + k * y[2]], unit = (x) => add([0, 0, 0], x, 1 / Math.hypot(...x));
+  const [c1, c2] = rings.map((r) => r.reduce((sum, i) => add(sum, v(P0, i), 1 / r.length), [0, 0, 0]));
+  const a = unit(add(c2, c1, -1)), B = add(c1, a, -base * Math.hypot(...add(c2, c1, -1))); // axis; where it leaves the body
+  const u = unit(add([0, -1, 0], a, a[1])), e = [a[1] * u[2] - a[2] * u[1], a[2] * u[0] - a[0] * u[2], a[0] * u[1] - a[1] * u[0]]; // down, across
+  const ptr = T.arr('genitals.ptr'), idx = T.arr('genitals.idx'), mix = T.arr('genitals.mix'), P = new Float32Array(n * 3);
+  for (let r = 0; r < n; r++) for (let j = ptr[r]; j < ptr[r + 1]; j++) for (let k = 0; k < 3; k++) P[r * 3 + k] += mix[j] * P0[idx[j] * 3 + k]; // smoothed
+  const L0 = dot(add(v(P0, tip), B, -1), a), radii = [];
+  for (let i = 0; i < n; i++) {
+    const p = add(v(P, i), B, -1), s = dot(p, a);
+    if (w[i] === 255 && Math.abs(s / L0 - 0.5) < 0.15) radii.push(Math.hypot(...add(p, a, -s)));
+  }
+  const G0 = 2 * Math.PI * radii.sort((x, y) => x - y)[radii.length >> 1];
+  const kL = length / L0, kG = girth / G0, bend = 1.5, phi = (80 - 105 * up) * Math.PI / 180, k = phi / bend || 1e-6;
+  const along = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = add(v(P, i), B, -1), s = dot(p, a), f = w[i] / 255;
+    along[i] = f > 0.5 ? Math.max(0, s / L0) : -1;
+    if (s <= 0 || f === 0) continue; // inside the body, or scrotum: as modelled
+    const S = s * kL, t = Math.min(S, bend) * k, g = 1 + (kG - 1) * Math.min(1, s / 2); // girth eases in over 2 cm: the root meets the body
+    const dir = add([0, 0, 0], a, Math.cos(t)).map((x, m) => x + u[m] * Math.sin(t)), under = add([0, 0, 0], u, Math.cos(t)).map((x, m) => x - a[m] * Math.sin(t));
+    const c = add(add(add([0, 0, 0], a, Math.sin(t) / k), u, (1 - Math.cos(t)) / k), dir, Math.max(0, S - bend)); // centreline
+    const q = add(add(add(B, c), under, dot(p, u) * g), e, dot(p, e) * g);
+    for (let m = 0; m < 3; m++) P[i * 3 + m] += (q[m] - P[i * 3 + m]) * f;
+  }
+  return { pos: P, along };
 }
 
 export const assets = () => T;

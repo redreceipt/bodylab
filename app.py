@@ -202,7 +202,7 @@ def post_face_scan(b):
     V, tris = np.array(b['vertices'], float), np.array(b['triangles'], int).reshape(-1, 3)
     if V.ndim != 2 or V.shape[1] != 3 or len(V) < 100 or tris.min() < 0 or tris.max() >= len(V) or not b.get('frames'):
         raise ValueError('Not a face scan')
-    f = min(b['frames'], key=lambda f: abs(f['yaw']))
+    f = min(b['frames'], key=lambda f: abs(f['yaw']) + abs(f.get('pitch', 0)))  # the straightest
     img = cv2.imdecode(np.frombuffer(base64.b64decode(f['jpg']), np.uint8), cv2.IMREAD_COLOR)
     px = np.array(f['px'], float)
     if img is None or px.shape != (len(V), 2):
@@ -239,7 +239,7 @@ def post_face_scan(b):
 
 def get_logs():
     return [{'id': r['id'], 'ts': r['ts'], 'kind': r['kind'], **json.loads(r['data'])}
-            for r in db().execute('select * from logs order by ts')]
+            for r in db().execute("select * from logs where kind != 'reference' order by ts")]  # old tape: no longer used
 
 
 def weights(logs):
@@ -263,19 +263,15 @@ def app_state():
     if prof and prof.get('height_cm'):
         w, rows = weights(logs), []
         fits = {r['day']: json.loads(r['params'])['tape'] for r in c.execute('select day, params from fits')}
-        manual = {}  # your tape (oldest first, so the day's latest wins): the truth for the day it was taken
-        for l in logs:
-            if l['kind'] == 'reference':
-                manual.setdefault(date.fromtimestamp(l['ts']).isoformat(), {}).update({p: l[k] for k, p in measure.REF_PART.items() if k in l})
         for r in c.execute('select * from scans order by ts'):
-            raw = json.loads(r['raw']) | {'tape': fits.get(r['day'], {}) | manual.get(r['day'], {}), 'manual': sorted(manual.get(r['day'], {}))}
+            raw = json.loads(r['raw']) | {'tape': fits.get(r['day'], {})}
             if measure.implausible(raw):  # misread poses saved before the plausibility check; kept, not shown
                 hidden += 1
             else:
                 rows.append((r, raw))
         for r, raw in rows:
             m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']))
-            scans.append({'id': r['id'], 'ts': r['ts'], 'day': r['day'], 'fit': r['day'] in fits, 'manual': raw['manual'], 'side': raw.get('n_angle', 0) >= 30,
+            scans.append({'id': r['id'], 'ts': r['ts'], 'day': r['day'], 'fit': r['day'] in fits, 'side': raw.get('n_angle', 0) >= 30,
                           'frames': raw.get('n_frames'), 'm': m, 'dims': dims})
     face = face_files()[1]
     face = json.loads(face.read_text()) if face.exists() else None
@@ -804,17 +800,18 @@ def workout_data(b):
     return data
 
 
-def daily_data(b):
-    return {k: num(b[k], lo, hi, k) for k, (lo, hi) in DAILY.items() if b.get(k) not in (None, '')}
+def daily_data(b, strict=True):
+    """Typed values in range. Apple Health's come from other apps: one impossible sample is skipped, not the whole sync."""
+    v = {k: float(b[k]) for k in DAILY if b.get(k) not in (None, '')}
+    return {k: num(x, *DAILY[k], k) for k, x in v.items()} if strict else {k: x for k, x in v.items() if DAILY[k][0] <= x <= DAILY[k][1]}
 
 
 def post_log(b):
     kind = b.get('kind')
     if kind == 'workout':
         data = workout_data(b)
-    elif kind in ('daily', 'reference'):
-        data = daily_data(b) if kind == 'daily' else {k: num(b[k], lo, hi, k) for k, (lo, hi) in measure.REFERENCE.items()
-                                                       if b.get(k) not in (None, '')}
+    elif kind == 'daily':
+        data = daily_data(b)
         if not data:
             raise ValueError('Enter at least one value')
     else:
@@ -833,7 +830,7 @@ def post_sync(b):
               'units': hp.get('units') if hp.get('units') in ('metric', 'imperial') else None}
     if any(v and prof.get(k) != v for k, v in health.items()):
         set_profile({**prof, **{k: v for k, v in health.items() if v}})
-    rows = [(ts_of(d), 'daily', data, f"health:day:{d['date']}") for d in b.get('days') or [] if (data := daily_data(d))]
+    rows = [(ts_of(d), 'daily', data, f"health:day:{d['date']}") for d in b.get('days') or [] if (data := daily_data(d, strict=False))]
     rows += [(num(w['start'], 0, 1e10, 'start'), 'workout', workout_data(w), f"health:workout:{str(w['id'])[:64]}")
              for w in b.get('workouts') or []]
     with db() as c:
@@ -890,7 +887,7 @@ POST = {'/api/face-scan': post_face_scan, '/api/profile': post_profile, '/api/lo
         '/api/clear-today': lambda b: cap.clear_today(), '/api/sync': post_sync,
         '/api/predict': post_predict}
 LOCAL = ('localhost', '127.0.0.1')
-TOKEN_PATHS = ('/api/sync', '/api/face', '/api/face-scan', '/api/logs')  # what the paired iPhone may call
+TOKEN_PATHS = ('/api/sync', '/api/face-scan', '/api/logs')  # what the paired iPhone may call
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -957,14 +954,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply({'error': 'bad sync token'}, 401)
         elif not self.allowed():
             return
-        if path not in POST and path != '/api/face':
+        if path not in POST:
             return self.reply({'error': 'not found'}, 404)
         size = int(self.headers.get('Content-Length') or 0)
         if size > 15_000_000:
             return self.reply({'error': 'too large'}, 413)
         try:
             body = self.rfile.read(size)
-            result = post_face(body) if path == '/api/face' else POST[path](json.loads(body or b'{}'))
+            result = POST[path](json.loads(body or b'{}'))
         except (ValueError, TypeError, KeyError) as e:
             return self.reply({'error': str(e)}, 400)
         self.reply(result or {'ok': True})
@@ -973,10 +970,6 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         parts = urlparse(self.path).path.strip('/').split('/')
-        if parts == ['api', 'face']:
-            for f in face_files():
-                f.unlink(missing_ok=True)
-            return self.reply({'ok': True})
         if len(parts) != 3 or parts[0] != 'api' or parts[1] not in ('logs', 'scans', 'goals'):
             return self.reply({'error': 'not found'}, 404)
         with db() as c:

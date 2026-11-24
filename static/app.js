@@ -5,7 +5,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { fitBody, fitProxy, genitalPositions, initBody, mesh, pose, underwear } from './body.js';
+import { fitBody, fitProxy, genitalMesh, initBody, mesh, pose, underwear } from './body.js';
 import { loadImage, photoColors, skinCanvas } from './look.js';
 import { renderSVG } from './vendor/uqr.mjs';
 
@@ -38,21 +38,6 @@ const HEALTH = {
   balance: ['Energy balance', 'kcal', 0],
 };
 Object.assign(HEALTH, { underbust: ['Underbust', 'cm', 1], penis_len: ['Penis length', 'cm', 1], penis_girth: ['Penis girth', 'cm', 1] });
-// Your tape, by part: the log key and how to measure. It's the truth for the day you take it and shapes your body for a month.
-const TAPE = {
-  neck: ['ref_neck', "Just below the Adam's apple, tape tilted slightly down at the front"],
-  chest: ['ref_chest', 'Fullest part: across the nipples, under the armpits, arms down'],
-  underbust: ['ref_underbust', 'Directly under the breasts, level all round'],
-  waist: ['ref_waist', "Level round the belly button; don't suck in"],
-  hips: ['ref_hips', 'Widest part of the buttocks, feet together'],
-  arm_l: ['ref_arm', 'Arm hanging relaxed, halfway between the shoulder tip and the elbow'],
-  arm_r: ['ref_arm_r', 'Arm hanging relaxed, halfway between the shoulder tip and the elbow'],
-  thigh_l: ['ref_thigh', 'Halfway between the groin crease and the top of the kneecap'],
-  thigh_r: ['ref_thigh_r', 'Halfway between the groin crease and the top of the kneecap'],
-  calf_l: ['ref_calf', 'At its widest, weight on both feet'], calf_r: ['ref_calf_r', 'At its widest, weight on both feet'],
-  penis_len: ['ref_penis_len', 'Resting, standing: from the base at the pubic bone along the top to the tip, not stretched'],
-  penis_girth: ['ref_penis_girth', 'Resting: round the middle of the shaft'],
-};
 for (const [k, [label, unit, dec]] of Object.entries(HEALTH)) META[k] ??= { label, unit, dec };
 // US cup letter from bust minus underbust (one letter per inch).
 const cupLetter = (cm) => ['AA', 'A', 'B', 'C', 'D', 'DD', 'DDD/F', 'G', 'H'][Math.max(0, Math.min(8, Math.round(cm / 2.54)))];
@@ -117,9 +102,20 @@ Object.assign(controls, { enableDamping: true, autoRotate: true, autoRotateSpeed
 // Home: the whole body as large as the space between the bars allows, from just below eye level (32° is a portrait
 // lens: true proportions, none of a close wide-angle's distortion).
 function home() {
-  const H = (S?.profile?.height_cm ?? 175) / 100, fill = innerWidth < 600 ? 0.74 : 0.82; // of the screen's height
+  const H = (S?.profile?.height_cm ?? 175) / 100, v = visible();
+  const fill = !$('#panel').hidden ? 0.9 * v.h / innerHeight : innerWidth < 600 ? 0.74 : 0.82; // of the screen's height
   return { target: new THREE.Vector3(0, 0.47 * H, 0), dist: (1.06 * H) / fill / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) };
 }
+// The screen the avatar can use: all of it, or with a panel open, the part beside it (desktop) or above it, below the top
+// cards (phone). The view is shifted to centre there, so whatever a panel changes stays in sight.
+function visible() {
+  const r = $('#panel').hidden ? null : $('#panel').getBoundingClientRect();
+  if (!r) return { x: 0, y: 0, w: innerWidth, h: innerHeight };
+  if (innerWidth >= 600) return { x: 0, y: 0, w: r.left, h: innerHeight };
+  const top = $('#hud').getBoundingClientRect().bottom;
+  return { x: 0, y: top, w: innerWidth, h: Math.max(80, r.top - top) };
+}
+const shift = [0, 0];
 const snapHome = () => {
   const h = home();
   controls.target.copy(h.target);
@@ -239,7 +235,7 @@ async function updateLook() {
   const hair = p.hair ?? face?.hair?.style ?? (sex === 'female' ? 'long01' : 'short02'), hairColor = p.hair_color ?? auto.hair ?? '#3b2a20';
   const { canvas: skinTex, tone } = await skinCanvas(sex, { face, photo, tone: p.skin ?? (S.skin?.tone && '#' + S.skin.tone.map((v) => v.toString(16).padStart(2, '0')).join('')), hairColor: HAIRS[hair] ? hairColor : null,
     baseUrl: S.skin_baked ? `/api/skin.jpg?${S.skin_baked}` : null });
-  mats.genitals.color.set(`rgb(${tone.map(Math.round).join(',')})`).multiply(new THREE.Color(0.8, 0.72, 0.7)); // darker and redder than the body's
+  mats.genitals.color.set(`rgb(${(attachSkin(skinTex) ?? tone).map(Math.round).join(',')})`).multiply(new THREE.Color(0.98, 0.88, 0.87)); // a little redder
   const skin = new THREE.CanvasTexture(skinTex);
   Object.assign(skin, { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 });
   mats.skin.map?.dispose();
@@ -253,6 +249,19 @@ async function updateLook() {
   rebuildAvatar(true);
 }
 
+// The skin where the genitals join the body: its lighter samples (the rest is pubic hair). [r, g, b] or null.
+function attachSkin(canvas) {
+  const refs = A.arr('genitals.refs'), w = A.arr('genitals.w'), at = new Set(), uv = A.uv, g = canvas.getContext('2d', { willReadFrequently: true });
+  for (let i = 0; i < w.length / 3; i++) if (w[i * 3] === 1) at.add(refs[i * 3]); // the body's own vertices it's sewn to
+  const px = [];
+  for (let r = 0; r < A.src.length; r++) {
+    if (!at.has(A.src[r])) continue;
+    const d = g.getImageData(Math.round(uv[r * 2] * (canvas.width - 1)), Math.round((1 - uv[r * 2 + 1]) * (canvas.height - 1)), 1, 1).data;
+    px.push([d[0], d[1], d[2]]);
+  }
+  return px.length ? px.sort((x, y) => x[0] + x[1] + x[2] - y[0] - y[1] - y[2])[Math.floor(px.length * 0.75)] : null;
+}
+
 const COLORS = { good: new THREE.Color('#4cff9a'), bad: new THREE.Color('#ff6b6b'), white: new THREE.Color('#ffffff') };
 function partColor(p) { // multiplies the skin texture: white = true skin colour
   const t = S && p !== 'overall' && tone(p, S.insights.parts[p]?.change);
@@ -262,7 +271,7 @@ function partColor(p) { // multiplies the skin texture: white = true skin colour
 // Breast shape from the camera's bust and underbust.
 const latest = (k) => S.logs.findLast((l) => l[k] != null)?.[k];
 function shape(m) {
-  return { cup: m.chest && m.underbust ? m.chest - m.underbust : null, length: m.penis_len, girth: m.penis_girth };
+  return { cup: m.chest && m.underbust ? m.chest - m.underbust : null };
 }
 // Body triangles under the worn garments are dropped so skin can't poke through.
 const dressed = {};
@@ -326,28 +335,7 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
       cloth.computeVertexNormals();
       group.add(Object.assign(new THREE.Mesh(cloth, mats[g]), { castShadow: true }));
     }
-    if (!look.clothes && sex !== 'female') {
-      const g = new THREE.BufferGeometry(), P = genitalPositions(fit.pos), n = P.length / 3, col = new Float32Array(n * 3);
-      // At rest it hangs: what reaches forward of its base swings ~12° toward vertical (the scrotum below stays put), and
-      // the skin darkens and reddens toward the tip.
-      let top = -Infinity, low = Infinity, bz = 0, by = 0, nb = 0;
-      for (let i = 0; i < n; i++) { top = Math.max(top, P[i * 3 + 1]); low = Math.min(low, P[i * 3 + 1]); }
-      for (let i = 0; i < n; i++) if (P[i * 3 + 1] > top - 2) { by += P[i * 3 + 1]; bz += P[i * 3 + 2]; nb++; }
-      by /= nb; bz /= nb;
-      for (let i = 0; i < n; i++) {
-        const dy = P[i * 3 + 1] - by, dz = P[i * 3 + 2] - bz, a = (-12 * Math.PI) / 180 * Math.min(1, Math.max(0, dz / 6));
-        P[i * 3 + 1] = by + dy * Math.cos(a) + dz * Math.sin(a);
-        P[i * 3 + 2] = bz - dy * Math.sin(a) + dz * Math.cos(a);
-        const t = Math.min(1, Math.max(0, (top - P[i * 3 + 1]) / (top - low)));
-        const tip = t < 0.75 ? 0 : (t - 0.75) / 0.25;
-        col.set([1 - 0.12 * tip, 1 - 0.25 * tip, 1 - 0.22 * tip], i * 3);
-      }
-      g.setAttribute('position', new THREE.BufferAttribute(P, 3));
-      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-      g.setIndex(new THREE.BufferAttribute(A.arr('genital.tris'), 1));
-      g.computeVertexNormals();
-      group.add(Object.assign(new THREE.Mesh(g, mats.genitals), { userData: { part: 'penis_len' } })); // tap: length and girth
-    }
+    if (!look.clothes && sex !== 'female') group.add(genitals(fit.pos, penis(m)));
     if (HAIRS[look.hair]) {
       const geom = proxy(look.hair, fit.pos);
       const hair = new THREE.Mesh(S.face?.hair?.fringe === false ? trimFringe(geom, fit.pos) : geom, mats.hair);
@@ -357,6 +345,29 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
   }
   group.scale.setScalar(0.01); // cm → m
   return group;
+}
+
+// Genitals (body.js): the shaft sized and bent; coloured here, the glans past the corona a little redder.
+function genitals(pos, size) {
+  const { pos: P, along } = genitalMesh(pos, size), n = along.length, col = new Float32Array(n * 3);
+  const hash = (i) => ((Math.sin(i * 12.9898) * 43758.5453) % 1 + 1) % 1;
+  for (let i = 0; i < n; i++) {
+    const grain = 0.94 + 0.08 * hash(i), glans = along[i] > 0.77 ? 1 : 0, root = 0.72 + 0.28 * Math.min(1, Math.max(0, along[i] / 0.15));
+    col.set(along[i] >= 0 ? [grain * root * (1 - 0.08 * glans), grain * root * (0.96 - 0.2 * glans), grain * root * (0.94 - 0.16 * glans)]
+      : [0.86 * grain, 0.76 * grain, 0.74 * grain], i * 3); // the root darkens into the pubic hair; the scrotum darker
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(P, 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geom.setIndex(new THREE.BufferAttribute(A.arr('genitals.tris'), 1));
+  geom.computeVertexNormals();
+  return Object.assign(new THREE.Mesh(geom, mats.genitals), { castShadow: true, userData: { part: 'penis_len' } }); // tap: length and girth
+}
+// The size shown: what the cameras measured at rest, or along the range they've seen (the slider in its panel).
+const genitalSize = { at: null }; // null: the usual; 0..1: smallest … fullest seen
+function penis(m) {
+  const t = genitalSize.at, mix = (k) => (t == null || m[`${k}_lo`] == null ? m[k] : m[`${k}_lo`] + t * (m[`${k}_hi`] - m[`${k}_lo`]));
+  return { length: mix('penis_len') ?? 10, girth: mix('penis_girth') ?? 11, up: 0 };
 }
 
 // No fringe in your photo: drop the haircut's hair hanging in front of the forehead, so your own hairline shows.
@@ -394,7 +405,7 @@ function rebuildAvatar(force = false) {
   const m = predicted?.m ?? S.scans[idx]?.m ?? {};
   mats.skin.normalScale.setScalar(m.bf != null ? Math.min(1, Math.max(0.25, (22 - m.bf) / 12)) : 0.5); // definition shows as fat goes
   const mesh = fitted(predicted ? S.scans.at(-1) : S.scans[idx]); // predictions reshape today's fit
-  const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(m), !!predicted, !!mesh]);
+  const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(m), penis(m), !!predicted, !!mesh]);
   if (!force && key === lastDimsKey) return paint();
   lastDimsKey = key;
   for (const g of [avatar, ghost]) if (g) { scene.remove(g); g.traverse((o) => o.geometry?.dispose()); }
@@ -449,6 +460,10 @@ renderer.setAnimationLoop((t) => {
     camera.position.copy(controls.target).add(offset.setLength(len + (focus.dist - len) * 0.08));
     if (controls.target.distanceTo(focus.target) < 0.002 && Math.abs(len - focus.dist) < 0.01) focus.target = null;
   }
+  const v = visible(), want = [innerWidth / 2 - (v.x + v.w / 2), innerHeight / 2 - (v.y + v.h / 2)];
+  for (const i of [0, 1]) shift[i] += (want[i] - shift[i]) * 0.1;
+  if (Math.abs(shift[0]) + Math.abs(shift[1]) > 0.5) camera.setViewOffset(innerWidth, innerHeight, shift[0], shift[1], innerWidth, innerHeight);
+  else if (camera.view) camera.clearViewOffset();
   controls.update();
   composer.render();
 });
@@ -520,7 +535,7 @@ function renderTimeline() {
   $('#scrub').max = Math.max(0, n - 1);
   $('#scrub').value = idx;
   $('#scrub').hidden = n < 2 || !!predicted;
-  $('#scanLabel').textContent = predicted?.goal ? 'your goal' : predicted ? `predicted · in ${plan.weeks} weeks` : n ? day(S.scans[idx].ts) : 'no estimate yet';
+  $('#scanLabel').textContent = predicted?.label ?? (predicted?.goal ? 'your goal' : predicted ? `predicted · in ${plan.weeks} weeks` : n ? day(S.scans[idx].ts) : 'no estimate yet');
 }
 $('#scrub').addEventListener('input', (e) => { idx = +e.target.value; renderAll(); });
 $('#todayBtn').addEventListener('click', (e) => {
@@ -568,38 +583,40 @@ function metricBlock(k, withGoal = true) {
     ${since != null || c28 != null ? `<div class="muted">${c28 != null ? `last 4 weeks <span class="${tone(k, c28)}">${fmt(k, c28, true)}</span>` : ''}${since != null ? ` · since you started <span class="${tone(k, since)}">${fmt(k, since, true)}</span>` : ''}</div>` : ''}
     ${spark(k)}${withGoal ? goalBlock(k) : ''}</div>`;
 }
+// Your goal: drag weight and body fat and the avatar becomes that body (today's outline stays for comparison).
+const goalDraft = {};
 function goalPanel() {
-  const m = cur(), g = goalNumbers(), gw = S.goals.weight?.target, gbf = S.goals.bf?.target;
-  return `<h2>Your goal</h2>
-    <form id="fGoalBody" class="stack"><div class="grid2">
-      <label>Goal weight (${uLabel('kg')})<input name="weight" type="number" step="any" required value="${gw != null ? +toUnit(gw, 'kg').toFixed(1) : ''}"></label>
-      <label>Body fat (%)<input name="bf" type="number" step="any" value="${gbf ?? ''}" placeholder="${S.recommended_bf} recommended"></label></div>
-      <p class="muted">${S.recommended_bf}% body fat is a lean, muscular look; leave it empty to use that.</p>
-      <button>Save goal</button></form>
-    ${g ? `<p>To get there: <b>${fmt('lean_kg', g.lean, true)}</b> muscle and other lean mass, <b>${fmt('fat_kg', g.fat, true)}</b> fat.</p>
-      <button type="button" id="showGoal">${predicted?.goal ? 'Back to today' : 'Show my goal body'}</button>` : ''}
-    ${['bf', 'weight', 'lean_kg'].map((x) => metricBlock(x, false)).join('')}
-    <details><summary>More numbers</summary>
-      <table>${['fat_kg', 'ffmi', 'whtr', 'whr'].map((x) => `<tr><td>${META[x].label}</td><td>${fmt(x, m[x])}</td></tr>`).join('')}</table>
-      ${healthTable()}
-      <p class="muted">Body fat uses the US Navy circumference formula on your fitted body. Expect ±3–4 points.</p>
-    </details>`;
+  const w = valueOf('weight'), bf = cur().bf;
+  if (w == null || bf == null) return '<h2>Your goal</h2><p class="muted">Needs a body estimate and a weigh-in first.</p>';
+  goalDraft.weight ??= S.goals.weight?.target ?? w;
+  goalDraft.bf ??= S.goals.bf?.target ?? S.recommended_bf;
+  const r = (name, label, value, min, max, step) => `<label>${label} <b></b><input type="range" name="${name}" min="${min}" max="${max}" step="${step}" value="${value}"></label>`;
+  return `<h2>Your goal</h2><p class="muted">Drag: the avatar shows that body; the outline is you today.</p>
+    <form id="fGoalBody" class="stack">
+      ${r('weight', 'Weight', toUnit(goalDraft.weight, 'kg'), Math.round(toUnit(w * 0.8, 'kg')), Math.round(toUnit(w * 1.25, 'kg')), imperial() ? 1 : 0.5)}
+      ${r('bf', 'Body fat', goalDraft.bf, 5, 30, 0.5)}<p id="goalOut"></p><p id="goalWhere"></p><button></button></form>`;
 }
+function goalText() { // the numbers that follow the sliders
+  const w = valueOf('weight'), bf = cur().bf, { weight: gw, bf: gbf } = goalDraft, f = $('#fGoalBody');
+  const lean = gw * (1 - gbf / 100) - w * (1 - bf / 100), fat = gw * gbf / 100 - w * bf / 100;
+  // shortcut: textbook rates (lean gain ~0.5 kg a month once trained, fat loss ~0.5 kg a week); your own pace is in Progress
+  const months = Math.max(lean > 0 ? lean / 0.5 : 0, fat < 0 ? -fat / 2.2 : 0);
+  const saved = S.goals.weight?.target === gw && (S.goals.bf?.target ?? S.recommended_bf) === gbf;
+  f.weight.previousElementSibling.textContent = fmt('weight', gw);
+  f.bf.previousElementSibling.textContent = `${gbf}%${gbf === S.recommended_bf ? ' · lean, muscular' : ''}`;
+  $('#goalOut').innerHTML = `That's <b>${fmt('lean_kg', lean, true)}</b> muscle and other lean mass and <b>${fmt('fat_kg', fat, true)}</b> fat${months > 0.5 ? `: about <b>${Math.ceil(months)} months</b> at a steady pace` : ''}.`;
+  f.querySelector('button').disabled = saved;
+  f.querySelector('button').textContent = saved ? 'This is your goal' : 'Save as my goal';
+}
+let goalTimer = null;
 async function showGoal() {
-  if (predicted?.goal) { predicted = null; renderTimeline(); rebuildAvatar(); return renderPanel(); }
-  const g = goalNumbers(), out = await api('POST', '/api/predict', { goal_weight: g.gw, goal_bf: g.gbf });
+  const out = await api('POST', '/api/predict', { goal_weight: goalDraft.weight, goal_bf: goalDraft.bf }), now = cur();
   predicted = { dims: out.dims, m: out.m, goal: true };
+  const where = ['chest', 'arm_l', 'waist', 'hips', 'thigh_l', 'calf_l', 'neck'].filter((k) => out.m[k] != null && now[k] != null)
+    .map((k) => [k, out.m[k] - now[k]]).sort((x, y) => Math.abs(y[1]) - Math.abs(x[1])).slice(0, 3);
+  if ($('#goalWhere')) $('#goalWhere').innerHTML = where.length ? `Where it shows most: ${where.map(([k, d]) => `${{ arm_l: 'arms', thigh_l: 'thighs', calf_l: 'calves' }[k] ?? META[k].label.toLowerCase()} <b>${fmt(k, d, true)}</b>`).join(', ')}.` : '';
   renderTimeline();
   rebuildAvatar();
-  renderPanel();
-}
-function tapeForm(k) {
-  const [key, how] = TAPE[k] ?? [];
-  if (!key) return '';
-  const yours = S.scans[idx]?.manual?.includes(k);
-  return `<form class="inline" data-tape="${key}"><input name="v" type="number" step="any" inputmode="decimal" required
-      placeholder="Your tape (${uLabel('cm')})" aria-label="${META[k].label}: your tape measurement"><button>Save</button></form>
-    <p class="muted">${yours ? 'This day shows your tape. ' : ''}${how}.</p>`;
 }
 function partPanel(k) {
   const p = S.insights.parts[k] || {};
@@ -607,14 +624,27 @@ function partPanel(k) {
     const m = cur();
     return `${metricBlock('underbust', false)}<p>${m.chest && m.underbust ? `Cup size about <b>${cupLetter(m.chest - m.underbust)}</b>.` : 'Cup size appears once the camera has your bust and underbust.'}</p>`;
   })() : '';
-  if (k === 'penis_len') return metricBlock('penis_len', false) + tapeForm('penis_len') + metricBlock('penis_girth', false) + tapeForm('penis_girth');
-  return `${metricBlock(k, false)}${tapeForm(k)}${breasts}${breasts && tapeForm('underbust')}
+  if (k === 'penis_len') return genitalPanel();
+  return `${metricBlock(k, false)}${tryControl(k)}${breasts}
     ${p.workouts || p.change != null ? `<p>${p.workouts ? `${p.workouts} workouts trained this in the last 4 weeks.` : ''}</p>` : ''}
     <details><summary>Goal</summary>${goalBlock(k)}</details>`;
 }
+// Size at rest from the cameras' close views, and a slider through the range they've seen.
+function genitalPanel() {
+  const m = cur(), seen = m.penis_len_lo != null;
+  return `${metricBlock('penis_len', false)}${metricBlock('penis_girth', false)}
+    ${seen ? `<label>Size seen, smallest to fullest <b>${genitalSize.at == null ? 'usual' : `${fmt('penis_len', penis(m).length)} × ${fmt('penis_girth', penis(m).girth)}`}</b>
+      <input type="range" id="gsize" min="0" max="1" step="0.01" value="${genitalSize.at ?? (m.penis_len - m.penis_len_lo) / (m.penis_len_hi - m.penis_len_lo || 1)}"></label>
+      <p class="muted">At rest, from ${m.penis_n} close views. Erect: not seen by the cameras yet.</p>`
+    : '<p class="muted">Measured at rest once the cameras get a few close front views.</p>'}`;
+}
+// Try a size: drag and the avatar shows this part that much bigger or smaller (both sides for a limb), today as the outline.
+function tryControl(k) {
+  return S.scans[idx]?.dims?.[`${k}_w`] != null && cur()[k] ? `<label>Try a size <b>${fmt(k, 0, true)}</b>
+    <input type="range" id="ptry" min="-5" max="5" step="0.25" value="0"></label>` : '';
+}
 function logItem(l) {
-  const txt = l.kind === 'reference' ? '📏 ' + Object.entries(TAPE).filter(([, [key]]) => l[key] != null).map(([k, [key]]) => `${META[k].label.toLowerCase()} ${fmt(k, l[key])}`).join(' · ')
-    : l.kind === 'workout'
+  const txt = l.kind === 'workout'
     ? `🏋️ ${l.type} · ${l.minutes} min${l.focus?.length ? ' · ' + l.focus.join(', ') : ''}${l.notes ? ' · ' + l.notes : ''}`
     : '📋 ' + [l.weight && fmt('weight', l.weight), l.kcal && `${Math.round(l.kcal)} kcal`, l.protein && `${Math.round(l.protein)} g protein`,
       l.sleep && `${l.sleep.toFixed(1)} h sleep`, l.steps && `${Math.round(l.steps)} steps`].filter(Boolean).join(' · ');
@@ -643,13 +673,16 @@ function progressPanel() {
     s.balance != null ? `You ate about <b>${Math.abs(Math.round(s.balance))} kcal/day ${s.balance < 0 ? 'under' : 'over'}</b> what you burned, which predicts ${fmt('weight', s.predicted_kg, true)}${c.weight != null ? `; the scale says ${fmt('weight', c.weight, true)}` : ''}.` : '',
     ...Object.entries(I.goals).filter(([, g]) => g.eta).map(([k, g]) => `On pace: ${META[k].label.toLowerCase()} ${fmt(k, g.target)} by <b>${isoDay(g.eta)}</b>.`),
     ...I.notes].filter(Boolean);
-  const free = Object.keys(META).filter((k) => !S.goals[k]);
+  const m = cur();
   return `<h2>Progress</h2><div class="callout">${lines.map((l) => `<p>${l}</p>`).join('')}</div>
     ${I.gaps.length ? `<div class="callout gaps"><b>Missing data</b><ul>${I.gaps.map((g) => `<li>${esc(g)}</li>`).join('')}</ul></div>` : ''}
     <h3>Last 2 weeks</h3>${daysGrid()}
-    <h3>Goals</h3>${Object.keys(S.goals).map((k) => metricBlock(k)).join('') || '<p class="muted">Goals colour the body: green = moving toward them, red = away.</p>'}
-    <form id="fGoal" class="inline"><select name="metric" aria-label="Metric">${free.map((k) => `<option value="${k}">${META[k].label}</option>`).join('')}</select>
-      <input name="target" type="number" step="any" placeholder="Target" required aria-label="Target"><button>Add</button></form>
+    ${['bf', 'weight', 'lean_kg', 'waist'].map((k) => metricBlock(k, !!S.goals[k])).join('')}
+    <details><summary>More numbers</summary>
+      <table>${['fat_kg', 'ffmi', 'whtr', 'whr'].map((x) => `<tr><td>${META[x].label}</td><td>${fmt(x, m[x])}</td></tr>`).join('')}</table>
+      ${healthTable()}
+      <p class="muted">Body fat uses the US Navy circumference formula on your fitted body. Expect ±3–4 points.</p>
+    </details>
     <details><summary>Training vs body fat, week by week</summary>${weekChart(I.weeks)}</details>
     <details><summary>Recent entries</summary><ul class="list">${S.logs.slice(-20).reverse().map(logItem).join('') || '<li class="muted">Nothing yet</li>'}</ul></details>`;
 }
@@ -685,11 +718,7 @@ function settingsPanel() {
   const rot = (k) => [0, 90, 180, 270].map((r) => opt(r, r ? `${r}°` : 'none', (p[k] ?? 0) === r)).join('');
   const link = S.sync.url && `bodylab://pair?server=${encodeURIComponent(S.sync.url)}&token=${encodeURIComponent(S.sync.token)}`;
   const hairs = ['', 'none', 'short02', 'short04', 'bob02', 'long01', 'ponytail01', 'braid01', 'afro01'];
-  return `<h2>Settings</h2><div class="row" style="justify-content:flex-start">
-      ${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
-      <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
-      ${S.face ? '<button type="button" class="link" data-delface="1">remove</button>' : ''}</div>
-    <p class="muted">Best: the iPhone app's Me → Scan your face (Face ID camera), in even light. A photo works too: straight on, neutral, mouth closed.</p>
+  return `<h2>Settings</h2>${S.face ? '' : '<p class="muted">Your face: in the iPhone app, Me → Scan your face.</p>'}
     <details><summary>Cameras</summary><form id="fCamera" class="stack">
       ${['', '2', '3'].map((k, i) => `<div class="grid2"><label>Camera ${i + 1}<input name="camera${k}_url" value="${esc(p[`camera${k}_url`] ?? '')}" placeholder="http://… or rtsp://…"></label>
         <label>Rotation<select name="rotate${k}">${rot(`rotate${k}`)}</select></label></div>`).join('')}
@@ -711,53 +740,64 @@ function renderPanel() {
   $('#pbody').innerHTML = view.part ? partPanel(view.part)
     : { progress: progressPanel, whatif: whatifPanel, settings: settingsPanel, goal: goalPanel }[view.tab]();
   if (view.tab === 'whatif') runPlan();
+  if (view.tab === 'goal' && $('#fGoalBody')) { goalText(); showGoal().catch((e) => toast(e.message, true)); }
   document.querySelectorAll('#nav button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.tab === view.tab));
 }
 function open(v) {
-  if (v?.tab === 'settings') focusOn('overall'); // your face photo: the face, close up
-  else if (v?.part || (!v && (view?.part || view?.tab === 'settings'))) focusOn(v?.part);
+  if (predicted?.label && v?.part !== view?.part) { predicted = null; renderTimeline(); rebuildAvatar(); } // a tried size: back to today
+  if (genitalSize.at != null && v?.part !== 'penis_len') { genitalSize.at = null; rebuildAvatar(); } // back to the usual size
   if ((view?.tab === 'whatif' || view?.tab === 'goal') && v?.tab !== view.tab) { predicted = null; renderTimeline(); rebuildAvatar(); }
   view = v;
   selectedPart = v?.part && v.part !== 'overall' ? v.part : null;
   renderPanel();
   paint();
+  focusOn(v?.tab === 'settings' ? 'overall' : v?.part); // after the panel's drawn: framed in the space it leaves; Settings: your face
 }
 $('#nav').addEventListener('click', (e) => { const t = e.target.closest('[data-tab]')?.dataset.tab; if (t) open(view?.tab === t ? null : { tab: t }); });
 $('#close').addEventListener('click', () => open(null));
 addEventListener('keydown', (e) => e.key === 'Escape' && open(null));
 $('#panel').addEventListener('input', (e) => {
+  if (e.target.id === 'ptry') {
+    const k = view.part, d = +e.target.value, c = cur()[k], f = (c + d) / c, dims = { ...S.scans[idx].dims };
+    for (const p of /_[lr]$/.test(k) ? [k.replace(/_[lr]$/, '_l'), k.replace(/_[lr]$/, '_r')] : [k]) for (const x of ['_w', '_d']) if (dims[p + x] != null) dims[p + x] *= f;
+    predicted = d ? { dims, m: { ...cur(), [k]: c + d }, label: 'trying a size' } : null;
+    e.target.previousElementSibling.textContent = fmt(k, d, true);
+    const goal = $('#pbody [data-goal] input');
+    if (goal && d) goal.value = +toUnit(c + d, META[k].unit).toFixed(1); // the goal form, ready if you like it
+    renderTimeline();
+    return rebuildAvatar();
+  }
+  if (e.target.id === 'gsize') {
+    genitalSize.at = +e.target.value;
+    e.target.previousElementSibling.textContent = `${fmt('penis_len', penis(cur()).length)} × ${fmt('penis_girth', penis(cur()).girth)}`;
+    return rebuildAvatar();
+  }
+  if (e.target.form?.id === 'fGoalBody') {
+    goalDraft[e.target.name] = e.target.name === 'weight' ? fromUnit(+e.target.value, 'kg') : +e.target.value;
+    goalText();
+    clearTimeout(goalTimer);
+    goalTimer = setTimeout(() => showGoal().catch((err) => toast(err.message, true)), 200);
+    return;
+  }
   if (e.target.form?.id !== 'fPlan') return;
   plan[e.target.name] = +e.target.value;
   e.target.previousElementSibling.textContent = planText(e.target.name, e.target.value);
   clearTimeout(predictTimer);
   predictTimer = setTimeout(runPlan, 250);
 });
-$('#panel').addEventListener('change', async (e) => {
-  if (e.target.id === 'faceFile' && e.target.files[0]) {
-    toast('Reading your face…');
-    const r = await fetch('/api/face', { method: 'POST', headers: { 'Content-Type': e.target.files[0].type || 'image/jpeg' }, body: e.target.files[0] });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return toast(j.error || 'Upload failed', true);
-    toast('Face photo saved ✓');
-    return refresh();
-  }
-});
 $('#panel').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target, fd = new FormData(f), o = Object.fromEntries(fd);
   try {
     if (f.id === 'fGoalBody') {
-      await api('POST', '/api/goals', { metric: 'weight', target: fromUnit(+o.weight, 'kg') });
-      if (o.bf !== '') await api('POST', '/api/goals', { metric: 'bf', target: +o.bf });
-      else if (S.goals.bf) await api('DELETE', '/api/goals/bf'); // empty: the recommended body fat
+      await api('POST', '/api/goals', { metric: 'weight', target: goalDraft.weight });
+      await api('POST', '/api/goals', { metric: 'bf', target: goalDraft.bf });
     } else if (f.id === 'fCamera') {
       await api('POST', '/api/profile', { ...o, bare_only: fd.has('bare_only') });
     } else if (f.id === 'fLook') {
       await api('POST', '/api/profile', o);
-    } else if (f.dataset.tape) {
-      await api('POST', '/api/logs', { kind: 'reference', [f.dataset.tape]: fromUnit(+o.v, 'cm') });
-    } else if (f.id === 'fGoal' || f.dataset.goal) {
-      const k = f.dataset.goal || o.metric;
+    } else if (f.dataset.goal) {
+      const k = f.dataset.goal;
       await api('POST', '/api/goals', { metric: k, target: fromUnit(+o.target, META[k].unit) });
     }
     await refresh();
@@ -765,17 +805,15 @@ $('#panel').addEventListener('submit', async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 $('#panel').addEventListener('click', async (e) => {
-  if (e.target.id === 'showGoal') return showGoal().catch((err) => toast(err.message, true));
   if (e.target.dataset.lookreset) return api('POST', '/api/profile', { hair: '', hair_color: '', eye_color: '' }).then(() => refresh()).catch((err) => toast(err.message, true));
-  const b = e.target.closest('button[data-dellog],button[data-delscan],button[data-delgoal],button[data-delface]');
+  const b = e.target.closest('button[data-dellog],button[data-delscan],button[data-delgoal]');
   if (!b) return;
-  const { dellog, delscan, delgoal, delface } = b.dataset;
+  const { dellog, delscan, delgoal } = b.dataset;
   if (delscan && !confirm('Delete this scan?')) return;
   try {
     if (dellog) await api('DELETE', `/api/logs/${dellog}`);
     if (delscan) await api('DELETE', `/api/scans/${delscan}`);
     if (delgoal) await api('DELETE', `/api/goals/${encodeURIComponent(delgoal)}`);
-    if (delface) await api('DELETE', '/api/face');
     await refresh();
   } catch (err) { toast(err.message, true); }
 });

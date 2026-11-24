@@ -1,7 +1,7 @@
 // Self-check for static/body.js (template fitting). Run: node test_body.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fitBody, fitProxy, genitalPositions, initBody, pose, underwear } from './static/body.js';
+import { fitBody, fitProxy, genitalMesh, initBody, pose, underwear } from './static/body.js';
 
 const file = (f) => readFileSync(new URL(`./static/assets/${f}`, import.meta.url));
 const bin = file('body.bin');
@@ -44,24 +44,20 @@ const centreY = (p) => { let y = 0; for (let i = 1; i < p.length; i += 3) y += p
 const hair = centreY(fitProxy('short02', same.pos));
 assert.ok(hair > t.J.eye_l[1], 'hair sits above the eyes');
 near(centreY(fitProxy('short02', tall.pos)), hair * 1.1, 0.01);
-// Genitals come out at the measured size (absolute cm), whatever the body's height.
-const shaft = A.arr('morph.girth+.idx'), grow = A.arr('morph.length+.d'), ax = [0, 0, 0];
-const at = Object.fromEntries(Array.from(A.arr('morph.length+.idx'), (v, j) => [v, j]));
-for (const v of shaft) if (at[v] != null) for (let k = 0; k < 3; k++) ax[k] += grow[at[v] * 3 + k];
-const al = Math.hypot(...ax);
-function penis(pos) { // length along the shaft axis, girth around its middle (as the build measures the template)
-  const p = Array.from(shaft, (v) => [pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]]), t = p.map((q) => (q[0] * ax[0] + q[1] * ax[1] + q[2] * ax[2]) / al);
-  const lo = Math.min(...t), hi = Math.max(...t), mid = p.filter((_, i) => Math.abs(t[i] - (lo + hi) / 2) < 0.15 * (hi - lo));
-  const ring = mid.map((q, i) => q.map((c, k) => c - t[p.indexOf(q)] * ax[k] / al)), c = [0, 1, 2].map((k) => ring.reduce((a, q) => a + q[k], 0) / ring.length);
-  return [hi - lo, 2 * Math.PI * ring.reduce((a, q) => a + Math.hypot(q[0] - c[0], q[1] - c[1], q[2] - c[2]), 0) / ring.length];
-}
-for (const H of [t.H, t.H * 1.1]) {
-  const [len, girth] = penis(fitBody({}, H, 'male', { length: 13, girth: 11 }).pos);
-  near(len, 13, 0.05);
-  near(girth, 11, 0.07);
+// Genitals: erect, the shaft comes out at the measured length and girth; at rest it hangs, tip below its base.
+{
+  const { rings } = A.meta.genitals, P0 = fitProxy('genitals', same.pos);
+  const mean = (r, P) => [0, 1, 2].map((k) => r.reduce((s, i) => s + P[i * 3 + k], 0) / r.length);
+  const erect = genitalMesh(same.pos, { length: 15, girth: 13, up: 1 }), rest = genitalMesh(same.pos, { length: 10, girth: 11, up: 0 });
+  assert(erect.pos.every(Number.isFinite) && rest.pos.every(Number.isFinite));
+  const tipAt = (g) => { let best = 0; g.along.forEach((x, i) => { if (x > g.along[best]) best = i; }); return [g.pos[best * 3], g.pos[best * 3 + 1], g.pos[best * 3 + 2]]; };
+  const base = mean(rings[0], P0);
+  assert(tipAt(rest)[1] < base[1] - 4 && tipAt(erect)[1] > base[1] - 3, 'hangs at rest, rises erect');
+  assert(Math.hypot(...tipAt(erect).map((x, k) => x - base[k])) > Math.hypot(...tipAt(rest).map((x, k) => x - base[k])), 'erect reaches further');
+  const c2 = mean(rings[1], P0), d = Math.hypot(...c2.map((x, k) => x - base[k])), root = base.map((x, k) => x - (c2[k] - x) / d * A.meta.genitals.base * d);
+  near(Math.hypot(...tipAt(erect).map((x, k) => x - root[k])), 15, 0.04); // where it leaves the body to the tip
 }
 console.log('body ok');
-assert(genitalPositions(same.pos).every(Number.isFinite)); // nude mode builds
 // A fitted mesh is used as is, and a prediction reshapes it by predicted ÷ today.
 const base = fitBody({}, t.H, 'male').pos, today = { waist_w: 30, waist_d: 22 };
 const asIs = fitBody(today, t.H, 'male', {}, base, today).pos;

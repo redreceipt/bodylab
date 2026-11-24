@@ -135,63 +135,32 @@ struct MeView: View {
     @EnvironmentObject var health: HealthSync
     @AppStorage("server") private var server = ""
     @AppStorage("token") private var token = ""
-    @State private var camera = false
     @State private var faceScan = false
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    Button("Connect Apple Health") { Task { await health.connect() } }
-                    Button("Scan your face (Face ID camera)") { faceScan = true }
-                    Button("Take face photo") { camera = true }
-                } footer: {
-                    Text("Height, sex, birth date and units come from Apple Health and this phone. The face scan shapes your 3D face and takes its photo (a face photo alone: straight on, neutral, mouth closed); both stay on your BodyLab server.")
+                    if health.connected {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Label("Apple Health connected", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                            if !health.status.isEmpty { Text(health.status).font(.footnote).foregroundStyle(.secondary) }
+                        }
+                    } else {
+                        Button("Connect Apple Health") { Task { await health.connect() } }
+                    }
+                    Button("Scan your face") { faceScan = true }
                 }
-                if !health.status.isEmpty { Section { Text(health.status).font(.footnote).foregroundStyle(.secondary) } }
                 Section("Paired with") {
                     Text(URL(string: server)?.host() ?? server).foregroundStyle(.secondary)
                     Button("Unpair", role: .destructive) { token = "" }
                 }
             }
             .navigationTitle("Me")
-            .sheet(isPresented: $camera) {
-                CameraPicker { image in Task { await health.uploadFace(image) } }.ignoresSafeArea()
-            }
+            .task { await health.checkConnected() }
             .fullScreenCover(isPresented: $faceScan) {
                 FaceScanView { body in Task { await health.uploadFaceScan(body) } }
             }
         }
-    }
-}
-
-/// Front camera (photo library in the simulator, which has no camera).
-struct CameraPicker: UIViewControllerRepresentable {
-    let done: (UIImage) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
-        if UIImagePickerController.isSourceTypeAvailable(.camera) {
-            picker.sourceType = .camera
-            picker.cameraDevice = .front
-        }
-        picker.delegate = context.coordinator
-        return picker
-    }
-
-    func updateUIViewController(_ controller: UIImagePickerController, context: Context) {}
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let parent: CameraPicker
-        init(_ parent: CameraPicker) { self.parent = parent }
-
-        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            if let image = info[.originalImage] as? UIImage { parent.done(image) }
-            parent.dismiss()
-        }
-
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { parent.dismiss() }
     }
 }

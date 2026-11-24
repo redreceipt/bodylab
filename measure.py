@@ -21,12 +21,6 @@ PLAUSIBLE = {'neck_w': (.04, .1), 'shoulders_w': (.17, .36), 'chest_w': (.12, .3
              'arm_l_w': (.035, .1), 'arm_r_w': (.035, .1), 'thigh_l_w': (.06, .16), 'thigh_r_w': (.06, .16),
              'calf_l_w': (.045, .11), 'calf_r_w': (.045, .11), 'lv_shoulder': (.75, .87), 'lv_hip': (.43, .58), 'lv_knee': (.22, .33)}
 SEEN = {'neck': (.035, .11), 'chest': (.08, .31), 'underbust': (.07, .3), 'waist': (.07, .33), 'hips': (.08, .33)}  # any angle
-# Your tape measurements (tap a part in the app): the truth for the day they're taken, and targets the body fit must
-# match for a month after. (ref_arm, ref_thigh, ref_calf are the left side.)
-REFERENCE = {'ref_neck': (20, 70), 'ref_chest': (50, 200), 'ref_underbust': (50, 180), 'ref_waist': (40, 220), 'ref_hips': (50, 220),
-             'ref_arm': (15, 70), 'ref_arm_r': (15, 70), 'ref_thigh': (25, 110), 'ref_thigh_r': (25, 110), 'ref_calf': (20, 70),
-             'ref_calf_r': (20, 70), 'ref_weight': (20, 400), 'ref_bf': (2, 75), 'ref_penis_len': (2, 30), 'ref_penis_girth': (3, 25)}
-REF_PART = {k: k[4:] for k in REFERENCE if k not in ('ref_weight', 'ref_bf')} | {'ref_arm': 'arm_l', 'ref_thigh': 'thigh_l', 'ref_calf': 'calf_l'}
 
 
 def implausible(raw):
@@ -409,7 +403,7 @@ def derive(raw, profile, weight=None):
     for p in LIMBS:
         if p in tape or p + '_w' in dims:
             m[p] = tape.get(p) or math.pi * dims[p + '_w']
-    m |= {p: tape[p] for p in ('penis_len', 'penis_girth') if p in tape}  # genital.py, from close-ups
+    m |= {k: v for k, v in tape.items() if k.startswith('penis')}  # genital.py: at rest, and the range seen
     if 'waist' in m:
         m['whtr'] = m['waist'] / H
         if 'hips' in m:

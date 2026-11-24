@@ -7,6 +7,7 @@ import SwiftUI
 @MainActor
 final class HealthSync: ObservableObject {
     @Published var status = ""
+    @Published var connected = false  // Health access asked for (iOS never says what was granted)
     let metric = Locale.current.measurementSystem == .metric
 
 
@@ -61,14 +62,21 @@ final class HealthSync: ObservableObject {
         await connect()
     }
 
+    private var read: Set<HKObjectType> {
+        Set(metrics.map { HKQuantityType($0.id) }).union([HKQuantityType(.height), HKQuantityType(.heartRate), HKCategoryType(.sleepAnalysis),
+            HKObjectType.workoutType(), HKCharacteristicType(.biologicalSex), HKCharacteristicType(.dateOfBirth)])
+    }
+    private let write: Set<HKSampleType> = [HKQuantityType(.dietaryEnergyConsumed), HKQuantityType(.dietaryProtein), HKQuantityType(.bodyMass),
+                                            HKObjectType.workoutType()]
+
+    func checkConnected() async {
+        connected = (try? await store.statusForAuthorizationRequest(toShare: write, read: read)) == .unnecessary
+    }
+
     func connect() async {
-        var read: Set<HKObjectType> = Set(metrics.map { HKQuantityType($0.id) })
-        read.formUnion([HKQuantityType(.height), HKQuantityType(.heartRate), HKCategoryType(.sleepAnalysis),
-                        HKObjectType.workoutType(), HKCharacteristicType(.biologicalSex), HKCharacteristicType(.dateOfBirth)])
-        let write: Set<HKSampleType> = [HKQuantityType(.dietaryEnergyConsumed), HKQuantityType(.dietaryProtein), HKQuantityType(.bodyMass),
-                                        HKObjectType.workoutType()]
         do {
             try await store.requestAuthorization(toShare: write, read: read)
+            connected = true
             observe()
             await sync()
         } catch {
@@ -158,21 +166,6 @@ final class HealthSync: ObservableObject {
             _ = try await builder.finishWorkout()
             await sync()
         } catch { status = "Couldn't save the workout: \(error.localizedDescription)" }
-    }
-
-    /// Face photo for the realistic avatar. Stays on your BodyLab server.
-    func uploadFace(_ image: UIImage) async {
-        status = "Uploading face photo…"
-        let side = 1600.0, scale = min(1, side / max(image.size.width, image.size.height))
-        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        // Redrawing also bakes in the photo's orientation.
-        let jpeg = UIGraphicsImageRenderer(size: size).jpegData(withCompressionQuality: 0.9) { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
-        do {
-            _ = try await post("api/face", jpeg, type: "image/jpeg")
-            status = "Face photo saved ✓"
-        } catch {
-            status = "Face upload failed: \(error.localizedDescription)"
-        }
     }
 
     /// TrueDepth face scan (FaceScanView): shapes your avatar's face and sets its photo. Stays on your BodyLab server.

@@ -1,8 +1,7 @@
-"""Penis length and girth from nude front reference captures (a developer measure, compared with reference
-measurements in the console). SAM 2 (Meta, Apache-2.0, via transformers) is prompted across the pelvis, since the
-shaft hangs to one side, and the mask shaped like a hanging shaft is kept: its length along its axis (the visible shaft,
-from where it leaves the pubic hair to the tip) and its width across the middle half; girth ≈ π × width. Only the
-sharpest captures count: in a full-body view the shaft is ~60 px, in a close-up ~200."""
+"""Penis length and girth at rest from nude front reference captures: the usual size and the range seen. SAM 2 (Meta,
+Apache-2.0, via transformers) is prompted across the pelvis, since the shaft hangs to one side, and the mask shaped like a
+hanging shaft is kept: its length along its axis (the visible shaft, from where it leaves the pubic hair to the tip) and
+its width across the middle half; girth ≈ π × width."""
 import functools
 import json
 from datetime import date, timedelta
@@ -61,7 +60,9 @@ def shaft(img, rec, height_cm):
 
 
 def measure(ref_dir, height_cm, day):
-    """{'penis_len', 'penis_girth'} (cm) from front captures of the day and the two before (fit.py's window), or {}."""
+    """From front captures of the day and the two before (fit.py's window), with bare thighs (shorts look like skin to
+    SAM): the median at rest, 'penis_len' and 'penis_girth' (cm), and the range seen, '_lo'/'_hi' (10th, 90th
+    percentile); or {} with under 3 confident masks."""
     import cv2
     days = {(date.fromisoformat(day) - timedelta(d)).isoformat() for d in range(3)}
     found = []
@@ -69,15 +70,16 @@ def measure(ref_dir, height_cm, day):
         if p.name[:10] not in days or not p.with_suffix('.jpg').exists():
             continue
         rec = json.loads(p.read_text())
-        if rec.get('ref') and abs(rec.get('theta', 90)) < 25 and (r := shaft(cv2.imread(str(p.with_suffix('.jpg'))), rec, height_cm)):
+        if (rec.get('ref') and abs(rec.get('theta', 90)) < 25 and (rec.get('skin') or {}).get('thighs', 0) >= .9
+                and (r := shaft(cv2.imread(str(p.with_suffix('.jpg'))), rec, height_cm)) and r[2] >= .6):
             found.append(r)
-    # shortcut: the finest captures (within 1.3× the smallest cm per px) with confident masks; tuned on one morning's
-    # captures against a reference measurement, revisit as more close-ups come in
-    fine = [f for f in found if f[3] <= 1.3 * min(g[3] for g in found) and f[2] >= .6] if found else []
-    if not fine:
+    if len(found) < 3:
         return {}
-    return {'penis_len': round(float(np.median([f[0] for f in fine])), 1),
-            'penis_girth': round(float(np.median([f[1] for f in fine]) * np.pi), 1), 'penis_n': len(fine)}
+    out = {'penis_n': len(found)}
+    for k, v in (('penis_len', [f[0] for f in found]), ('penis_girth', [f[1] * np.pi for f in found])):
+        lo, mid, hi = np.percentile(v, [10, 50, 90])
+        out |= {k: round(float(mid), 1), f'{k}_lo': round(float(lo), 1), f'{k}_hi': round(float(hi), 1)}
+    return out
 
 
 if __name__ == '__main__':
