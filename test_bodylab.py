@@ -265,6 +265,31 @@ tf = np.frombuffer((FIT.ROOT / 'static/assets/body.bin').read_bytes(), np.float3
 tpf = FIT.tape(np.stack([tf[:, 0], -tf[:, 2], tf[:, 1]], 1) / 100, female=True)
 assert 65 < tpf['underbust'] < tpf['chest'] - 5, tpf  # under the bust, clearly smaller than round it
 print('fit helpers ok', tp, '| female', {k: tpf[k] for k in ('chest', 'underbust')})
+# The stance (with the optional fit group): palms toward the thighs (thumb in front of the little finger, not inside
+# it), fingers together in order front to back, none crossing.
+try:
+    import anny
+    import torch
+except ImportError:
+    anny = None
+if anny:
+    am = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default').to(dtype=torch.float32)
+    sh = {'phenotype_kwargs': {k: torch.tensor([.5]) for k in ('muscle', 'weight', 'height', 'proportions', 'age')} | {'gender': torch.tensor([0.])},
+          'local_changes_kwargs': torch.zeros(1, len(am.local_change_labels))}
+    G = FIT.stance(am, sh, anny.KeypointsRegressor.coco(am, labels=list(FIT.KP)))
+    rv = am(pose_parameters=torch.eye(4)[None, None].repeat(1, am.bone_count, 1, 1), **sh)['rest_vertices'][0].numpy()
+    bw, bi = am.vertex_bone_weights.numpy(), am.vertex_bone_indices.numpy()
+    bw, bi = (bw[0], bi[0]) if bw.ndim == 3 else (bw, bi)
+    Pm = np.einsum('vk,vkij->vij', bw, G[bi])
+    pv = np.einsum('vij,vj->vi', Pm[:, :3, :3], rv) + Pm[:, :3, 3]  # x out (left), y back, z up
+    top = bi[np.arange(len(pv)), bw.argmax(1)]
+    for s_ in 'LR':
+        tip = lambda f: pv[top == am.bone_labels.index(f'finger{f}-3.{s_}')].mean(0) * 100  # noqa: E731
+        d = tip(1) - tip(5)
+        assert d[1] < -5 and abs(d[0]) < 4, (s_, d)
+        ys = [tip(f)[1] for f in (2, 3, 4, 5)]
+        assert ys == sorted(ys) and all(np.linalg.norm(tip(f) - tip(f + 1)) < 3.6 for f in (2, 3, 4)), (s_, ys)  # side by side: ~3 cm apart
+    print('stance ok: palms to the thighs, fingers together')
 
 import bake  # noqa: E402
 import judge  # noqa: E402

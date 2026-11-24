@@ -594,7 +594,9 @@ function goalPanel() {
   return `<h2>Your goal</h2><p class="muted">Drag: the avatar shows that body; the outline is you today.</p>
     <form id="fGoalBody" class="stack">
       ${r('weight', 'Weight', toUnit(goalDraft.weight, 'kg'), Math.round(toUnit(w * 0.8, 'kg')), Math.round(toUnit(w * 1.25, 'kg')), imperial() ? 1 : 0.5)}
-      ${r('bf', 'Body fat', goalDraft.bf, 5, 30, 0.5)}<p id="goalOut"></p><p id="goalWhere"></p><button></button></form>`;
+      ${r('bf', 'Body fat', goalDraft.bf, 5, 30, 0.5)}
+      <label class="check"><input type="checkbox" name="keep" ${goalDraft.keep ? 'checked' : ''}> Keep today's muscle (weight follows body fat)</label>
+      ${r('when', 'When', 12, 0, 12, 1)}<p id="goalOut"></p><p id="goalWhere"></p><button></button></form>`;
 }
 function goalText() { // the numbers that follow the sliders
   const w = valueOf('weight'), bf = cur().bf, { weight: gw, bf: gbf } = goalDraft, f = $('#fGoalBody');
@@ -603,18 +605,34 @@ function goalText() { // the numbers that follow the sliders
   const months = Math.max(lean > 0 ? lean / 0.5 : 0, fat < 0 ? -fat / 2.2 : 0);
   const saved = S.goals.weight?.target === gw && (S.goals.bf?.target ?? S.recommended_bf) === gbf;
   f.weight.previousElementSibling.textContent = fmt('weight', gw);
+  f.weight.value = toUnit(gw, 'kg');
+  f.weight.disabled = !!goalDraft.keep;
+  f.when.max = Math.max(1, Math.ceil(months)); // months along the way
+  const t = goalDraft.when ?? +f.when.max;
+  f.when.value = t;
+  f.when.previousElementSibling.textContent = t >= +f.when.max ? `your goal${months > 0.5 ? `, in about ${Math.ceil(months)} month${Math.ceil(months) > 1 ? 's' : ''}` : ''}` : t ? `in ${t} month${t > 1 ? 's' : ''}` : 'today';
   f.bf.previousElementSibling.textContent = `${gbf}%${gbf === S.recommended_bf ? ' · lean, muscular' : ''}`;
-  $('#goalOut').innerHTML = `That's <b>${fmt('lean_kg', lean, true)}</b> muscle and other lean mass and <b>${fmt('fat_kg', fat, true)}</b> fat${months > 0.5 ? `: about <b>${Math.ceil(months)} months</b> at a steady pace` : ''}.`;
+  $('#goalOut').innerHTML = `That's <b>${fmt('lean_kg', lean, true)}</b> muscle and other lean mass and <b>${fmt('fat_kg', fat, true)}</b> fat${months > 0.5 ? `: about <b>${Math.ceil(months)} month${Math.ceil(months) > 1 ? 's' : ''}</b> at a steady pace` : ''}.`;
   f.querySelector('button').disabled = saved;
   f.querySelector('button').textContent = saved ? 'This is your goal' : 'Save as my goal';
 }
-let goalTimer = null;
+let goalTimer = null, goalBody = null;
+// The body `when` months along the way to the goal: today's and the goal's measurements mixed in proportion.
+function showWhen() {
+  const f = $('#fGoalBody'), max = +f.when.max, t = goalDraft.when ?? max, k = Math.min(1, t / max), now = S.scans[idx];
+  const mix = (a, b) => Object.fromEntries(Object.entries(b).map(([x, v]) => [x, typeof v === 'number' && typeof a[x] === 'number' ? a[x] + (v - a[x]) * k : v]));
+  predicted = { dims: mix(now.dims, goalBody.dims), m: mix(cur(), goalBody.m), goal: true, label: k >= 1 ? 'your goal' : t ? `in ${t} month${t > 1 ? 's' : ''}` : 'today' };
+  renderTimeline();
+  rebuildAvatar();
+}
 async function showGoal() {
   const out = await api('POST', '/api/predict', { goal_weight: goalDraft.weight, goal_bf: goalDraft.bf }), now = cur();
-  predicted = { dims: out.dims, m: out.m, goal: true };
+  goalBody = out;
   const where = ['chest', 'arm_l', 'waist', 'hips', 'thigh_l', 'calf_l', 'neck'].filter((k) => out.m[k] != null && now[k] != null)
     .map((k) => [k, out.m[k] - now[k]]).sort((x, y) => Math.abs(y[1]) - Math.abs(x[1])).slice(0, 3);
   if ($('#goalWhere')) $('#goalWhere').innerHTML = where.length ? `Where it shows most: ${where.map(([k, d]) => `${{ arm_l: 'arms', thigh_l: 'thighs', calf_l: 'calves' }[k] ?? META[k].label.toLowerCase()} <b>${fmt(k, d, true)}</b>`).join(', ')}.` : '';
+  if ($('#fGoalBody')) return showWhen();
+  predicted = { dims: out.dims, m: out.m, goal: true };
   renderTimeline();
   rebuildAvatar();
 }
@@ -773,8 +791,14 @@ $('#panel').addEventListener('input', (e) => {
     return rebuildAvatar();
   }
   if (e.target.form?.id === 'fGoalBody') {
-    goalDraft[e.target.name] = e.target.name === 'weight' ? fromUnit(+e.target.value, 'kg') : +e.target.value;
+    const { name } = e.target, lean = valueOf('weight') * (1 - cur().bf / 100);
+    if (name === 'keep') goalDraft.keep = e.target.checked;
+    else if (name === 'when') goalDraft.when = +e.target.value;
+    else goalDraft[name] = name === 'weight' ? fromUnit(+e.target.value, 'kg') : +e.target.value;
+    if (goalDraft.keep) goalDraft.weight = lean / (1 - goalDraft.bf / 100); // the same muscle at that body fat
+    if (name !== 'when') goalDraft.when = null; // a new goal: show it, not a month along the way
     goalText();
+    if (name === 'when') return goalBody && showWhen();
     clearTimeout(goalTimer);
     goalTimer = setTimeout(() => showGoal().catch((err) => toast(err.message, true)), 200);
     return;

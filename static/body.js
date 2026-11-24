@@ -307,6 +307,16 @@ export function genitalMesh(pos, { length, girth, up }) {
   const u = unit(add([0, -1, 0], a, a[1])), e = [a[1] * u[2] - a[2] * u[1], a[2] * u[0] - a[0] * u[2], a[0] * u[1] - a[1] * u[0]]; // down, across
   const ptr = T.arr('genitals.ptr'), idx = T.arr('genitals.idx'), mix = T.arr('genitals.mix'), P = new Float32Array(n * 3);
   for (let r = 0; r < n; r++) for (let j = ptr[r]; j < ptr[r + 1]; j++) for (let k = 0; k < 3; k++) P[r * 3 + k] += mix[j] * P0[idx[j] * 3 + k]; // smoothed
+  // The model's scrotum is broad and held high (as when erect): drawn in round its middle (86 % across, 90 % otherwise) and
+  // hanging 1.2 cm lower, its seam with the body kept.
+  const free = T.arr('genitals.free'), sw = (i) => (1 - w[i] / 255) * free[i] / 255;
+  let sum = [0, 0, 0], tot = 0;
+  for (let i = 0; i < n; i++) { sum = add(sum, v(P, i), sw(i)); tot += sw(i); }
+  const mid = sum.map((x) => x / tot);
+  for (let i = 0; i < n; i++) {
+    const p = add(v(P, i), mid, -1), q = add(add(add(mid, a, 0.9 * dot(p, a)), u, 0.9 * dot(p, u) + 1.2), e, 0.86 * dot(p, e));
+    for (let m = 0; m < 3; m++) P[i * 3 + m] += (q[m] - P[i * 3 + m]) * sw(i);
+  }
   const L0 = dot(add(v(P0, tip), B, -1), a), radii = [];
   for (let i = 0; i < n; i++) {
     const p = add(v(P, i), B, -1), s = dot(p, a);

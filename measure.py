@@ -403,7 +403,7 @@ def derive(raw, profile, weight=None):
     for p in LIMBS:
         if p in tape or p + '_w' in dims:
             m[p] = tape.get(p) or math.pi * dims[p + '_w']
-    m |= {k: v for k, v in tape.items() if k.startswith('penis')}  # genital.py: at rest, and the range seen
+    m |= {k: v for k, v in tape.items() if k.startswith('penis')}  # closeups.py: at rest, and the range seen
     if 'waist' in m:
         m['whtr'] = m['waist'] / H
         if 'hips' in m:

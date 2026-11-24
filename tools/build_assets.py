@@ -467,6 +467,14 @@ def genitals(meta):
     meta['proxies']['genitals'] = {'kind': 'genitals', 'scale': scale}
     meta['genitals'] = {'tip': tip, 'rings': [r.tolist() for r in rings], 'base': round(float(-surface / np.linalg.norm(c2 - c)), 3),
                         'license': 'Erect Penis by Slayer227, MakeHuman community (CC0 1.0)'}
+    # How far each vertex is from where it's sewn to the body (0 there, 1 from 3 cm on): what may move without a seam.
+    edges = {}
+    for f in faces:
+        for k in range(len(f)):
+            e = tuple(sorted((f[k], f[(k + 1) % len(f)])))
+            edges[e] = edges.get(e, 0) + 1
+    seam = P[[at[v] for e, c_ in edges.items() if c_ == 1 for v in e]]  # its open edge, lying on the body
+    free = np.clip(np.min(np.linalg.norm(P[:, None] - seam[None], axis=2), 1) / .03, 0, 1)
     # The model's shaft has a ring every ~3 cm: too coarse to bend. Smoothed twice (a ring every ~0.75 cm), as weights over
     # its vertices, so the browser smooths the fitted mesh, then bends it.
     rows, quads = subdivide([[at[v] for v in f] for f in faces])
@@ -474,7 +482,8 @@ def genitals(meta):
             'genitals.ptr': np.cumsum([0] + [len(r) for r in rows]).astype('<u4'),
             'genitals.idx': np.array([k for r in rows for k in r], '<u2'), 'genitals.mix': np.array([x for r in rows for x in r.values()], '<f4'),
             'genitals.tris': np.array([[q[0], q[k], q[k + 1]] for q in quads for k in (1, 2)], '<u2'),
-            'genitals.shaft': np.array([round(255 * sum(x * shaft[k] for k, x in r.items())) for r in rows], 'u1')}
+            'genitals.shaft': np.array([round(255 * sum(x * shaft[k] for k, x in r.items())) for r in rows], 'u1'),
+            'genitals.free': np.array([round(255 * sum(x * free[k] for k, x in r.items())) for r in rows], 'u1')}
 
 
 def detail_maps():
