@@ -58,7 +58,7 @@ def problem(v, bare=True):
     """Why these answers rule the frame out, or None."""
     if v['several'] > .5:
         return 'someone else in view'
-    if v['child'] > .5:
+    if v['child'] > .7:  # a backstop: the face check already turns away anyone who isn't you, so only clear calls
         return 'a child'
     if v['upright'] < .3:  # shortcut: thresholds from 172 captures (4 close calls); retune as reviewed cases build up
         return 'not standing'
