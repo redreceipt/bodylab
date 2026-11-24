@@ -1,5 +1,6 @@
 """A local vision decision model looks at the person in a frame and says what rules the frame out of measuring: not
-standing (sitting, lying, reclining), on furniture, under a blanket, clothes on, someone else in view, a child. The
+standing (sitting, lying, reclining), on furniture, under a blanket, holding something against the body (its edges
+would be taken for yours), clothes on, someone else in view, a child. The
 rule-based checks miss these (a reclining body under a sheet passes them). The model is Cloudflare's Clef-flash
 (Apache-2.0, 9B, ~1.5 s a frame on an M4) on MLX: it gives a probability for every answer, so close calls can lean
 the right way. The image stays on this computer and isn't kept. Optional: without the `vision` dependency group,
@@ -22,6 +23,7 @@ QUESTIONS = {k: {'type': 'noul', 'instructions': q} for k, q in {
     'upright': 'Is the main person standing or walking upright on their own feet? (Not sitting, lying, reclining, kneeling, crouching or bending over.)',
     'furniture': 'Is the main person sitting, lying or leaning on a bed, couch, chair or table?',
     'blanket': 'Does a blanket, sheet or towel cover part of the main person?',
+    'holding': 'Is the main person holding something (a laptop, tablet, bag, box or clothes) in front of or against their body?',
     'clothed_torso': "Is the main person's torso covered by clothing such as a shirt or top? Bare skin or underwear is not clothing.",
     'child': 'Is the main person a child?'}.items()}
 
@@ -64,6 +66,8 @@ def problem(v, bare=True):
         return 'on furniture'
     if v['blanket'] > .5:
         return 'under a blanket or towel'
+    if v.get('holding', 0) > .5:  # its edges would be taken for yours
+        return 'holding something'
     if bare and v['clothed_torso'] > .5:
         return 'clothes on'
     return None
@@ -80,11 +84,12 @@ def drop(db, cam, ts, window=WINDOW):
 
 
 def _demo():
-    ok = {'several': .01, 'upright': .9, 'furniture': .01, 'blanket': .01, 'clothed_torso': .01, 'child': .02}
+    ok = {'several': .01, 'upright': .9, 'furniture': .01, 'blanket': .01, 'holding': .02, 'clothed_torso': .01, 'child': .02}
     assert problem(ok) is None
     assert problem(ok | {'several': .8}) == 'someone else in view'
     assert problem(ok | {'upright': .14}) == 'not standing' and problem(ok | {'upright': .34}) is None
     assert problem(ok | {'blanket': .7}) == 'under a blanket or towel'
+    assert problem(ok | {'holding': .9}) == 'holding something'
     assert problem(ok | {'clothed_torso': .9}) == 'clothes on' and problem(ok | {'clothed_torso': .9}, bare=False) is None
 
 
@@ -95,7 +100,7 @@ if __name__ == '__main__':
         if not p.exists() or not p.with_suffix('.jpg').exists():  # dropped along with an earlier one
             continue
         rec = json.loads(p.read_text())
-        v = rec.get('clef') or ask(p.with_suffix('.jpg').read_bytes())
+        v = rec.get('clef') if set(QUESTIONS) <= set(rec.get('clef') or {}) else ask(p.with_suffix('.jpg').read_bytes())  # re-asked when there's a new question
         if v is None:
             raise SystemExit('Clef is not available: uv sync --group vision')
         p.write_text(json.dumps({k: x for k, x in rec.items() if k != 'check'} | {'clef': v}))

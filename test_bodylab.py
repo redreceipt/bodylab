@@ -229,6 +229,7 @@ cat_full[560:] = 4  # clothes below the waist
 sil_c = app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0, cat=cat_full, box=(0, 1000, 0, 800))
 c_y = np.array(sil_c['c'])[:, 1] * 700 + pts[23:25].mean(0)[1]
 assert len(sil_c['off']) == 160 and all(o == (y > 575) for o, y in zip(sil_c['off'], c_y) if abs(y - 560) > 15)
+assert all(app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0, cat=np.zeros((1000, 800), np.uint8), box=(0, 1000, 0, 800))['off'])  # the mask took in background
 # The stored silhouette is scale-free: same body twice the size gives the same outline.
 sil = app.silhouette(img / 255.0, pts, world, pts[23:25].mean(0), 700.0)
 big = app.silhouette(cv2.resize(img, None, fx=2, fy=2) / 255.0, pts * 2, world, pts[23:25].mean(0) * 2, 1400.0)

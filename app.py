@@ -604,19 +604,20 @@ class Capture:
 def silhouette(mask, pts, world, origin, H, n=160, cat=None, box=None):
     """A scale-free outline of the body (n points along the mask's outer contour) plus the 2D and 3D landmarks,
     relative to the hip centre in units of standing height: what fitting a full body shape needs. No image. With
-    the clothes segmenter's categories (cat, over the crop box): which outline points lie on clothes or hair ('off'),
-    where the outline isn't the body's."""
+    the clothes segmenter's categories (cat, over the crop box): which outline points lie on clothes, hair or something
+    else the person mask took in ('off'), where the outline isn't the body's."""
     contours = cv2.findContours((mask > .5).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0]
     c = max(contours, key=cv2.contourArea)[:, 0].astype(float) if contours else np.zeros((1, 2))
     seg = np.r_[0, np.cumsum(np.linalg.norm(np.diff(c, axis=0, append=c[:1]), axis=1))]
     t = np.linspace(0, seg[-1], n, endpoint=False)
     outline = np.stack([np.interp(t, seg, np.r_[c[:, k], c[0, k]]) for k in (0, 1)], 1)
     out = {'c': ((outline - origin) / H).round(4).tolist(), 'l': ((pts - origin) / H).round(4).tolist(), 'w': world.round(3).tolist()}
-    if cat is not None:  # a few px inside the outline: clothes (4) or hair (1) there means it's not the body's edge
+    if cat is not None:  # not the body's edge: clothes (4) or hair (1) a few px inside the outline, or background (0, 5)
+        # further in, where the person mask swallowed something behind you or a window's halo round you
         centre = np.array(c.mean(0))
-        inner = outline + (centre - outline) / np.maximum(np.linalg.norm(centre - outline, axis=1, keepdims=True), 1) * 6
-        q = np.clip(np.round(inner - [box[2], box[0]]).astype(int), 0, [cat.shape[1] - 1, cat.shape[0] - 1])
-        out['off'] = np.isin(cat[q[:, 1], q[:, 0]], (1, 4)).astype(int).tolist()
+        step = (centre - outline) / np.maximum(np.linalg.norm(centre - outline, axis=1, keepdims=True), 1)
+        at = lambda px: cat[tuple(np.clip(np.round(outline + step * px - [box[2], box[0]]).astype(int), 0, [cat.shape[1] - 1, cat.shape[0] - 1]).T[::-1])]  # noqa: E731
+        out['off'] = (np.isin(at(6), (1, 4)) | np.isin(at(12), (0, 5))).astype(int).tolist()
     return out
 
 

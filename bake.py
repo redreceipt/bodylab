@@ -50,10 +50,10 @@ def segmenter():
 
 
 def skin_mask(img):
-    """Bare skin (body or face) per pixel, by MediaPipe's multiclass person segmenter; edges trimmed."""
+    """Bare skin and body hair per pixel, by MediaPipe's multiclass person segmenter; edges trimmed."""
     mp, seg = segmenter()
     cat = seg.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(img[..., ::-1]))).category_mask.numpy_view()
-    m = np.isin(cat.reshape(img.shape[:2]), (2, 3)).astype(np.uint8)
+    m = np.isin(cat.reshape(img.shape[:2]), (1, 2, 3)).astype(np.uint8)  # hair too: on the body that's body hair (the head isn't baked)
     return cv2.erode(m, np.ones((7, 7), np.uint8)) > 0
 
 
@@ -122,7 +122,7 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
     seen = wsum > 0
     tex[ys[seen], xs[seen]] = acc[seen] / wsum[seen, None]
     cover[ys[seen], xs[seen]] = np.clip(wsum[seen] / .3, 0, 1)
-    if base is not None:  # your skin's detail on the template's even lighting (tone comes from your face photo, later)
+    if base is not None:  # your skin's colour and detail on the template's even lighting (the overall tone comes later)
         base = cv2.resize(base, (size, size)).astype(float)
         # Detail = your skin ÷ its own blur (~1.5 cm): marks, hair, pores, not the room's light falling across you.
         lit = cv2.GaussianBlur(tex * cover[..., None], (0, 0), 12) / np.maximum(cv2.GaussianBlur(cover, (0, 0), 12), 1e-3)[..., None]
@@ -133,7 +133,13 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
         a = np.minimum(cv2.GaussianBlur(cover, (0, 0), 3), cover)  # feathered inward from what was seen
         island = np.zeros((size, size), np.uint8)
         island[ys, xs] = 1  # texture sections: the blur above mixes across their edges, so detail fades out there
-        a = (a * np.clip(cv2.distanceTransform(island, cv2.DIST_L2, 3) / 12, 0, 1))[..., None]
-        tex = base * (1 + (detail - 1) * a)
+        edge = cv2.distanceTransform(island, cv2.DIST_L2, 3)
+        # Your skin's own colour across the body (~5 cm and up: tan lines, darker forearms, body hair), relative to your
+        # overall tone, which tints the whole texture later; fades out near section edges, where the blur mixes parts.
+        seen = cover > .5
+        colour = np.clip(broad / np.maximum(np.median(tex[seen], 0) if seen.any() else 128, 1), .5, 1.35)
+        c = (np.minimum(cv2.GaussianBlur(cover, (0, 0), 12), cover) * np.clip(edge / 36, 0, 1))[..., None]
+        a = (a * np.clip(edge / 12, 0, 1))[..., None]
+        tex = base * (1 + (colour - 1) * c) * (1 + (detail - 1) * a)
     return np.clip(tex, 0, 255).astype(np.uint8), cover
 
