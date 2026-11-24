@@ -827,4 +827,5 @@ async function refresh(withPanel = true) {
 await refresh();
 snapHome(); // now with your height
 if (!S.profile?.height_cm) open({ tab: 'settings' });
+window.booted = true; // index.html stops retrying
 poll();

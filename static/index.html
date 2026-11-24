@@ -137,6 +137,14 @@ ul.tips { padding-left:18px; color:var(--dim); font-size:12.5px }
 </footer>
 <section id="panel" class="card" hidden><button id="close" aria-label="Close">×</button><div id="pbody"></div></section>
 <div id="tip"></div><div id="toast" role="alert"></div>
+<script>
+  // If starting fails (a script didn't load while the server restarted, say), show why and try again, not "Connecting…" forever.
+  addEventListener('error', (e) => {
+    if (window.booted || (e.target !== window && e.target.tagName !== 'SCRIPT')) return; // a missing picture is no reason
+    document.getElementById('camMsg').textContent = `Couldn't start (${e.message || 'a file didn\'t load'}), retrying…`;
+    setTimeout(() => location.reload(), 3000);
+  }, true);
+</script>
 <script type="module" src="/static/app.js"></script>
 </body>
 </html>
