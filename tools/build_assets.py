@@ -453,6 +453,35 @@ def main():
     (OUT / 'body.bin').write_bytes(bytes(blob))
     (OUT / 'body.json').write_text(json.dumps(meta))
     print(f'body.bin {len(blob) / 1e6:.2f} MB; assets in {OUT}')
+    detail_maps()
+
+
+# Muscle relief and body hair: Mindfront's "skin male african middleage" (CC0, MakeHuman community), in the same UV layout.
+DETAIL = 'http://files.makehumancommunity.org/sites/default/files/skins/1422/'
+DETAIL_NORMALS, DETAIL_SPECULAR = DETAIL + '2059795311/skin_male_african_middleage_NRM.png', DETAIL + '414990480/skin_male_african_middleage_SPEC.png'
+
+
+def detail_maps():
+    """muscles.jpg: the skin's normal map (abs, pecs, serratus, deltoids, ...), flat on the head, where your face is
+    your photo's; body_hair.png: where body hair grows and how densely (0-255), from the specular map's dark hair (none
+    on the head: no one else's beard)."""
+    import sys
+    sys.path.insert(0, str(OUT.parent.parent))
+    import bake
+    src, uv, tris, head = bake.assets()
+    normals, spec = cv2.imread(str(fetch(DETAIL_NORMALS)), cv2.IMREAD_COLOR), cv2.imread(str(fetch(DETAIL_SPECULAR)), cv2.IMREAD_GRAYSCALE)
+    size = normals.shape[0]
+    P = np.round(np.stack([uv[:, 0] * size, (1 - uv[:, 1]) * size], 1) * 4).astype(np.int32)
+    body, face = np.zeros((size, size), np.uint8), np.zeros((size, size), np.uint8)
+    for tri in tris:
+        cv2.fillConvexPoly(face if head[src[tri]].all() else body, P[tri], 1, cv2.LINE_8, shift=2)
+    face = cv2.dilate(face, np.ones((9, 9), np.uint8)) & ~cv2.erode(body, np.ones((3, 3), np.uint8)).astype(bool)
+    normals[face > 0] = (255, 128, 128)  # BGR: straight out
+    hair = np.clip(((np.median(spec[body > 0]) - spec.astype(float)) / 77 - .25) / .45, 0, 1)  # dark strands, not pores
+    hair[(cv2.erode(body, np.ones((25, 25), np.uint8)) == 0) | (face > 0)] = 0  # section edges fade dark too: not hair
+    hair[:, int(.82 * size):] = 0  # MakeHuman's layout puts the neck's sides and the ears right of the body: no body hair
+    cv2.imwrite(str(OUT / 'muscles.jpg'), normals, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    cv2.imwrite(str(OUT / 'body_hair.png'), np.round(hair * 255).astype(np.uint8), [cv2.IMWRITE_PNG_COMPRESSION, 9])
 
 
 if __name__ == '__main__':

@@ -154,6 +154,14 @@ export async function skinCanvas(sex, { face, photo, tone, hairColor, baseUrl })
     }
     ctx.putImageData(T, bx, by);
   }
+  if (hairColor && sex !== 'female') { // body hair where it grows (body_hair.png: chest, belly line, pubic, armpits), in your colour
+    const mask = await loadImage('/static/assets/body_hair.png'), hc = canvas(SIZE), hg = hc.getContext('2d', { willReadFrequently: true });
+    hg.drawImage(mask, 0, 0, SIZE, SIZE);
+    const im = hg.getImageData(0, 0, SIZE, SIZE), d = im.data, [r, g, b] = hex(hairColor);
+    for (let i = 0; i < d.length; i += 4) { d[i + 3] = 217 * (d[i] / 255) ** 2; d[i] = r; d[i + 1] = g; d[i + 2] = b; } // dense hair shows, stray specks fade
+    hg.putImageData(im, 0, 0);
+    ctx.drawImage(hc, 0, 0);
+  }
   if (hairColor) { // hair-coloured scalp so gaps between hair strands don't show bare skin
     const sc = canvas(SIZE), sg = sc.getContext('2d'), scalp = A[sex].scalp, uv = (r) => [A.uv[r * 2] * SIZE, (1 - A.uv[r * 2 + 1]) * SIZE];
     sg.fillStyle = sg.strokeStyle = hairColor;

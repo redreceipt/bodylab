@@ -112,11 +112,20 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
-camera.position.set(0.6, 1.25, 4.6);
 const controls = new OrbitControls(camera, renderer.domElement);
 Object.assign(controls, { enableDamping: true, autoRotate: true, autoRotateSpeed: 0.7, minDistance: 1.2, maxDistance: 9 });
-controls.target.set(0, 0.88, 0);
-if (innerWidth < 600) { camera.position.multiplyScalar(1.15); controls.target.y = 0.8; } // phone: the whole body between the bars
+// Home: the whole body as large as the space between the bars allows, from just below eye level (32° is a portrait
+// lens: true proportions, none of a close wide-angle's distortion).
+function home() {
+  const H = (S?.profile?.height_cm ?? 175) / 100, fill = innerWidth < 600 ? 0.74 : 0.82; // of the screen's height
+  return { target: new THREE.Vector3(0, 0.47 * H, 0), dist: (1.06 * H) / fill / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) };
+}
+const snapHome = () => {
+  const h = home();
+  controls.target.copy(h.target);
+  camera.position.copy(h.target).add(new THREE.Vector3(0.6, 0.12, 4.6).setLength(h.dist));
+};
+snapHome();
 controls.addEventListener('start', () => { controls.autoRotate = false; focus.target = null; });
 // Lit like a portrait: a warm key from above your viewpoint's right (it moves with the view, so muscle reads from every side)
 // with soft shadows, a cool fill from the left, warm bounce from below, a subtle rim; little flat ambient to wash out form.
@@ -157,29 +166,9 @@ renderer.toneMappingExposure = 0.9;
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
 scene.environmentIntensity = 0.35;
 
-// Skin micro-detail: a tiling normal map of pores and fine creases (procedural), much finer than any texture texel.
-function poreNormals(size = 512) {
-  const h = new Float32Array(size * size);
-  for (let n = 0; n < 9000; n++) { // pores: small pits
-    const x = Math.random() * size, y = Math.random() * size, r = 1 + Math.random() * 1.5;
-    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
-      const d = Math.hypot(dx, dy) / r;
-      if (d < 1.5) h[((Math.floor(y) + dy + size) % size) * size + ((Math.floor(x) + dx + size) % size)] -= Math.exp(-d * d * 2);
-    }
-  }
-  const c = document.createElement('canvas'), g = c.getContext('2d'), im = g.createImageData(size, size);
-  c.width = c.height = size;
-  const at = (x, y) => h[((y + size) % size) * size + ((x + size) % size)];
-  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-    const nx = (at(x - 1, y) - at(x + 1, y)) * 0.6, ny = (at(x, y - 1) - at(x, y + 1)) * 0.6, l = Math.hypot(nx, ny, 1), i = (y * size + x) * 4;
-    im.data[i] = (nx / l * 0.5 + 0.5) * 255; im.data[i + 1] = (ny / l * 0.5 + 0.5) * 255; im.data[i + 2] = (1 / l * 0.5 + 0.5) * 255; im.data[i + 3] = 255;
-  }
-  g.putImageData(im, 0, 0);
-  return Object.assign(new THREE.CanvasTexture(c), { wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping, repeat: new THREE.Vector2(14, 14), anisotropy: 8 });
-}
-
 const textures = {};
 const texture = (url) => (textures[url] ??= Object.assign(new THREE.TextureLoader().load(url), { colorSpace: THREE.SRGBColorSpace, anisotropy: 8 }));
+const data = (url) => Object.assign(new THREE.TextureLoader().load(url), { anisotropy: 8 }); // linear: a normal map isn't colour
 const geometry = (pos, src, uv, tris) => {
   const m = mesh(pos, src, tris), g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(m.position, 3));
@@ -221,9 +210,10 @@ function scatter(material) {
   return material;
 }
 const mats = {
-  // Skin: soft specular, a warm sheen standing in for light scattering under the skin, pores for micro-detail.
+  // Skin: soft specular, a warm sheen standing in for light scattering under the skin; muscle relief and skin texture from
+  // a CC0 normal map (Mindfront, MakeHuman community), as strong as you are lean.
   skin: scatter(new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.52, specularIntensity: 0.45, sheen: 0.25, sheenRoughness: 0.55,
-    sheenColor: '#ff9a7a', normalMap: poreNormals(), normalScale: new THREE.Vector2(0.35, 0.35) })),
+    sheenColor: '#ff9a7a', normalMap: data('/static/assets/muscles.jpg'), normalScale: new THREE.Vector2(0.6, 0.6) })),
   // Additive glow over the selected / hovered part, so the skin itself stays untouched.
   selected: glowMaterial(0.45), hovered: glowMaterial(0.25),
   hair: strands(null, '#3b2a20'), brows: strands(texture('/static/assets/eyebrow001.png'), '#3b2a20'),
@@ -402,6 +392,7 @@ function paint() {
 function rebuildAvatar(force = false) {
   const sex = S.profile?.sex, today = S.scans[idx]?.dims ?? {}, dims = predicted?.dims ?? today;
   const m = predicted?.m ?? S.scans[idx]?.m ?? {};
+  mats.skin.normalScale.setScalar(m.bf != null ? Math.min(1, Math.max(0.25, (22 - m.bf) / 12)) : 0.5); // definition shows as fat goes
   const mesh = fitted(predicted ? S.scans.at(-1) : S.scans[idx]); // predictions reshape today's fit
   const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(m), !!predicted, !!mesh]);
   if (!force && key === lastDimsKey) return paint();
@@ -417,9 +408,7 @@ function rebuildAvatar(force = false) {
 // Camera glides to the selected part (close-up for the head); closing the panel returns to the full body.
 const focus = { target: null, dist: 0, front: false };
 function focusOn(part) {
-  const H = (S.profile?.height_cm ?? 175) / 100;
-  focus.target = new THREE.Vector3(0, H / 2, 0);
-  focus.dist = 4.6;
+  Object.assign(focus, home());
   focus.front = part === 'overall'; // face close-ups turn to the front
   if (part) controls.autoRotate = false;
   const g = part && avatar?.children[0].geometry;
@@ -836,5 +825,6 @@ async function refresh(withPanel = true) {
 }
 
 await refresh();
+snapHome(); // now with your height
 if (!S.profile?.height_cm) open({ tab: 'settings' });
 poll();

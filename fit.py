@@ -360,17 +360,21 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
 
 
 def stance(model, shape, kreg):
-    """Bone transforms (posed × rest⁻¹, Anny frame) for a natural relaxed stance: arms hanging 7° out, elbows a little
+    """Bone transforms (posed × rest⁻¹, Anny frame) for a natural relaxed stance: arms hanging 5° out, elbows a little
     bent with the forearm's natural outward carrying angle, never inside the hips; palms toward the thighs, hands in
-    line with the forearms; fingers together with a slight curl; legs near vertical, feet flat. The shoulder bone shares the arm's turn so the deltoid keeps its shape. (Your own arm
+    line with the forearms; fingers together with a slight curl; legs near vertical, feet flat. Relaxed, so not quite symmetric: weight on
+    the left leg (hips over it, pelvis tipped 5°, the spine bringing the head back upright), the right knee soft and its foot
+    a little forward, toes turned out, the right arm a little more bent. The shoulder bone shares the arm's turn so the deltoid keeps its shape. (Your own arm
     angles from MediaPipe's 3D landmarks were too noisy to look natural.)"""
     import roma
     import torch
     dev = shape['local_changes_kwargs'].device
-    names = [f'{b}.{s}' for b in ('upperarm01', 'lowerarm01', 'shoulder01', 'upperleg01', 'foot') for s in 'LR']
+    names = [f'{b}.{s}' for b in ('upperarm01', 'lowerarm01', 'shoulder01', 'upperleg01', 'foot', 'lowerleg01') for s in 'LR'] + ['spine05', 'spine03']
     bones = torch.tensor([model.bone_labels.index(b) for b in names], device=dev)
     rot = torch.zeros(len(names), 3, device=dev, requires_grad=True)
-    reg = torch.tensor([1, 1, 1, 1, 3, 3, 1, 1, 1, 1.], device=dev)[:, None]  # the shoulder takes about a quarter of the turn
+    reg = torch.tensor([1, 1, 1, 1, 3, 3, 1, 1, 1, 1, 1, 1, 2, 2.], device=dev)[:, None]  # the shoulder takes about a quarter of the turn
+    root = model.bone_labels.index('root')
+    tilt = torch.eye(3, device=dev)  # the pelvis, set below once the upright targets are taken
     twist_b = torch.tensor([model.bone_labels.index(f'lowerarm02.{s}') for s in 'LR'], device=dev)
     twist = torch.zeros(2, device=dev, requires_grad=True)  # forearm twist turns the palm
     wrist_b = torch.tensor([model.bone_labels.index(f'wrist.{s}') for s in 'LR'], device=dev)
@@ -381,6 +385,7 @@ def stance(model, shape, kreg):
     def run(tw=None):
         pose = torch.eye(4, device=dev).repeat(1, model.bone_count, 1, 1)
         pose[0, bones, :3, :3] = roma.rotvec_to_rotmat(rot)
+        pose[0, root, :3, :3] = tilt
         pose[0, twist_b, :3, :3] = roma.rotvec_to_rotmat(axes * (twist if tw is None else tw)[:, None])
         pose[0, wrist_b, :3, :3] = roma.rotvec_to_rotmat(wrot)
         for b, rv in curl.items():
@@ -400,14 +405,14 @@ def stance(model, shape, kreg):
             axes[j] = torch.eye(3, device=dev)[int(torch.stack(moved).argmin())]
         part = lambda b: top == model.bone_labels.index(b)  # noqa: E731  vertices a bone mostly moves
         # Curl: each finger joint bends about the local axis that brings its fingertip toward the palm (palms face
-        # down at rest) with the least sideways sweep. Knuckles 15°, middle joints 30°, end joints 15°; thumb a third.
+        # down at rest) with the least sideways sweep. Knuckles 25°, middle joints 35°, end joints 20°; thumb half.
         V0 = run()['vertices'][0]
         for s in 'LR':
             across = V0[part(f'finger5-1.{s}')].mean(0) - V0[part(f'finger2-1.{s}')].mean(0)
             across /= across.norm()
             for f in range(1, 6):
                 end = part(f'finger{f}-3.{s}')
-                for j, deg in ((1, 15), (2, 30), (3, 15)):
+                for j, deg in ((1, 25), (2, 35), (3, 20)):
                     b = model.bone_labels.index(f'finger{f}-{j}.{s}')
                     best = (-1e9, None)
                     for e in torch.eye(3, device=dev):
@@ -415,11 +420,12 @@ def stance(model, shape, kreg):
                             curl[b] = e * sign * .4
                             d = run()['vertices'][0][end].mean(0) - V0[end].mean(0)
                             best = max(best, (-d[2].item() - 2 * abs((d @ across).item()), e * sign), key=lambda x: x[0])
-                    curl[b] = best[1] * math.radians(deg) * (1 / 3 if f == 1 else .8)
+                    curl[b] = best[1] * math.radians(deg) * (.5 if f == 1 else .8)
         tips = [(part(f'finger1-3.{s}'), part(f'finger5-3.{s}')) for s in 'LR']  # thumb, little finger
         unit = lambda v: np.array(v) / np.linalg.norm(v)  # noqa: E731  x out (your left), y back, z up
         r = math.radians
-        arms = [unit([math.tan(r(7)), -math.tan(r(3)), -1]), unit([math.tan(r(5)), -math.tan(r(10)), -1])]
+        arms = [unit([math.tan(r(5)), -math.tan(r(4)), -1]), unit([math.tan(r(5)), -math.tan(r(14)), -1])]
+        forearm = {1: arms[1], -1: unit([math.tan(r(6)), -math.tan(r(22)), -1])}  # relaxed isn't symmetric: the right a little more bent
         hand = unit([math.tan(r(2)), -math.tan(r(8)), -1])  # the hand hangs on in line: fingers down, barely out
         knuckles = [part(f'finger3-1.{s}') for s in 'LR']
         for s in 'LR':  # fingers together: each one turns about the local axis that brings it toward the middle finger
@@ -438,31 +444,55 @@ def stance(model, shape, kreg):
                         closer = splay - torch.arccos(torch.clamp(d1 @ mid / d1.norm() / mid.norm(), -1, 1)).item()
                         best = max(best, (closer - abs((V1[end].mean(0) - V0[end].mean(0))[2].item()), e * sign), key=lambda x: x[0])
                 curl[b] = curl0 + best[1] * .6 * splay
+        for s in 'LR':  # thumb tucked beside the index finger (tip ~2 cm from its middle segment), after the fingers close up
+            b, tip, index = model.bone_labels.index(f'finger1-1.{s}'), part(f'finger1-3.{s}'), part(f'finger2-2.{s}')
+            curl0, best = curl.get(b, torch.zeros(3, device=dev)), (1e9, None)
+            for turn in [torch.zeros(3, device=dev)] + [e * sign * t for e in torch.eye(3, device=dev) for sign in (1, -1) for t in (.15, .3, .45)]:
+                curl[b] = curl0 + turn
+                V1 = run()['vertices'][0]
+                best = min(best, (abs((V1[tip].mean(0) - V1[index].mean(0)).norm().item() - .02), curl[b]), key=lambda x: x[0])
+            curl[b] = best[1]
         targets = []
         for side, (s, e, w) in ((1, (3, 5, 7)), (-1, (4, 6, 8))):  # KP order: shoulders 3/4, elbows 5/6, wrists 7/8
             S, Lu, Ll = k[s], (k[e] - k[s]).norm(), (k[w] - k[e]).norm()
             mirror = torch.tensor([side, 1, 1.], device=dev)
             E = S + Lu * torch.tensor(arms[0], dtype=torch.float32, device=dev) * mirror
-            W = E + Ll * torch.tensor(arms[1], dtype=torch.float32, device=dev) * mirror
+            W = E + Ll * torch.tensor(forearm[side], dtype=torch.float32, device=dev) * mirror
             band = V[~limb & ((V[:, 2] - W[2]).abs() < .03) & (V[:, 0] * side > 0)]
-            if len(band):  # never inside the hips: the wrist at least 3 cm clear of them
-                W[0] = side * max(abs(W[0].item()), band[:, 0].abs().max().item() + .03)
+            if len(band):  # never inside the hips: the wrist at least 2 cm clear of them
+                W[0] = side * max(abs(W[0].item()), band[:, 0].abs().max().item() + .02)
             targets += [(e, E), (w, W)]
-        for a, h in ((13, 9), (14, 10)):  # legs near vertical: ankles just outside the hip joints (rest: splayed 35 cm apart)
-            A = k[a].clone()
-            A[0] = k[h, 0] * 1.1
+        for a, h, out, fwd in ((13, 9, 1.08, 0), (14, 10, 1.2, .04)):  # legs near vertical (rest: splayed 35 cm apart); weight on
+            A = k[a].clone()                                              # the left, the right foot a little forward and out
+            A[0], A[1] = k[h, 0] * out - .025, A[1] - fwd  # feet 2.5 cm right of the hips: the hips sit over the left foot
             targets.append((a, A))
-        soles = []
+        targets += [(i, k[i].clone()) for i in (0, 1, 2)]  # the head stays where it was: the spine bends back over the hips
+        soles, toes = [], []
         for s in 'LR':  # the lowest fifth of each foot: kept level, so the foot stays flat as the leg swings in
             f = torch.nonzero(part(f'foot.{s}')).squeeze(1)
-            soles.append(f[V[f, 2] <= torch.quantile(V[f, 2], .2)])
+            sole = f[V[f, 2] <= torch.quantile(V[f, 2], .2)]
+            soles.append(sole)
+            front, back = V[sole, 1] <= torch.quantile(V[sole, 1], .2), V[sole, 1] >= torch.quantile(V[sole, 1], .8)
+            toes.append((sole[back], sole[front]))  # heel to toes: turned ~12° out, as feet rest
+        # Weight on the left leg: the pelvis tips 5° (right hip down, so the right knee softens); legs and spine reach the
+        # same feet and head targets around it.
+        rest_root = run()['rest_bone_poses'][0][root]
+        a = -math.radians(5)
+        world = torch.tensor([[math.cos(a), 0, math.sin(a)], [0, 1, 0], [-math.sin(a), 0, math.cos(a)]], device=dev)
+        tilt = rest_root[:3, :3].T @ world @ rest_root[:3, :3]
+        pivot = torch.eye(4, device=dev)  # the same tilt about the pelvis, kept after the root is put back below
+        pivot[:3, :3], pivot[:3, 3] = world, rest_root[:3, 3] - world @ rest_root[:3, 3]
     opt = torch.optim.Adam([rot, twist, wrot], lr=.03)
     for _ in range(250):
         opt.zero_grad()
         o = run()
         kp, out_v = kreg(o)[0], o['vertices'][0]
         loss = sum(((kp[i] - t) ** 2).sum() for i, t in targets) + 1e-4 * (reg * rot ** 2).sum() + 1e-4 * (wrot ** 2).sum()
-        loss = loss + sum(out_v[f, 2].var() for f in soles)
+        loss = loss + sum(out_v[f, 2].var() for f in soles) + 10 * (out_v[soles[0], 2].mean() - out_v[soles[1], 2].mean()) ** 2  # both on the floor
+        for (heel, toe), side in zip(toes, (1, -1)):
+            d = out_v[toe].mean(0)[:2] - out_v[heel].mean(0)[:2]
+            aim = torch.tensor([side * math.sin(r(12)), -math.cos(r(12))], dtype=d.dtype, device=dev)
+            loss = loss + .05 * (1 - d @ aim / d.norm())
         for j, side in enumerate((1, -1)):  # Anny's rest pose cocks the hand out and forward: aim it down
             d = out_v[knuckles[j]].mean(0) - kp[7 + j]
             aim = torch.tensor(hand * [side, 1, 1], dtype=d.dtype, device=dev)
@@ -475,7 +505,7 @@ def stance(model, shape, kreg):
     with torch.no_grad():
         out = run()
         G = out['bone_poses'][0] @ torch.linalg.inv(out['rest_bone_poses'][0])
-        return (torch.linalg.inv(G[model.bone_labels.index('root')]) @ G).cpu().numpy()  # posed output sits elsewhere: keep the root put
+        return (pivot @ torch.linalg.inv(G[root]) @ G).cpu().numpy()  # posed output sits elsewhere: keep the root put, tilted
 
 
 def assets():
