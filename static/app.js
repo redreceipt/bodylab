@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { fitBody, fitProxy, genitalPositions, initBody, mesh, pose, underwear } from './body.js';
 import { loadImage, photoColors, skinCanvas } from './look.js';
 import { renderSVG } from './vendor/uqr.mjs';
@@ -427,8 +431,18 @@ function focusOn(part) {
   if (part === 'overall') focus.target.y += 0.02;
 }
 
+// Ambient occlusion: the body's own creases (under the pecs, between the abs, the armpits) shade as they would in a room.
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 }));
+const occlusion = new GTAOPass(scene, camera, 1, 1);
+occlusion.updateGtaoMaterial({ radius: 0.08, distanceExponent: 1.5, thickness: 1, scale: 1.2 }); // metres: muscle-sized
+occlusion.blendIntensity = 0.9;
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(occlusion);
+composer.addPass(new OutputPass());
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
+  composer.setPixelRatio(renderer.getPixelRatio());
+  composer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
 }
@@ -447,7 +461,7 @@ renderer.setAnimationLoop((t) => {
     if (controls.target.distanceTo(focus.target) < 0.002 && Math.abs(len - focus.dist) < 0.01) focus.target = null;
   }
   controls.update();
-  renderer.render(scene, camera);
+  composer.render();
 });
 
 // picking
