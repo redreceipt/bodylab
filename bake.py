@@ -137,7 +137,8 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
         # Your skin's own colour across the body (~5 cm and up: tan lines, darker forearms, body hair), relative to your
         # overall tone, which tints the whole texture later; fades out near section edges, where the blur mixes parts.
         seen = cover > .5
-        colour = np.clip(broad / np.maximum(np.median(tex[seen], 0) if seen.any() else 128, 1), .5, 1.35)
+        # darkening capped harder: light falls off toward the floor, so legs photograph darker than they are
+        colour = np.clip(broad / np.maximum(np.median(tex[seen], 0) if seen.any() else 128, 1), .75, 1.35)
         c = (np.minimum(cv2.GaussianBlur(cover, (0, 0), 12), cover) * np.clip(edge / 36, 0, 1))[..., None]
         a = (a * np.clip(edge / 12, 0, 1))[..., None]
         tex = base * (1 + (colour - 1) * c) * (1 + (detail - 1) * a)
