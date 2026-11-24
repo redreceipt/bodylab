@@ -15,17 +15,6 @@ export const loadImage = (src) => new Promise((ok, fail) => {
 const canvas = (w, h = w) => Object.assign(document.createElement('canvas'), { width: w, height: h });
 const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 
-// Mean colour of r×r patches around points.
-function sample(ctx, pts, r = 8) {
-  const sum = [0, 0, 0];
-  let n = 0;
-  for (const [x, y] of pts) {
-    const d = ctx.getImageData(Math.round(x - r / 2), Math.round(y - r / 2), r, r).data;
-    for (let i = 0; i < d.length; i += 4) { sum[0] += d[i]; sum[1] += d[i + 1]; sum[2] += d[i + 2]; n++; }
-  }
-  return sum.map((v) => v / n);
-}
-
 // Affine-map photo triangle s onto canvas triangle d (expanded ~1 px so neighbours overlap instead of seaming).
 function warpTriangle(ctx, img, s, d) {
   const cx = (d[0][0] + d[1][0] + d[2][0]) / 3, cy = (d[0][1] + d[1][1] + d[2][1]) / 3;
@@ -189,11 +178,17 @@ export function photoColors(photo, face) {
   const pc = canvas(photo.naturalWidth, photo.naturalHeight).getContext('2d', { willReadFrequently: true });
   pc.drawImage(photo, 0, 0);
   const P = (k) => [face.landmarks[k][0] * photo.naturalWidth, face.landmarks[k][1] * photo.naturalHeight];
-  const iris = [468, 473].flatMap((c) => {
+  // the iris's lower half (the upper lid shades the top), its brighter half (not the pupil's rim or lashes)
+  const px = [468, 473].flatMap((c) => {
     const [x, y] = P(c), r = [1, 2, 3, 4].reduce((s, j) => s + Math.hypot(P(c + j)[0] - x, P(c + j)[1] - y), 0) / 4;
-    return [[x + r * 0.6, y], [x - r * 0.6, y], [x, y + r * 0.6]];
-  });
-  const eyeRGB = sample(pc, iris, 3), eyes = assets().meta.eyes;
-  return { eye: Object.keys(eyes).reduce((a, b) => (dist(eyes[b], eyeRGB) < dist(eyes[a], eyeRGB) ? b : a)) };
+    return [25, 50, 75, 100, 125, 155].flatMap((deg) => [0.5, 0.7, 0.85].map((k) => {
+      const a = (deg * Math.PI) / 180, [x1, y1] = [Math.round(x + k * r * Math.cos(a)), Math.round(y + k * r * Math.sin(a))];
+      return Array.from(pc.getImageData(x1, y1, 1, 1).data.slice(0, 3));
+    }));
+  }).sort((a, b) => b[0] + b[1] + b[2] - a[0] - a[1] - a[2]).slice(0, 18);
+  const eyeRGB = [0, 1, 2].map((k) => px.map((p) => p[k]).sort((a, b) => a - b)[px.length >> 1]), eyes = assets().meta.eyes;
+  // by hue, not brightness: a shaded blue iris is darker than any blue in the set, and darkness alone reads as brown
+  return { eye: Object.keys(eyes).reduce((a, b) => (dist(hue(eyes[b]), hue(eyeRGB)) < dist(hue(eyes[a]), hue(eyeRGB)) ? b : a)) };
 }
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+const hue = (c) => c.map((v) => v / Math.max(c[0] + c[1] + c[2], 1));

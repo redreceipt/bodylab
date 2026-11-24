@@ -256,21 +256,6 @@ def median(frames):
     return out
 
 
-def console_state():
-    """What the developer console shows beyond the app's state: the latest fit, today's frames, reference images."""
-    c, refs = db(), sorted(reference_dir().glob('*.jpg'), key=lambda p: p.stat().st_mtime) if reference_dir().exists() else []
-    history = [{'day': r['day'], **{k: json.loads(r['params']).get(k) for k in ('frames', 'dropped', 'fit', 'fit_cams')}}
-               for r in c.execute('select day, params from fits order by day desc limit 7')]
-    f = c.execute('select day, params from fits order by day desc limit 1').fetchone()
-    info = json.loads(f['params']) if f else None
-    frames = c.execute("select coalesce(json_extract(data, '$.cam'), 0), count(*) from frames where ts >= ? group by 1",
-                       (day_start(time.time()),)).fetchall()
-    checks = c.execute("select json_extract(data, '$.problem'), count(*) from checks where ts >= ? group by 1", (day_start(time.time()),)).fetchall()
-    return {'fit_info': info and {'day': f['day'], **{k: info.get(k) for k in ('frames', 'fit', 'phenotypes', 'tape')}}, 'fit_history': history,
-            'frames_today': {r[0]: r[1] for r in frames}, 'checks_today': {r[0] or 'fine': r[1] for r in checks}, 'weight': (weights(get_logs()) or [(0, None)])[-1][1],
-            'references': {'count': len(refs), 'mb': sum(p.stat().st_size for p in refs) / 2 ** 20, 'latest': [p.name for p in refs[-24:][::-1]]}}
-
-
 def app_state():
     prof, logs, c = get_profile(), get_logs(), db()
     goals = {r['metric']: {'target': r['target'], 'start': r['start'], 'ts': r['ts']} for r in c.execute('select * from goals')}
@@ -299,7 +284,6 @@ def app_state():
     sync = f'https://{TS_HOST}:{SYNC_PORT}' if TS_HOST else None
     return {'profile': prof, 'scans': scans, 'logs': logs, 'goals': goals, 'sync': {'token': sync_token(), 'url': sync},
             'face': face, 'hidden_scans': hidden, 'recommended_bf': measure.RECOMMENDED_BF[(prof or {}).get('sex') or 'male'],
-            **console_state(), 'reference_images': len(list(reference_dir().glob('*.jpg'))),
             'skin_baked': (DB_PATH.parent / 'skin.jpg').stat().st_mtime if (DB_PATH.parent / 'skin.jpg').exists() else None,
             'skin': json.loads((DB_PATH.parent / 'skin.json').read_text()) if (DB_PATH.parent / 'skin.json').exists() else None,
             'insights': measure.insights(scans, logs, goals)}
@@ -792,7 +776,9 @@ def post_profile(b):
             raise ValueError('Skin tone must be a #rrggbb colour')
         prof['skin'] = b['skin']
     for k, pattern in (('hair', r'[a-z0-9]{1,20}'), ('hair_color', r'#[0-9a-fA-F]{6}'), ('eye_color', r'[a-z]{1,20}')):
-        if k in b:
+        if b.get(k) == '':  # back to what the photo says
+            prof.pop(k, None)
+        elif k in b:
             if not re.fullmatch(pattern, str(b[k])):
                 raise ValueError(f'Invalid {k}')
             prof[k] = b[k]
@@ -939,10 +925,8 @@ class Handler(BaseHTTPRequestHandler):
         if not (self.token_ok() or self.allowed()):  # the paired iPhone, or you in the browser
             return
         path = urlparse(self.path).path
-        if path == '/':  # this Mac's developer console; the app (iPhone) asks for ?app=1
-            path = '/static/index.html' if 'app' in parse_qs(urlparse(self.path).query) else '/static/console.html'
-        if re.fullmatch(r'/api/reference/[\w.-]+\.jpg', path) and (reference_dir() / path.rsplit('/', 1)[1]).exists():
-            return self.send(200, (reference_dir() / path.rsplit('/', 1)[1]).read_bytes(), 'image/jpeg')
+        if path == '/':
+            path = '/static/index.html'
         if path == '/api/state':
             return self.reply(app_state())
         if path == '/api/status':

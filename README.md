@@ -23,7 +23,7 @@ Env: `PORT` (8765), `BODYLAB_DB` (default `data/bodylab.db`).
 
 ## iPhone: onboarding + Apple Health
 
-`ios/` is the **BodyLab** app, the product: your 3D body, Today, Progress and What if… (the same web UI, inside a native shell), plus Apple Health sync and logging food, weight and workouts. Scan the pairing QR, allow Health, scan your face with the Face ID camera (Me → Scan your face: it shapes your 3D face and takes its photo), done. Everything else comes from the cameras, and you can tap any part to enter your own tape measurement: it's the truth for that day, and for a month the body fit must match it. It sends 90 days of data on open and in the background whenever Health changes; re-syncs update records rather than duplicating them. This Mac's web page (`/`) is the developer console: cameras, the body fit and skin bake, reference images, and reference measurements with where to take each (compared only with BodyLab's estimate from the same day, never used for your numbers). The app is `/?app=1`. Icon and launch mark: `uv run python tools/brand.py`.
+`ios/` is the **BodyLab** app, the product: your 3D body, Today, Progress and What if… (the same web UI, inside a native shell), plus Apple Health sync and logging food, weight and workouts. Scan the pairing QR, allow Health, scan your face with the Face ID camera (Me → Scan your face: it shapes your 3D face and takes its photo), done. Everything else comes from the cameras, and you can tap any part to enter your own tape measurement: it's the truth for that day, and for a month the body fit must match it. It sends 90 days of data on open and in the background whenever Health changes; re-syncs update records rather than duplicating them. On this Mac the same app is at `/`; its Settings has the cameras, iPhone pairing and look overrides. Icon and launch mark: `uv run python tools/brand.py`.
 
 | | Apple Health data |
 |---|---|
@@ -44,7 +44,7 @@ cd ios && BODYLAB_TEAM=<your team id> xcodegen && open BodyLabSync.xcodeproj   #
 
 ## Raspberry Pi camera
 
-`pi/camstream.py` serves `http://<tailscale-ip>:8000/stream.mjpg`, bound to the Tailscale address only: a Pi camera via picamera2, or any Linux webcam via ffmpeg (`DEVICE`, `SIZE`, `FPS`). Up to three cameras at different angles (console → Cameras) see width and depth at once, so you needn't turn; each camera checks your face itself. Any MJPEG or RTSP stream works, including a Wi-Fi IP camera or a spare phone running an IP-camera app (no computer needed); keep them off the internet.
+`pi/camstream.py` serves `http://<tailscale-ip>:8000/stream.mjpg`, bound to the Tailscale address only: a Pi camera via picamera2, or any Linux webcam via ffmpeg (`DEVICE`, `SIZE`, `FPS`). Up to three cameras at different angles (Settings → Cameras) see width and depth at once, so you needn't turn; each camera checks your face itself. Any MJPEG or RTSP stream works, including a Wi-Fi IP camera or a spare phone running an IP-camera app (no computer needed); keep them off the internet.
 
 ```sh
 PI=you@raspberrypi

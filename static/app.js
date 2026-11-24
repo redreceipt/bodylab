@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
 import { fitBody, fitProxy, genitalPositions, initBody, mesh, pose, underwear } from './body.js';
 import { loadImage, photoColors, skinCanvas } from './look.js';
+import { renderSVG } from './vendor/uqr.mjs';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -659,11 +660,29 @@ async function runPlan() {
 }
 const EYES = ['brown', 'brownlight', 'blue', 'deepblue', 'bluegreen', 'green', 'grey', 'lightblue', 'ice'];
 function settingsPanel() {
+  const p = S.profile || {}, opt = (v, label, sel) => `<option value="${v}"${sel ? ' selected' : ''}>${label}</option>`;
+  const rot = (k) => [0, 90, 180, 270].map((r) => opt(r, r ? `${r}°` : 'none', (p[k] ?? 0) === r)).join('');
+  const link = S.sync.url && `bodylab://pair?server=${encodeURIComponent(S.sync.url)}&token=${encodeURIComponent(S.sync.token)}`;
+  const hairs = ['', 'none', 'short02', 'short04', 'bob02', 'long01', 'ponytail01', 'braid01', 'afro01'];
   return `<h2>Settings</h2><div class="row" style="justify-content:flex-start">
       ${S.face ? `<img class="facepic" src="/api/face.jpg?${S.face.ts}" alt="Your face photo">` : '<div class="facepic">no photo</div>'}
       <label class="filebtn">${S.face ? 'Replace' : 'Add'} face photo<input type="file" id="faceFile" accept="image/*" hidden></label>
       ${S.face ? '<button type="button" class="link" data-delface="1">remove</button>' : ''}</div>
-    <p class="muted">Straight on, even light, neutral face, mouth closed. Sets your face, skin, eyes and hair.</p>`;
+    <p class="muted">Best: the iPhone app's Me → Scan your face (Face ID camera), in even light. A photo works too: straight on, neutral, mouth closed.</p>
+    <details><summary>Cameras</summary><form id="fCamera" class="stack">
+      ${['', '2', '3'].map((k, i) => `<div class="grid2"><label>Camera ${i + 1}<input name="camera${k}_url" value="${esc(p[`camera${k}_url`] ?? '')}" placeholder="http://… or rtsp://…"></label>
+        <label>Rotation<select name="rotate${k}">${rot(`rotate${k}`)}</select></label></div>`).join('')}
+      <label class="check"><input type="checkbox" name="bare_only" ${p.bare_only === false ? '' : 'checked'}> Only measure a bare torso (underwear is fine)</label>
+      <label>Preview<select name="preview">${opt('silhouette', 'Silhouette only (private)', p.preview !== 'camera')}${opt('camera', 'Camera image (for aiming)', p.preview === 'camera')}</select></label>
+      <button>Save cameras</button></form></details>
+    <details><summary>Pair an iPhone</summary>${link ? `<div class="qr">${renderSVG(link, { pixelSize: 4 })}</div><p class="muted">Scan with the iPhone Camera to pair the BodyLab app.</p>`
+      : '<p class="muted">Run <code>tailscale serve --bg --https=8443 http://127.0.0.1:8765</code> so the iPhone can reach BodyLab.</p>'}
+      <p class="muted">From Apple Health: ${[p.height_cm && fmt('neck', p.height_cm).replace(/\.\d+/, ''), p.sex, p.birth_date && `born ${esc(p.birth_date)}`].filter(Boolean).join(' · ') || 'nothing yet'}.</p></details>
+    <details><summary>Look</summary><form id="fLook" class="stack"><div class="grid2">
+      <label>Hair<select name="hair">${hairs.map((h) => opt(h, h || 'from your photo', (p.hair ?? '') === h)).join('')}</select></label>
+      <label>Hair colour<input type="color" name="hair_color" value="${esc(p.hair_color ?? S.face?.hair?.color ?? '#3b2a20')}"></label>
+      <label>Eyes<select name="eye_color">${['', ...EYES].map((e) => opt(e, e || 'from your photo', (p.eye_color ?? '') === e)).join('')}</select></label></div>
+      <button>Save look</button> <button type="button" class="link" data-lookreset="1">back to your photo</button></form></details>`;
 }
 function renderPanel() {
   if (!view) return ($('#panel').hidden = true);
@@ -710,6 +729,10 @@ $('#panel').addEventListener('submit', async (e) => {
       await api('POST', '/api/goals', { metric: 'weight', target: fromUnit(+o.weight, 'kg') });
       if (o.bf !== '') await api('POST', '/api/goals', { metric: 'bf', target: +o.bf });
       else if (S.goals.bf) await api('DELETE', '/api/goals/bf'); // empty: the recommended body fat
+    } else if (f.id === 'fCamera') {
+      await api('POST', '/api/profile', { ...o, bare_only: fd.has('bare_only') });
+    } else if (f.id === 'fLook') {
+      await api('POST', '/api/profile', o);
     } else if (f.dataset.tape) {
       await api('POST', '/api/logs', { kind: 'reference', [f.dataset.tape]: fromUnit(+o.v, 'cm') });
     } else if (f.id === 'fGoal' || f.dataset.goal) {
@@ -722,6 +745,7 @@ $('#panel').addEventListener('submit', async (e) => {
 });
 $('#panel').addEventListener('click', async (e) => {
   if (e.target.id === 'showGoal') return showGoal().catch((err) => toast(err.message, true));
+  if (e.target.dataset.lookreset) return api('POST', '/api/profile', { hair: '', hair_color: '', eye_color: '' }).then(() => refresh()).catch((err) => toast(err.message, true));
   const b = e.target.closest('button[data-dellog],button[data-delscan],button[data-delgoal],button[data-delface]');
   if (!b) return;
   const { dellog, delscan, delgoal, delface } = b.dataset;

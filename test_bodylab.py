@@ -100,7 +100,7 @@ long_hair[60:330, 70:230] = 1
 long_hair[100:220, 100:200] = 0  # the face itself
 photo[long_hair > 0] = (20, 40, 60)  # BGR dark brown
 h = M.hair_style(long_hair, photo, face)
-assert h == {'style': 'long01', 'color': '#3c2814', 'fringe': False}, h  # uniform hair: lit-strand colour = the colour
+assert h == {'style': 'long01', 'color': '#34281c', 'fringe': False}, h  # uniform #3c2814 hair, 40 % less saturated
 bangs = long_hair.copy()
 bangs[100:150, 100:200] = 1  # hair down over the forehead
 assert M.hair_style(bangs, photo, face)['fringe']

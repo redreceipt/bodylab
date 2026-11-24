@@ -274,8 +274,9 @@ def hair_style(hair, img, face):
         return {'style': 'none', 'color': None}
     px = img[ys, xs][:, ::-1].astype(float)  # BGR -> RGB
     lum = px @ [.299, .587, .114]
-    lo, hi = np.percentile(lum, [50, 90])
-    rgb = px[(lum >= lo) & (lum <= hi)].mean(0)  # the lit strands you'd call the colour, not the shadows
+    lo, hi = np.percentile(lum, [25, 60])
+    rgb = px[(lum >= lo) & (lum <= hi)].mean(0)  # typical strands: the renderer adds its own highlights
+    rgb = rgb.mean() + .6 * (rgb - rgb.mean())  # less saturated: a room's warm light reddens hair in a photo
     near = np.abs(xs - (left + right) / 2) < fw  # hair beside the face, not the background's
     length = (ys[near].max() - chin) / fh  # how far below the chin it reaches
     width = (xs.max() - xs.min()) / fw
