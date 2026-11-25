@@ -17,6 +17,7 @@ import numpy as np
 ROOT = Path(__file__).parent
 os.environ.setdefault('ANNY_CACHE_DIR', str(ROOT / 'models' / 'anny'))
 MIN_FRAMES = 30
+MAX_FRAMES = 800  # shortcut: a fit's time grows with frames (1,100 took over an hour); evenly spaced 800 keep every angle
 KP_SHAPE = .3  # landmarks' weight once frames are posed
 KP_FREE = ('left_shoulder', 'right_shoulder', 'left_hip', 'right_hip')  # ...and none for these: the outline places those edges
 DENSITY = 1.04  # kg/L of a whole body including the air in the lungs (tissue alone ~1.06)
@@ -240,11 +241,11 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     # Definition the outlines can't see (the pecs' lower edge, a toned stomach): leaner shows more, ~.5 at 13 % for men.
     # shortcut: eyeballed on Anny's renders; the side views still win where they constrain it
     lean = float(np.clip((18 + off[0] - prof['bf']) / 10, 0, .7)) if 'bf' in prof else 0.
-    define = {labels.index(k): lean * share for k, share in (('stomach-tone-incr', 1), ('torso-muscle-pectoral-incr', 0 if female else .6)) if k in labels}
+    define = {labels.index(k): lean * share for k, share in (('stomach-tone-incr', 1), ('torso-muscle-pectoral-incr', 0 if female else .25)) if k in labels}  # flat pecs, as in the captures
     # shortcut: the front chest (armpit fold to fold) hides under the arms in every outline and SAM can't part arm from
-    # pec reliably; on the reference captures it's broad, the pecs flat rather than round: eyeballed at +.5 against them
+    # pec reliably; on the reference captures it's a little broad, the pec's corner under the deltoid: eyeballed at +.2
     if not female and 'measure-frontchest-dist-incr' in labels:
-        define[labels.index('measure-frontchest-dist-incr')] = .5
+        define[labels.index('measure-frontchest-dist-incr')] = .2
 
     def loss(stage):
         out = run()
@@ -369,10 +370,30 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
             q = (v - k3[9:11].mean(0)) * torch.exp(cam[j, 0])
             q[:, :2] += cam[j, 1:]
             views[j] = q.cpu().numpy()
-    return res, rest, stance(model, fixed, kreg), views
+    return res, rest, stance(model, fixed, kreg, shoulder_slope(frames)), views
 
 
-def stance(model, shape, kreg):
+def shoulder_slope(frames):
+    """How your shoulders slope from the neck, seen from the front (degrees, + falling outward): the median over front
+    frames of the outline's top at .65 and 1.0 of the way from between the shoulder points to each. Or None."""
+    out = []
+    for f in frames:
+        if 20 <= abs(f.get('theta', 90)) <= 160 or 'sil' not in f:
+            continue
+        L, C = np.array(f['sil']['l']), np.array(f['sil']['c'])
+        c, nxt = L[[11, 12]].mean(0), np.roll(C, -1, 0)
+        for s in (11, 12):
+            ys = []
+            for x in (c[0] + .65 * (L[s][0] - c[0]), L[s][0]):
+                cross = (C[:, 0] - x) * (nxt[:, 0] - x) < 0
+                y = C[cross, 1] + (nxt[cross, 1] - C[cross, 1]) * (x - C[cross, 0]) / (nxt[cross, 0] - C[cross, 0])
+                ys.append(y.min() if len(y) else None)
+            if None not in ys and ys[0] < L[s][1]:  # image y runs down
+                out.append(np.degrees(np.arctan2(ys[1] - ys[0], abs(L[s][0] - c[0]) * .35)))
+    return float(np.median(out)) if len(out) >= 20 else None
+
+
+def stance(model, shape, kreg, slope=None):
     """Bone transforms (posed × rest⁻¹, Anny frame) for a relaxed, confident stance: feet a little wider than the hips,
     toes turned out, weight nearly even (a little more on the left: pelvis tipped 2°, the spine bringing the head back
     upright), knees over the feet; arms 8° out and elbows softly bent (the right a little more) with the forearm's
@@ -387,6 +408,8 @@ def stance(model, shape, kreg):
     rot = torch.zeros(len(names), 3, device=dev, requires_grad=True)
     reg = torch.tensor([1, 1, 1, 1, 3, 3, 1, 1, 1, 1, 1, 1, 2, 2.], device=dev)[:, None]  # the shoulder takes about a quarter of the turn
     root = model.bone_labels.index('root')
+    clav = torch.tensor([model.bone_labels.index(f'clavicle.{s}') for s in 'LR'], device=dev)
+    lift = torch.zeros(2, device=dev, requires_grad=slope is not None)  # each collarbone's turn about the front-back axis: the shoulder's height
     tilt = torch.eye(3, device=dev)  # the pelvis, set below once the upright targets are taken
     twist_b = torch.tensor([model.bone_labels.index(f'lowerarm02.{s}') for s in 'LR'], device=dev)
     twist = torch.zeros(2, device=dev, requires_grad=True)  # forearm twist turns the palm
@@ -397,8 +420,12 @@ def stance(model, shape, kreg):
 
     def run(tw=None):
         pose = torch.eye(4, device=dev).repeat(1, model.bone_count, 1, 1)
-        pose[0, bones, :3, :3] = roma.rotvec_to_rotmat(rot)
+        turns = roma.rotvec_to_rotmat(rot)
+        tilt_up = roma.rotvec_to_rotmat(torch.stack([torch.zeros_like(lift), lift, torch.zeros_like(lift)], 1))
+        turns = torch.cat([tilt_up.transpose(1, 2) @ turns[:2], turns[2:]])  # the upper arms (names 0, 1) turn back: they still hang
+        pose[0, bones, :3, :3] = turns
         pose[0, root, :3, :3] = tilt
+        pose[0, clav, :3, :3] = tilt_up
         pose[0, twist_b, :3, :3] = roma.rotvec_to_rotmat(axes * (twist if tw is None else tw)[:, None])
         pose[0, wrist_b, :3, :3] = roma.rotvec_to_rotmat(wrot)
         for b, rv in curl.items():
@@ -502,6 +529,22 @@ def stance(model, shape, kreg):
             loss = loss + .3 * (1 - n @ aim / n.norm() / aim.norm())
         loss.backward()
         opt.step()
+    if slope is not None:  # then the collarbones alone lift the shoulders until they slope as yours do (shoulder_slope)
+        rot, twist, wrot = rot.detach(), twist.detach(), wrot.detach()
+        opt = torch.optim.Adam([lift], lr=.02)
+        for _ in range(80):
+            opt.zero_grad()
+            o = run()
+            kp, out_v, loss = kreg(o)[0], o['vertices'][0], 0
+            mid = (kp[3] + kp[4]) / 2
+            for j in (3, 4):
+                top = []
+                for x in (mid[0] + .65 * (kp[j, 0] - mid[0]), kp[j, 0]):  # the outline's top, near the neck and at the joint
+                    band = ((out_v[:, 0] - x).abs() < .005) & (out_v[:, 2] < kp[j, 2] + .12)  # below the head
+                    top.append(out_v[band.detach(), 2].max())
+                loss = loss + (torch.atan2(top[0] - top[1], (kp[j, 0] - mid[0]).abs() * .35) - math.radians(slope)) ** 2
+            loss.backward()
+            opt.step()
     with torch.no_grad():
         out = run()
         G = out['bone_poses'][0] @ torch.linalg.inv(out['rest_bone_poses'][0])
@@ -641,7 +684,7 @@ def restance(db, day, frames, prof):
     for k, v in res['local'].items():
         lc[0, model.local_change_labels.index(k)] = v
     p = {k: torch.tensor([v]) for k, v in res['phenotypes'].items()} | {'gender': torch.tensor([1. if prof.get('sex') == 'female' else 0.])}
-    G = stance(model, {'phenotype_kwargs': p, 'local_changes_kwargs': lc}, anny.KeypointsRegressor.coco(model, labels=list(KP)))
+    G = stance(model, {'phenotype_kwargs': p, 'local_changes_kwargs': lc}, anny.KeypointsRegressor.coco(model, labels=list(KP)), shoulder_slope(frames))
     rest = model(pose_parameters=torch.eye(4)[None, None].repeat(1, model.bone_count, 1, 1), phenotype_kwargs=p,
                  local_changes_kwargs=lc)['rest_vertices'][0].detach().numpy()
     store(db, day, res, rest, G)
@@ -750,8 +793,9 @@ if __name__ == '__main__':
     prof['seen'] = closeups.limbs(ref_dir, prof['height_cm'], day) | {k: v for k, v in closeups.torso(ref_dir, prof['height_cm'], day).items()
                                                                        if k in ('d28', 'd50', 'd62')}  # in side views the arm sits inside the torso's outline
     print('from the captures:', prof['seen'] or 'too few views')
-    res, rest, G, _ = fit(frames, prof, plot=a.plot)
-    res |= {'tape': tape(rest, res['neck_axis'], res['limb_axes'], prof.get('sex') == 'female'), 'frames': len(frames)}
+    use = [frames[i] for i in np.linspace(0, len(frames) - 1, min(len(frames), MAX_FRAMES)).round().astype(int)]
+    res, rest, G, _ = fit(use, prof, plot=a.plot)
+    res |= {'tape': tape(rest, res['neck_axis'], res['limb_axes'], prof.get('sex') == 'female'), 'frames': len(frames)}  # all of them: app.py refits as they grow
     if a.save:
         np.save(a.save, rest)
     if a.store:

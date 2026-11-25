@@ -268,6 +268,13 @@ tf = np.frombuffer((FIT.ROOT / 'static/assets/body.bin').read_bytes(), np.float3
 tpf = FIT.tape(np.stack([tf[:, 0], -tf[:, 2], tf[:, 1]], 1) / 100, female=True)
 assert 65 < tpf['underbust'] < tpf['chest'] - 5, tpf  # under the bust, clearly smaller than round it
 print('fit helpers ok', tp, '| female', {k: tpf[k] for k in ('chest', 'underbust')})
+# Shoulder slope from front outlines: a neck, shoulders falling 20° outward to the arms, then down (image y runs down).
+t20 = np.tan(np.radians(20))
+outline = [(-.03, -.45), (.03, -.45), (.03, -.36), (.13, -.36 + .1 * t20), (.13, .4), (-.13, .4), (-.13, -.36 + .1 * t20), (-.03, -.36)]
+lm = np.zeros((33, 2))
+lm[11], lm[12] = (.09, -.3), (-.09, -.3)
+sl = FIT.shoulder_slope([{'theta': 0, 'sil': {'l': lm.tolist(), 'c': outline}}] * 20)
+assert abs(sl - 20) < .5 and FIT.shoulder_slope([{'theta': 90, 'sil': {'l': lm.tolist(), 'c': outline}}] * 20) is None, sl
 # The stance (with the optional fit group): palms toward the thighs (thumb in front of the little finger, not inside
 # it), fingers together in order front to back, none crossing.
 try:

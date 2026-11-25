@@ -424,7 +424,7 @@ function paint() {
 function rebuildAvatar(force = false) {
   const sex = S.profile?.sex, today = S.scans[idx]?.dims ?? {}, dims = predicted?.dims ?? today;
   const m = predicted?.m ?? S.scans[idx]?.m ?? {};
-  mats.skin.normalScale.setScalar(m.bf != null ? Math.min(1, Math.max(0.25, (22 - m.bf) / 12)) : 0.5); // definition shows as fat goes
+  mats.skin.normalScale.setScalar(m.bf != null ? Math.min(0.9, Math.max(0.25, (22 - m.bf) / 16)) : 0.45); // definition shows as fat goes
   const mesh = fitted(predicted ? S.scans.at(-1) : S.scans[idx]); // predictions reshape today's fit
   const key = JSON.stringify([dims, sex, S.profile?.height_cm, look.clothes, shape(m), penis(m), !!predicted, !!mesh]);
   if (!force && key === lastDimsKey) return paint();
