@@ -165,7 +165,24 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     grid = lo[:, None] + g * (hi - lo)[:, None]
     grid_ok = (inside(grid, C, torch.roll(C, -1, 1)) & in_view(grid) & ~near_arm(grid)).float()
     kp_ok = in_view(L).float()
-
+    # Where a front view's outline shows an upper arm against the chest, the fitted arm must touch the fitted torso too.
+    # Otherwise a gap between them hides inside the outline (the grid above tolerates 2 cm) and the torso narrows to pay
+    # for the arms. Merged when the outline round the body's middle reaches past the arm's centre line at that height.
+    _, _, _, reg_t, Tz = assets()
+    # Chest heights only: the forearms by the waist and hips merge with them in the person mask even when they don't touch,
+    # so the same rule there widened the waist (checked against the reference captures).
+    groups = [((.5, .62, .72), ((3, 5), (4, 6)), (.5, .85), reg_t[:, 1] > .5)]  # heights, shoulder→elbow, vertex band, the body: torso
+    Cn, Ln, bdn = C.cpu().numpy(), L.cpu().numpy(), bd.cpu().numpy()
+    contact = arm_contacts(Cn, Ln, bdn, [f.get('theta', 90) for f in frames], groups)
+    touch = []  # per group: its rows (frame, y, side, middle), its vertices, which of them are body (not arm)
+    for g, (_, _, (lo_h, hi_h), body_m) in enumerate(groups):
+        rows = [c[1:] for c in contact if c[0] == g]
+        if rows:
+            vs = np.intersect1d(np.flatnonzero((body_m | (reg_t[:, 2:4].sum(1) > .5)) & (Tz > lo_h * Tz.max()) & (Tz < hi_h * Tz.max())), body_vertices())
+            cb, cy, cs, ccx = (torch.tensor(c, device=dev) for c in zip(*rows))
+            touch.append((cb.long(), cy.float(), cs.float(), ccx.float(), torch.tensor(vs, device=dev), torch.tensor(body_m[vs], device=dev)))
+    if contact:
+        log(f'{len(contact)} arm-against-body rows in {len(set(c[1] for c in contact))} front views')
     # Shape (shared) and pose (per frame).
     phen = {k: torch.zeros((), device=dev, requires_grad=True) for k in ('muscle', 'weight', 'height', 'proportions')}
     local = torch.zeros(len(model.local_change_labels), device=dev, requires_grad=True)
@@ -194,10 +211,10 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
         R0.append(kabsch(a, b))
     turn = roma.rotmat_to_rotvec(torch.tensor(np.array(R0), dtype=torch.float32)).to(dev).requires_grad_()
 
-    def project(out):
+    def project(out, idx=None):
         R = roma.rotvec_to_rotmat(turn) @ to_cam  # (B,3,3)
         k3 = torch.einsum('bij,bkj->bki', R, kreg(out))
-        v3 = torch.einsum('bij,bkj->bki', R, out['vertices'][:, verts])
+        v3 = torch.einsum('bij,bkj->bki', R, out['vertices'][:, verts if idx is None else idx])
         hip = k3[:, 9:11].mean(1, keepdim=True)
         s = torch.exp(cam[:, :1])[:, None]
         shift = torch.cat([cam[:, 1:], torch.zeros(B, 1, device=dev)], 1)[:, None]
@@ -213,9 +230,6 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     # What the captures measure where outlines can't see (closeups.py: the upper arms' depth): the body must measure it
     # too, at the very slices tape() reports; which vertices bound each slice is re-picked every 50 iterations.
     targets = {k: v for k, v in prof.get('seen', {}).items() if k.startswith(('arm', 'thigh'))}  # girths
-    depths = {int(k[1:]) / 100: v for k, v in prof.get('seen', {}).items() if k[0] == 'd'}  # torso depth (cm) at heights hip → shoulder
-    torso_v = torch.tensor(np.unique(assets()[0]), device=dev)
-    joints = [model.bone_labels.index(f'{b}.{s}') for b in ('upperleg01', 'upperarm01') for s in 'LR']
     rings = {}
 
     def axes(out):
@@ -242,10 +256,6 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     # shortcut: eyeballed on Anny's renders; the side views still win where they constrain it
     lean = float(np.clip((18 + off[0] - prof['bf']) / 10, 0, .7)) if 'bf' in prof else 0.
     define = {labels.index(k): lean * share for k, share in (('stomach-tone-incr', 1), ('torso-muscle-pectoral-incr', 0 if female else .25)) if k in labels}  # flat pecs, as in the captures
-    # shortcut: the front chest (armpit fold to fold) hides under the arms in every outline and SAM can't part arm from
-    # pec reliably; on the reference captures it's a little broad, the pec's corner under the deltoid: eyeballed at +.2
-    if not female and 'measure-frontchest-dist-incr' in labels:
-        define[labels.index('measure-frontchest-dist-incr')] = .2
 
     def loss(stage):
         out = run()
@@ -279,15 +289,6 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
                 l_seen = l_seen + (((p - torch.roll(p, 1, 0)).norm(dim=1).sum() * scale - targets[k]) / targets[k]) ** 2
             total = total + 50 * l_seen
             parts['seen'] = (l_seen.item() / len(rings)) ** .5 * 100  # rms % off what the captures measure
-        if stage and depths:  # front to back, at heights between the hip and shoulder joints (closeups.torso)
-            heads = out['rest_bone_heads'][0][joints, 2]
-            hip, sh, T = heads[:2].mean(), heads[2:].mean(), rest[torso_v]
-            l_depth = 0
-            for f, d in depths.items():
-                band = T[((T[:, 2] - (hip + f * (sh - hip))).abs() < .01).detach()]
-                l_depth = l_depth + ((band[:, 1].max() - band[:, 1].min()) * 100 / d - 1) ** 2
-            total = total + 50 * l_depth
-            parts['depth'] = (l_depth.item() / len(depths)) ** .5 * 100
         if stage:
             # Mesh outside the outline (where the camera sees) is too big; outline nowhere near the mesh is too small.
             d2 = seg_dist2(v2, a, b).min(-1).values
@@ -301,6 +302,19 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
             gap = (((grid[:, :, None] - v2[:, None]) ** 2).sum(-1).min(-1).values.sqrt() - .02).clamp_min(0) ** 2  # >2 cm from any body point
             l_fill = (gap * grid_ok * use[:, None]).sum() / (grid_ok * use[:, None]).sum().clamp_min(1)
             total = total + 20 * (l_out + l_in + l_fill)
+            if touch:
+                gaps, n = 0, 0
+                for cb, cy, cs, ccx, vs, is_body in touch:
+                    pts = project(out, vs)[1][cb, :, :2]  # (rows, vertices, 2)
+                    near = ((pts[..., 1] - cy[:, None]).abs() < .01).detach()  # within 1 cm of the row
+                    xs = pts[..., 0] * cs[:, None]  # the arm's side as +x
+                    edge = torch.where(near & is_body, xs, torch.full_like(xs, -1e9)).max(1).values
+                    inner = torch.where(near & ~is_body & (xs > (ccx * cs)[:, None]), xs, torch.full_like(xs, 1e9)).min(1).values
+                    ok = ((edge > -1e8) & (inner < 1e8)).float() * use[cb]
+                    gaps, n = gaps + (((inner - edge - .004).clamp_min(0) * ok) ** 2).sum(), n + ok.sum()
+                l_contact = gaps / n.clamp_min(1)
+                total = total + 20 * l_contact
+                parts['gap'] = l_contact.item() ** .5 * 100
             parts |= {'out': ((d2 * out_m).sum() / out_m.sum().clamp_min(1)).item() ** .5 * 100, 'in': l_in.item() ** .5 * 100, 'fill': l_fill.item() ** .5 * 100}
         return total, parts, out, e_kp, (e_sil if stage else None)
 
@@ -373,6 +387,33 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     return res, rest, stance(model, fixed, kreg, shoulder_slope(frames)), views
 
 
+def arm_contacts(C, L, bd, thetas, groups):
+    """Rows where a front view's outline shows an arm against the body: (group, frame, row y, side: +1 the image's right,
+    the middle's x). C: outlines (B, n, 2), L: landmarks in KP order, bd: borders (fit.borders), groups as in fit()."""
+    contact = []
+    for j, th in enumerate(thetas):
+        if 35 < abs(th) < 145:
+            continue  # side views: the arm covers the body
+        sh, hp, nxt = L[j, [3, 4]].mean(0), L[j, [9, 10]].mean(0), np.roll(C[j], -1, 0)
+        for g, (fracs, segs, _, _) in enumerate(groups):
+            for frac in fracs:
+                y, cx = hp[1] + frac * (sh[1] - hp[1]), hp[0] + frac * (sh[0] - hp[0])
+                cross = (C[j, :, 1] - y) * (nxt[:, 1] - y) < 0
+                xs = np.sort(C[j, cross, 0] + (nxt[cross, 0] - C[j, cross, 0]) * (y - C[j, cross, 1]) / (nxt[cross, 1] - C[j, cross, 1]))
+                k = np.searchsorted(xs, cx)
+                if k % 2 == 0 or k >= len(xs) or not bd[j, 2] + .01 < y < bd[j, 3] - .01:
+                    continue  # the middle isn't inside the outline there, or the row is cut off
+                for a_, b_ in segs:
+                    S, E = L[j, a_], L[j, b_]
+                    if not min(S[1], E[1]) <= y <= max(S[1], E[1]):
+                        continue  # the arm isn't at this height
+                    ax = S[0] + (y - S[1]) / (E[1] - S[1] + 1e-9) * (E[0] - S[0])
+                    side = 1. if ax > cx else -1.
+                    if (xs[k] if side > 0 else -xs[k - 1]) > ax * side:  # the outline round the middle reaches past the arm's centre line
+                        contact.append((g, j, y, side, cx))
+    return contact
+
+
 def shoulder_slope(frames):
     """How your shoulders slope from the neck, seen from the front (degrees, + falling outward): the median over front
     frames of the outline's top at .65 and 1.0 of the way from between the shoulder points to each. Or None."""
@@ -409,7 +450,7 @@ def stance(model, shape, kreg, slope=None):
     reg = torch.tensor([1, 1, 1, 1, 3, 3, 1, 1, 1, 1, 1, 1, 2, 2.], device=dev)[:, None]  # the shoulder takes about a quarter of the turn
     root = model.bone_labels.index('root')
     clav = torch.tensor([model.bone_labels.index(f'clavicle.{s}') for s in 'LR'], device=dev)
-    lift = torch.zeros(2, device=dev, requires_grad=slope is not None)  # each collarbone's turn about the front-back axis: the shoulder's height
+    lift_raw = torch.zeros(2, device=dev, requires_grad=slope is not None)  # each collarbone's turn about the front-back axis: the shoulder's height
     tilt = torch.eye(3, device=dev)  # the pelvis, set below once the upright targets are taken
     twist_b = torch.tensor([model.bone_labels.index(f'lowerarm02.{s}') for s in 'LR'], device=dev)
     twist = torch.zeros(2, device=dev, requires_grad=True)  # forearm twist turns the palm
@@ -421,6 +462,7 @@ def stance(model, shape, kreg, slope=None):
     def run(tw=None):
         pose = torch.eye(4, device=dev).repeat(1, model.bone_count, 1, 1)
         turns = roma.rotvec_to_rotmat(rot)
+        lift = .2 * torch.tanh(lift_raw)  # within ±11°: a shrug or a slump past that isn't standing relaxed
         tilt_up = roma.rotvec_to_rotmat(torch.stack([torch.zeros_like(lift), lift, torch.zeros_like(lift)], 1))
         turns = torch.cat([tilt_up.transpose(1, 2) @ turns[:2], turns[2:]])  # the upper arms (names 0, 1) turn back: they still hang
         pose[0, bones, :3, :3] = turns
@@ -531,7 +573,7 @@ def stance(model, shape, kreg, slope=None):
         opt.step()
     if slope is not None:  # then the collarbones alone lift the shoulders until they slope as yours do (shoulder_slope)
         rot, twist, wrot = rot.detach(), twist.detach(), wrot.detach()
-        opt = torch.optim.Adam([lift], lr=.02)
+        opt = torch.optim.Adam([lift_raw], lr=.02)
         for _ in range(80):
             opt.zero_grad()
             o = run()
@@ -552,7 +594,8 @@ def stance(model, shape, kreg, slope=None):
 
 
 def assets():
-    """From the web assets: body triangles without the arms (base-mesh indices), and the navel's vertex."""
+    """From the web assets: body triangles without the arms (base-mesh indices), the navel's vertex, all body
+    triangles, region weights (head, torso, arm_l, arm_r, leg_l, leg_r) and the template's heights (cm, feet at 0)."""
     meta = json.loads((ROOT / 'static/assets/body.json').read_text())
     buf = (ROOT / 'static/assets/body.bin').read_bytes()
     types = {'uint8': np.uint8, 'uint16': np.uint16, 'uint32': np.uint32, 'float32': np.float32}
@@ -565,7 +608,7 @@ def assets():
     mid = np.intersect1d(mid, np.unique(F))
     # the navel: the front-midline vertex furthest behind its neighbours 1-3 cm above and below
     navel = min(mid, key=lambda k: T[k, 2] - np.mean([T[q, 2] for q in mid if 1 < abs(T[q, 1] - T[k, 1]) < 3] or [T[k, 2]]))
-    return F[~arm[F].any(1)], int(navel), F, arr('weights').reshape(-1, 6) / 255
+    return F[~arm[F].any(1)], int(navel), F, arr('weights').reshape(-1, 6) / 255, T[:, 1] - y0
 
 
 def face_anchors(sex):
@@ -622,7 +665,7 @@ def slices(rest, neck=None, limbs=None, female=False):
     across the neck's own axis (it leans forward, so a level slice catches the chin); chest: widest; waist: at the navel;
     hips: widest round the seat. limbs: {'arm_l': (shoulder, elbow), ...} bone ends: arms at their midpoint, thighs 40 %
     down, calves at their widest, each across the bone and on that limb alone."""
-    F, navel, Fall, reg = assets()
+    F, navel, Fall, reg, _ = assets()
     V = rest * 100
     z0, H = V[np.unique(F), 2].min(), np.ptp(V[np.unique(F), 2])
     up = np.array([0, 0, 1.])
@@ -790,8 +833,7 @@ if __name__ == '__main__':
         raise SystemExit(f'need {MIN_FRAMES} frames')
     import closeups
     ref_dir = Path(a.db).parent / 'reference'
-    prof['seen'] = closeups.limbs(ref_dir, prof['height_cm'], day) | {k: v for k, v in closeups.torso(ref_dir, prof['height_cm'], day).items()
-                                                                       if k in ('d28', 'd50', 'd62')}  # in side views the arm sits inside the torso's outline
+    prof['seen'] = closeups.limbs(ref_dir, prof['height_cm'], day)
     print('from the captures:', prof['seen'] or 'too few views')
     use = [frames[i] for i in np.linspace(0, len(frames) - 1, min(len(frames), MAX_FRAMES)).round().astype(int)]
     res, rest, G, _ = fit(use, prof, plot=a.plot)

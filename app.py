@@ -264,7 +264,8 @@ def app_state():
         w, rows, bfs = weights(logs), [], [(l['ts'], l['scale_bf']) for l in logs if l.get('scale_bf')]
         fits = {r['day']: json.loads(r['params'])['tape'] for r in c.execute('select day, params from fits')}
         for r in c.execute('select * from scans order by ts'):
-            raw = json.loads(r['raw']) | {'tape': fits.get(r['day'], {})}
+            fit_day = max((d for d in fits if d <= r['day']), default=None)  # a new day shows the last fit until its own is ready
+            raw = json.loads(r['raw']) | {'tape': fits.get(fit_day, {}), 'fit_day': fit_day}
             if measure.implausible(raw):  # misread poses saved before the plausibility check; kept, not shown
                 hidden += 1
             else:
@@ -272,7 +273,7 @@ def app_state():
         for r, raw in rows:
             near = [v for t, v in bfs if abs(t - r['ts']) < 7 * 86400]  # the scale's readings that week (each is noisy)
             m, dims = measure.derive(raw, prof, measure.nearest(w, r['ts']), sum(near) / len(near) if near else None)
-            scans.append({'id': r['id'], 'ts': r['ts'], 'day': r['day'], 'fit': r['day'] in fits, 'side': raw.get('n_angle', 0) >= 30,
+            scans.append({'id': r['id'], 'ts': r['ts'], 'day': r['day'], 'fit': raw['fit_day'], 'side': raw.get('n_angle', 0) >= 30,
                           'frames': raw.get('n_frames'), 'm': m, 'dims': dims})
     face = face_files()[1]
     face = json.loads(face.read_text()) if face.exists() else None

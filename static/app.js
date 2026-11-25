@@ -288,19 +288,20 @@ function bodyTris(garments) {
 const fits = {};
 let skin = null;
 function fitted(scan) {
-  if (!scan?.fit) return null;
-  if (!(scan.day in fits)) {
-    fits[scan.day] = null;
-    Promise.all([fetch(`/api/fit/${scan.day}`).then((r) => (r.ok ? r.arrayBuffer() : null)),
+  const day = scan?.fit; // the day's fit, or the last one before it
+  if (!day) return null;
+  if (!(day in fits)) {
+    fits[day] = null;
+    Promise.all([fetch(`/api/fit/${day}`).then((r) => (r.ok ? r.arrayBuffer() : null)),
       skin ?? fetch('/api/skin').then((r) => (r.ok ? r.arrayBuffer() : null))]).then(([b, s]) => {
       if (!b) return;
       skin = s && new Uint8Array(s);
       const n = A.n * 3, more = b.byteLength - n * 2, B = more % 74 === 0 ? more / 74 : more / 48; // older fits also carry a skeleton
-      fits[scan.day] = { rest: Float32Array.from(new Int16Array(b, 0, n), (v) => v / 10), G: more ? new Float32Array(b.slice(n * 2, n * 2 + B * 48)) : null };
+      fits[day] = { rest: Float32Array.from(new Int16Array(b, 0, n), (v) => v / 10), G: more ? new Float32Array(b.slice(n * 2, n * 2 + B * 48)) : null };
       rebuildAvatar(true);
     });
   }
-  return fits[scan.day];
+  return fits[day];
 }
 
 function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {

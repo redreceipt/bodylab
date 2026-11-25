@@ -275,6 +275,14 @@ lm = np.zeros((33, 2))
 lm[11], lm[12] = (.09, -.3), (-.09, -.3)
 sl = FIT.shoulder_slope([{'theta': 0, 'sil': {'l': lm.tolist(), 'c': outline}}] * 20)
 assert abs(sl - 20) < .5 and FIT.shoulder_slope([{'theta': 90, 'sil': {'l': lm.tolist(), 'c': outline}}] * 20) is None, sl
+# Arm against the chest: the image-right arm is part of the torso's outline at chest height; the left one hangs clear
+# (the outline stops before its centre line): only the right side touches, three heights, and never in a side view.
+kp = np.zeros((15, 2))
+kp[3], kp[4], kp[5], kp[6], kp[9], kp[10] = (.18, -.5), (-.18, -.5), (.2, -.2), (-.25, -.2), (.1, 0), (-.1, 0)  # KP order
+C2 = np.array([[(-.15, -.6), (.24, -.6), (.24, .1), (-.15, .1)]])  # torso and right arm, one shape
+hits = FIT.arm_contacts(C2, kp[None], np.array([[-1, 1, -1, 1.]]), [0], [((.5, .62, .72), ((3, 5), (4, 6)), None, None)])
+assert hits and all(h[3] == 1 for h in hits) and len(hits) == 3, hits
+assert not FIT.arm_contacts(C2, kp[None], np.array([[-1, 1, -1, 1.]]), [90], [((.5, .62, .72), ((3, 5), (4, 6)), None, None)])  # side view
 # The stance (with the optional fit group): palms toward the thighs (thumb in front of the little finger, not inside
 # it), fingers together in order front to back, none crossing.
 try:
