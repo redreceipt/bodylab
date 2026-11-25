@@ -159,7 +159,7 @@ export async function skinCanvas(sex, { face, photo, tone, hairColor, baseUrl })
     hg.drawImage(mask, 0, 0, SIZE, SIZE);
     const im = hg.getImageData(0, 0, SIZE, SIZE), d = im.data, [r, g, b] = hex(hairColor);
     for (let i = 0; i < d.length; i += 4) { // dense hair shows, stray specks fade; light on the chest and limbs, full in the pubic patch
-      const y = i / 4 / SIZE / SIZE, x = (i / 4 % SIZE) / SIZE, pubic = y > 0.5 && y < 0.64 && x > 0.3 && x < 0.46, k = pubic ? 0.55 : 1; // darker there
+      const y = i / 4 / SIZE / SIZE, x = (i / 4 % SIZE) / SIZE, pubic = y > 0.5 && y < 0.6 && x > 0.31 && x < 0.45, k = pubic ? 0.55 : 1; // darker there
       d[i + 3] = 217 * Math.min(1, (d[i] / 255) * (pubic ? 1.6 : 1)) ** (pubic ? 1.5 : 2) * (pubic ? 1 : 0.45);
       d[i] = r * k; d[i + 1] = g * k; d[i + 2] = b * k;
     }

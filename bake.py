@@ -70,7 +70,7 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
     """views: [{'img': BGR, 'px': (V, 2) image px of every base vertex, 'cam': (V, 3) camera-frame positions (m, z away),
     'weight': quality}]. skip: base vertices left to the template (the head). Returns (texture BGR uint8, coverage 0..1
     per texel). A view counts only if the projected body overlaps the person in it well (it's aligned), and only
-    where it faces the camera squarely; per texel, samples far off the others' average are dropped."""
+    where it faces the camera squarely; per texel, samples far off the others' average (glare more than shadow) are dropped."""
     ys, xs, t, bary = texels(uv, tris, size)
     keep = ~skip[src[tris[t]]].any(1) if skip is not None else np.ones(len(t), bool)
     acc, wsum, per_view = np.zeros((len(t), 3)), np.zeros(len(t)), []
@@ -97,13 +97,14 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
         inside = (p[:, 0] >= 0) & (p[:, 0] < w - 1) & (p[:, 1] >= 0) & (p[:, 1] < h - 1)
         pi = np.clip(np.round(p).astype(int), 0, [w - 1, h - 1])
         ci = np.clip(cell, 0, [ww - 1, hh - 1])
-        sel = keep[f] & inside & (facing[t[f]] > .5) & (z <= zbuf[ci[:, 1], ci[:, 0]] + .015) & v['skin'][pi[:, 1], pi[:, 0]]
+        sel = keep[f] & inside & (facing[t[f]] > .6) & (z <= zbuf[ci[:, 1], ci[:, 0]] + .015) & v['skin'][pi[:, 1], pi[:, 0]]  # squarely: grazing views catch glare
         col = sample(img, p[sel])
         sel[sel] = col.max(1) - col.min(1) > 8  # colourless: the crop's grey fill or a blown highlight, not skin
         col = col[col.max(1) - col.min(1) > 8]
         ok = np.zeros(len(t), bool)
         ok[f[sel]] = True
-        per_view.append((ok, col, facing[t][ok] ** 2 * v['weight']))
+        fc = facing[t][ok]  # feathered: a surface just past the cutoff counts little, so one view's edge doesn't show as a seam
+        per_view.append((ok, col, fc ** 2 * np.clip((fc - .6) / .25, 0, 1) * v['weight']))
     # Each view's colour balance matched to all views' median (the two cameras see different white balance).
     allc = np.concatenate([c for _, c, _ in per_view]) if per_view else np.zeros((0, 3))
     target = np.median(allc, 0) if len(allc) else np.array([128, 128, 128.])
@@ -113,8 +114,9 @@ def bake(views, src, uv, tris, size=2048, base=None, skip=None):
         wsum[ok] += wt
     mean = acc / np.maximum(wsum, 1e-9)[:, None]
     acc[:], wsum[:] = 0, 0
-    for ok, col, wt in per_view:  # again without samples over 20 % brighter or darker than the average (shadows, glare)
-        good = np.abs(col.sum(1) / np.maximum(mean[ok].sum(1), 1) - 1) < .2
+    for ok, col, wt in per_view:  # again without samples over 12 % brighter (glare) or 20 % darker (shadow) than the average
+        rel = col.sum(1) / np.maximum(mean[ok].sum(1), 1) - 1
+        good = (rel < .12) & (rel > -.2)
         acc[np.flatnonzero(ok)[good]] += col[good] * wt[good, None]
         wsum[np.flatnonzero(ok)[good]] += wt[good]
     tex = np.zeros((size, size, 3))

@@ -83,6 +83,9 @@ assert M.implausible({**est, 'neck_w': .13, 'hips_w': .12}) == ['neck_w', 'hips_
 # A body-shape fit's tape measurements win over ellipses, and give body fat before the camera has a waist.
 m2, _ = M.derive({'neck_w': .07, 'hips_w': .2, 'tape': {'neck': 39.6, 'waist': 88.5, 'hips': 105.8}}, {'height_cm': 182.9, 'sex': 'male'})
 assert m2['waist'] == 88.5 and abs(m2['bf'] - M.navy_bf('male', 182.9, 39.6, 88.5, 105.8)) < .01, m2
+# With a smart scale's reading that week, body fat is the mean of the two estimates; each stays visible.
+m3, _ = M.derive({'neck_w': .07, 'hips_w': .2, 'tape': {'neck': 39.6, 'waist': 88.5, 'hips': 105.8}}, {'height_cm': 182.9, 'sex': 'male'}, 80, 20.0)
+assert m3['bf_cam'] == m2['bf'] and m3['bf_scale'] == 20 and abs(m3['bf'] - (m2['bf'] + 20) / 2) < .01 and abs(m3['lean_kg'] - 80 * (1 - m3['bf'] / 100)) < .01, m3
 
 # Clothing check: a skin-coloured torso line passes, a blue-shirt line doesn't.
 ycc = np.zeros((100, 100, 3), np.uint8)

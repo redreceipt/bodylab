@@ -2,8 +2,9 @@
 - genitals at rest (front views): SAM is prompted across the pelvis, since the shaft hangs to one side, and the mask
   shaped like a hanging shaft is kept: its length along its axis (the visible shaft, from where it leaves the pubic hair
   to the tip) and its width across the middle half; girth ≈ π × width.
-- the upper arms' girth: their width across in front views and their depth in side views, where the arm overlaps the
-  torso and no outline shows it (the body fit otherwise leaves the arms thin)."""
+- the upper arms' and thighs' girth: the body fit can't see an arm's depth (in side views it covers the torso), nor the
+  outer thigh where the hand hangs beside it, and otherwise leaves them thin.
+- the torso's width and depth at a few heights: where the arms hang beside it, outlines can't see its edges."""
 import functools
 import json
 from datetime import date, timedelta
@@ -85,16 +86,18 @@ def genitals(ref_dir, height_cm, day):
 
 
 
-def arms(ref_dir, height_cm, day):
-    """{'arm_l', 'arm_r'}: upper-arm girth (cm) at mid-humerus, from captures of the day and the two before: SAM's arm
-    mask across the humerus, prompted along it and away from the torso; the width in front views and depth in side
-    views (medians over both arms) make an ellipse. Or {} with too few views."""
+def limbs(ref_dir, height_cm, day):
+    """{'arm_l', 'arm_r', 'thigh_l', 'thigh_r'}: girth (cm) from captures of the day and the two before, where SAM's
+    mask of the limb runs across it (prompted along it, the torso or other leg and the hand marked as not it). Upper
+    arms at mid-humerus: front-view width and side-view depth make an ellipse. Thighs 40 % down: the front-view width as
+    a circle's (shortcut: side views have the hand beside the thigh; measure its depth if they stop doing that). Or
+    none of a limb with too few views."""
     import cv2
     import torch
     from PIL import Image
     days = {(date.fromisoformat(day) - timedelta(d)).isoformat() for d in range(3)}
     proc, model = sam()
-    seen = {'front': [], 'side': []}
+    seen = {}
     for p in sorted(Path(ref_dir).glob('*.json')):
         if p.name[:10] not in days or not p.with_suffix('.jpg').exists():
             continue
@@ -105,48 +108,117 @@ def arms(ref_dir, height_cm, day):
             continue
         img, ref, L = cv2.imread(str(p.with_suffix('.jpg'))), rec['ref'], np.array(rec['sil']['l'])
         to_px = lambda q: (np.array(ref['origin']) + np.asarray(q) * ref['H'] - np.array(ref['box'][::-1])) * ref['k']  # noqa: E731
-        P = {i: to_px(L[i]) for i in (11, 12, 13, 14, 23, 24)}  # shoulders, elbows, hips
+        P = {i: to_px(L[i]) for i in (11, 12, 13, 14, 15, 16, 23, 24, 25, 26)}
         torso, (h, w) = (P[11] + P[12] + P[23] + P[24]) / 4, img.shape[:2]
         pil = Image.fromarray(np.ascontiguousarray(img[..., ::-1]))
-        for s_, e_ in ((11, 13), (12, 14)):
+        bare_legs, bare_arms = (((rec.get('skin') or {}).get(k) or 0) >= g for k, g in (('thighs', .9), ('torso', .95)))
+        limbs_ = [('arm', 11, 13, .5, [torso]), ('arm', 12, 14, .5, [torso])] if bare_arms else []
+        if view == 'front' and bare_legs:
+            limbs_ += [('thigh', 23, 25, .4, [P[26] * .6 + P[23] * .4, P[15]]), ('thigh', 24, 26, .4, [P[25] * .6 + P[24] * .4, P[16]])]
+        for kind, s_, e_, t, negs in limbs_:
             S, E = P[s_], P[e_]
             span = np.linalg.norm(E - S)
             if span < 20:
                 continue
             ax = (E - S) / span
             n = np.array([-ax[1], ax[0]])
-            n = -n if (torso - (S + E) / 2) @ n > 0 else n  # away from the torso
-            pts = [S + t * (E - S) for t in (.35, .5, .65)] + [torso, (S + E) / 2 + n * .45 * span]
+            M = S + t * (E - S)
+            if kind == 'arm':  # and the background beside it, away from the torso
+                n = -n if (torso - M) @ n > 0 else n
+                negs = negs + [M + n * .45 * span]
+            pts = [S + u * (E - S) for u in (t - .15, t, t + .15)] + negs
             if any(not (0 <= q[0] < w and 0 <= q[1] < h) for q in pts):
                 continue
-            inp = proc(images=pil, input_points=[[[list(map(float, q)) for q in pts]]], input_labels=[[[1, 1, 1, 0, 0]]], return_tensors='pt')
+            inp = proc(images=pil, input_points=[[[list(map(float, q)) for q in pts]]], input_labels=[[[1, 1, 1] + [0] * len(negs)]], return_tensors='pt')
             with torch.no_grad():
                 out = model(**inp, multimask_output=True)
             masks, quality = proc.post_process_masks(out.pred_masks, inp['original_sizes'])[0][0].numpy(), out.iou_scores[0, 0].numpy()
-            line = (S + E) / 2 + np.arange(-.6 * span, .6 * span)[:, None] * n
+            line = M + np.arange(-.6 * span, .6 * span)[:, None] * n
             ok = (line[:, 0] >= 0) & (line[:, 0] < w) & (line[:, 1] >= 0) & (line[:, 1] < h)
             best = None
             for mk, q in zip(masks, quality):
+                if q < .5 or any(mk[int(z[1]), int(z[0])] for z in negs if 0 <= z[0] < w and 0 <= z[1] < h):
+                    continue  # unsure, or it took in what isn't the limb
                 on = np.zeros(len(line), bool)
                 on[ok] = mk[line[ok, 1].astype(int), line[ok, 0].astype(int)]
                 a = b = len(line) // 2
-                if not on[a] or q < .5:
+                if not on[a]:
                     continue
                 while a > 0 and on[a - 1]:
                     a -= 1
                 while b < len(line) - 1 and on[b + 1]:
                     b += 1
-                if b - a + 1 < .7 * span and 0 < a and b < len(line) - 1 and (best is None or q > best[1]):  # the arm alone
+                if b - a + 1 < .7 * span and 0 < a and b < len(line) - 1 and (best is None or q > best[1]):  # the limb alone
                     best = ((b - a + 1) * height_cm / (ref['H'] * ref['k']), q)
             if best:
-                seen[view].append(best[0])
-    if len(seen['front']) < 5 or len(seen['side']) < 3:
-        return {}
-    w, d = np.median(seen['front']), np.median(seen['side'])
-    g = round(float(np.pi * np.sqrt((w * w + d * d) / 2)), 1)
-    return {'arm_l': g, 'arm_r': g}
+                seen.setdefault((kind, view), []).append(best[0])
+    out = {}
+    arm_w, arm_d, thigh_w = (seen.get(k, []) for k in (('arm', 'front'), ('arm', 'side'), ('thigh', 'front')))
+    if len(arm_w) >= 5 and len(arm_d) >= 3:
+        w, d = np.median(arm_w), np.median(arm_d)
+        out |= dict.fromkeys(('arm_l', 'arm_r'), round(float(np.pi * np.sqrt((w * w + d * d) / 2)), 1))
+    if len(thigh_w) >= 5:
+        out |= dict.fromkeys(('thigh_l', 'thigh_r'), round(float(np.pi * np.median(thigh_w)), 1))
+    return out
+
+
+LEVELS = (.28, .5, .62, .72)  # torso heights measured: fractions from the hip joints to the shoulder joints (.28 ≈ navel, .72 ≈ just under the armpits)
+
+
+def torso(ref_dir, height_cm, day):
+    """{'w28': cm, ..., 'd28': cm, ...}: the torso's width across in front views and depth in side views at LEVELS,
+    medians over captures of the day and the two before. Outlines can't see these where the arms hang beside the torso
+    (the waist by the elbows, the chest by the upper arms), so SAM segments the torso alone: prompted on its middle,
+    with the arms marked as not torso in front views."""
+    import cv2
+    import torch
+    from PIL import Image
+    days = {(date.fromisoformat(day) - timedelta(d)).isoformat() for d in range(3)}
+    proc, model = sam()
+    seen = {}
+    for p in sorted(Path(ref_dir).glob('*.json')):
+        if p.name[:10] not in days or not p.with_suffix('.jpg').exists():
+            continue
+        rec = json.loads(p.read_text())
+        th = abs(rec.get('theta', 90))
+        view = 'w' if th < 30 or th > 150 else 'd' if 75 < th < 105 else None  # depth from true profiles: a turn adds width
+        if not view or not rec.get('ref') or ((rec.get('skin') or {}).get('torso') or 0) < .95:
+            continue  # a shirt adds bulk
+        img, ref, L = cv2.imread(str(p.with_suffix('.jpg'))), rec['ref'], np.array(rec['sil']['l'])
+        to_px = lambda q: (np.array(ref['origin']) + np.asarray(q) * ref['H'] - np.array(ref['box'][::-1])) * ref['k']  # noqa: E731
+        P = {i: to_px(L[i]) for i in (11, 12, 13, 14, 15, 16, 23, 24)}
+        sh, hp, (h, w) = (P[11] + P[12]) / 2, (P[23] + P[24]) / 2, img.shape[:2]
+        if sh[1] > hp[1] - .3 * np.linalg.norm(sh - hp):
+            continue  # not upright
+        mid = [hp + f * (sh - hp) for f in (.3, .55, .75)]
+        arms = [P[13], P[14], (P[13] + P[15]) / 2, (P[14] + P[16]) / 2, (P[11] + P[13]) / 2, (P[12] + P[14]) / 2] if view == 'w' else []
+        pts = mid + arms
+        if any(not (0 <= q[0] < w and 0 <= q[1] < h) for q in pts):
+            continue
+        inp = proc(images=Image.fromarray(np.ascontiguousarray(img[..., ::-1])), input_points=[[[list(map(float, q)) for q in pts]]],
+                   input_labels=[[[1] * len(mid) + [0] * len(arms)]], return_tensors='pt')
+        with torch.no_grad():
+            out = model(**inp, multimask_output=True)
+        masks, quality = proc.post_process_masks(out.pred_masks, inp['original_sizes'])[0][0].numpy(), out.iou_scores[0, 0].numpy()
+        k = int(np.argmax(quality))
+        if quality[k] < .7 or any(masks[k][int(q[1]), int(q[0])] for q in arms):
+            continue  # unsure, or it took in the arms
+        for f in LEVELS:
+            c = hp + f * (sh - hp)
+            x, y = int(round(c[0])), int(round(c[1]))
+            row = masks[k][y]
+            if not row[x]:
+                continue
+            a, b = x, x
+            while a > 0 and row[a - 1]:
+                a -= 1
+            while b < w - 1 and row[b + 1]:
+                b += 1
+            if 0 < a and b < w - 1 and (view == 'd' or b - a > .55 * np.linalg.norm(P[11] - P[12])):  # not a sliver of the belly
+                seen.setdefault(f'{view}{round(f * 100)}', []).append((b - a + 1) * height_cm / (ref['H'] * ref['k']))
+    return {k: round(float(np.median(v)), 1) for k, v in seen.items() if len(v) >= (5 if k[0] == 'w' else 3)}
 
 
 if __name__ == '__main__':
     import sys
-    print(genitals(sys.argv[1], float(sys.argv[2]), sys.argv[3]), arms(sys.argv[1], float(sys.argv[2]), sys.argv[3]))
+    print(genitals(sys.argv[1], float(sys.argv[2]), sys.argv[3]), limbs(sys.argv[1], float(sys.argv[2]), sys.argv[3]), torso(sys.argv[1], float(sys.argv[2]), sys.argv[3]))

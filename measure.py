@@ -386,7 +386,7 @@ def navy_bf(sex, height, neck, waist, hips):
     return 495 / (1.0324 - .19077 * math.log10(waist - neck) + .15456 * math.log10(height)) - 450
 
 
-def derive(raw, profile, weight=None):
+def derive(raw, profile, weight=None, scale_bf=None):
     """Raw height fractions -> (metrics, dims). metrics: circumferences/breadth in cm, bf %, ratios, kg.
     dims: sizes in cm for drawing the avatar."""
     H = profile['height_cm']
@@ -409,7 +409,11 @@ def derive(raw, profile, weight=None):
         if 'hips' in m:
             m['whr'] = m['waist'] / m['hips']
     if {'neck', 'waist', 'hips'} <= m.keys() and m['waist'] > m['neck']:
-        m['bf'] = navy_bf(profile.get('sex'), H, m['neck'], m['waist'], m['hips'])
+        m['bf'] = m['bf_cam'] = navy_bf(profile.get('sex'), H, m['neck'], m['waist'], m['hips'])
+        # Two independent estimates, each ±3–5 points: the cameras' (the US Navy formula on your measured body) and a smart
+        # scale's (bioimpedance). For lean, muscular builds they err in opposite directions, so the shown number is their mean.
+        if scale_bf:
+            m['bf_scale'], m['bf'] = scale_bf, (m['bf'] + scale_bf) / 2
     if weight:
         m['weight'] = weight
         if 'bf' in m:

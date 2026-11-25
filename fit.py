@@ -53,6 +53,9 @@ def load(db, day=None):
     if last and prof.get('weight'):  # body composition from the last fit: what the muscle/fat split should look like
         t = json.loads(last[0])['tape']
         bf = measure.navy_bf(prof.get('sex'), prof['height_cm'], t['neck'], t['waist'], t['hips'])
+        scale = [r[0] for r in c.execute("select json_extract(data, '$.scale_bf') from logs where kind = 'daily' and "
+                                         "json_extract(data, '$.scale_bf') > 0 and abs(ts - ?) < 7 * 86400", (noon,))]
+        bf = (bf + sum(scale) / len(scale)) / 2 if scale else bf  # as the app shows it (measure.derive)
         prof |= {'bf': bf, 'ffmi': prof['weight'] * (1 - bf / 100) / (prof['height_cm'] / 100) ** 2}
     return day, [f for f in rows if f.get('sil')], prof
 
@@ -208,7 +211,10 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     use = torch.ones(B, device=dev)  # frames the shape is fitted to
     # What the captures measure where outlines can't see (closeups.py: the upper arms' depth): the body must measure it
     # too, at the very slices tape() reports; which vertices bound each slice is re-picked every 50 iterations.
-    targets = prof.get('seen', {})
+    targets = {k: v for k, v in prof.get('seen', {}).items() if k.startswith(('arm', 'thigh'))}  # girths
+    depths = {int(k[1:]) / 100: v for k, v in prof.get('seen', {}).items() if k[0] == 'd'}  # torso depth (cm) at heights hip → shoulder
+    torso_v = torch.tensor(np.unique(assets()[0]), device=dev)
+    joints = [model.bone_labels.index(f'{b}.{s}') for b in ('upperleg01', 'upperarm01') for s in 'LR']
     rings = {}
 
     def axes(out):
@@ -233,8 +239,12 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
     muscle_t = float(np.clip(.5 + (prof['ffmi'] - 19 + off[1]) / 8, .2, 1)) if 'ffmi' in prof else .6
     # Definition the outlines can't see (the pecs' lower edge, a toned stomach): leaner shows more, ~.5 at 13 % for men.
     # shortcut: eyeballed on Anny's renders; the side views still win where they constrain it
-    define = {labels.index(k): float(np.clip((18 + off[0] - prof['bf']) / 10, 0, .7)) if 'bf' in prof else 0. for k in
-              ('stomach-tone-incr', *(() if female else ('torso-muscle-pectoral-incr',))) if k in labels}
+    lean = float(np.clip((18 + off[0] - prof['bf']) / 10, 0, .7)) if 'bf' in prof else 0.
+    define = {labels.index(k): lean * share for k, share in (('stomach-tone-incr', 1), ('torso-muscle-pectoral-incr', 0 if female else .6)) if k in labels}
+    # shortcut: the front chest (armpit fold to fold) hides under the arms in every outline and SAM can't part arm from
+    # pec reliably; on the reference captures it's broad, the pecs flat rather than round: eyeballed at +.5 against them
+    if not female and 'measure-frontchest-dist-incr' in labels:
+        define[labels.index('measure-frontchest-dist-incr')] = .5
 
     def loss(stage):
         out = run()
@@ -268,6 +278,15 @@ def fit(frames, prof, iters=(150, 350), plot=None, log=print, want=()):
                 l_seen = l_seen + (((p - torch.roll(p, 1, 0)).norm(dim=1).sum() * scale - targets[k]) / targets[k]) ** 2
             total = total + 50 * l_seen
             parts['seen'] = (l_seen.item() / len(rings)) ** .5 * 100  # rms % off what the captures measure
+        if stage and depths:  # front to back, at heights between the hip and shoulder joints (closeups.torso)
+            heads = out['rest_bone_heads'][0][joints, 2]
+            hip, sh, T = heads[:2].mean(), heads[2:].mean(), rest[torso_v]
+            l_depth = 0
+            for f, d in depths.items():
+                band = T[((T[:, 2] - (hip + f * (sh - hip))).abs() < .01).detach()]
+                l_depth = l_depth + ((band[:, 1].max() - band[:, 1].min()) * 100 / d - 1) ** 2
+            total = total + 50 * l_depth
+            parts['depth'] = (l_depth.item() / len(depths)) ** .5 * 100
         if stage:
             # Mesh outside the outline (where the camera sees) is too big; outline nowhere near the mesh is too small.
             d2 = seg_dist2(v2, a, b).min(-1).values
@@ -727,7 +746,9 @@ if __name__ == '__main__':
     if len(frames) < MIN_FRAMES:
         raise SystemExit(f'need {MIN_FRAMES} frames')
     import closeups
-    prof['seen'] = closeups.arms(Path(a.db).parent / 'reference', prof['height_cm'], day)
+    ref_dir = Path(a.db).parent / 'reference'
+    prof['seen'] = closeups.limbs(ref_dir, prof['height_cm'], day) | {k: v for k, v in closeups.torso(ref_dir, prof['height_cm'], day).items()
+                                                                       if k in ('d28', 'd50', 'd62')}  # in side views the arm sits inside the torso's outline
     print('from the captures:', prof['seen'] or 'too few views')
     res, rest, G, _ = fit(frames, prof, plot=a.plot)
     res |= {'tape': tape(rest, res['neck_axis'], res['limb_axes'], prof.get('sex') == 'female'), 'frames': len(frames)}

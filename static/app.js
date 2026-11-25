@@ -329,7 +329,9 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
     if (look.brows) group.add(new THREE.Mesh(proxy('eyebrow001', fit.pos), mats.brows));
     for (const g of garments) {
       const cloth = new THREE.BufferGeometry();
-      cloth.setAttribute('position', new THREE.BufferAttribute(underwear(g, fit.pos), 3));
+      const P = underwear(g, fit.pos);
+      if (g === 'trunks') drape(P, genitalMesh(fit.pos, penis(m)).pos, A.arr(`${g}.tris`));
+      cloth.setAttribute('position', new THREE.BufferAttribute(P, 3));
       cloth.setAttribute('uv', new THREE.BufferAttribute(A.arr(`${g}.uv`), 2));
       cloth.setIndex(new THREE.BufferAttribute(A.arr(`${g}.tris`), 1));
       cloth.computeVertexNormals();
@@ -345,6 +347,25 @@ function buildAvatar(dims, sex, isGhost, m = {}, mesh = null, ref = {}) {
   }
   group.scale.setScalar(0.01); // cm → m
   return group;
+}
+
+// Censored: the trunks drape over the genitals as fabric does. Each front vertex is lifted forward to clear what's
+// under it (80 %: fabric presses in), then the lift is smoothed over its neighbours so it bridges like cloth.
+function drape(P, G, tris) {
+  const n = P.length / 3, lift = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let front = -Infinity;
+    for (let j = 0; j < G.length; j += 3) if (Math.abs(G[j] - P[i * 3]) < 1.5 && Math.abs(G[j + 1] - P[i * 3 + 1]) < 1.5) front = Math.max(front, G[j + 2]);
+    const d = front + 0.3 - P[i * 3 + 2];
+    lift[i] = d > 0 && d < 6 ? 0.8 * d : 0; // more than 6 cm behind: the back of the trunks
+  }
+  const nb = Array.from({ length: n }, () => new Set());
+  for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) { nb[tris[t + e]].add(tris[t + (e + 1) % 3]); nb[tris[t + (e + 1) % 3]].add(tris[t + e]); }
+  for (let it = 0; it < 4; it++) {
+    const prev = lift.slice();
+    for (let i = 0; i < n; i++) if (nb[i].size) lift[i] = Math.max(prev[i] * 0.6, [...nb[i]].reduce((s, k) => s + prev[k], 0) / nb[i].size);
+  }
+  for (let i = 0; i < n; i++) P[i * 3 + 2] += lift[i];
 }
 
 // Genitals (body.js): the shaft sized and bent; coloured here, the glans past the corona a little redder.
@@ -699,7 +720,8 @@ function progressPanel() {
     <details><summary>More numbers</summary>
       <table>${['fat_kg', 'ffmi', 'whtr', 'whr'].map((x) => `<tr><td>${META[x].label}</td><td>${fmt(x, m[x])}</td></tr>`).join('')}</table>
       ${healthTable()}
-      <p class="muted">Body fat uses the US Navy circumference formula on your fitted body. Expect ±3–4 points.</p>
+      <p class="muted">${m.bf_scale != null ? `Body fat is the average of two estimates: the cameras' <b>${fmt('bf', m.bf_cam)}</b> (the US Navy formula on your measured body) and your smart scale's <b>${fmt('bf', m.bf_scale)}</b> (that week's average). Each is good to about ±3–5 points; for lean, muscular builds they err in opposite directions.`
+        : `Body fat uses the US Navy formula on your measured body: good to about ±3–4 points. A smart scale syncing to Apple Health adds a second estimate.`}</p>
     </details>
     <details><summary>Training vs body fat, week by week</summary>${weekChart(I.weeks)}</details>
     <details><summary>Recent entries</summary><ul class="list">${S.logs.slice(-20).reverse().map(logItem).join('') || '<li class="muted">Nothing yet</li>'}</ul></details>`;
