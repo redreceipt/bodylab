@@ -47,6 +47,7 @@ cat > "$updater" <<EOF
 </dict>
 </plist>
 EOF
-launchctl bootstrap "gui/$(id -u)" "$plist"
-launchctl bootstrap "gui/$(id -u)" "$updater"
+for p in "$plist" "$updater"; do  # the bootout above finishes in the background: retry until it has
+  for i in 1 2 3 4 5 6 7 8 9 10; do launchctl bootstrap "gui/$(id -u)" "$p" 2>/dev/null && break; sleep 1; done
+done
 echo "BodyLab starts at login from $dir and follows GitHub's main (log: ~/Library/Logs/BodyLab.log). Turn off: tools/autostart.sh off"
