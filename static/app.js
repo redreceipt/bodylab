@@ -385,11 +385,13 @@ function genitals(pos, size) {
   geom.computeVertexNormals();
   return Object.assign(new THREE.Mesh(geom, mats.genitals), { castShadow: true, userData: { part: 'penis_len' } }); // tap: length and girth
 }
-// The size shown: what the cameras measured at rest, or along the range they've seen (the slider in its panel).
-const genitalSize = { at: null }; // null: the usual; 0..1: smallest … fullest seen
+// The size shown: at rest as the cameras measured it, or on towards erect as they saw it (the slider in its panel). As in
+// life it swells first and rises late; part-way up it droops (body.js).
+const genitalSize = { at: 0 }; // 0 at rest … 1 erect
 function penis(m) {
-  const t = genitalSize.at, mix = (k) => (t == null || m[`${k}_lo`] == null ? m[k] : m[`${k}_lo`] + t * (m[`${k}_hi`] - m[`${k}_lo`]));
-  return { length: mix('penis_len') ?? 10, girth: mix('penis_girth') ?? 11, up: 0 };
+  const t = m.penis_erect_len == null ? 0 : genitalSize.at, ease = (a, b) => { const x = Math.min(1, Math.max(0, (t - a) / (b - a))); return x * x * (3 - 2 * x); };
+  const len = m.penis_len ?? 10, girth = m.penis_girth ?? 11, s = ease(0, 0.7);
+  return { length: len + s * ((m.penis_erect_len ?? len) - len), girth: girth + s * ((m.penis_erect_girth ?? girth) - girth), up: ease(0.5, 1), angle: m.penis_erect_angle ?? 0 };
 }
 
 // No fringe in your photo: drop the haircut's hair hanging in front of the forehead, so your own hairline shows.
@@ -669,14 +671,14 @@ function partPanel(k) {
     ${p.workouts || p.change != null ? `<p>${p.workouts ? `${p.workouts} workouts trained this in the last 4 weeks.` : ''}</p>` : ''}
     <details><summary>Goal</summary>${goalBlock(k)}</details>`;
 }
-// Size at rest from the cameras' close views, and a slider through the range they've seen.
+// Size at rest from the cameras' close front views; erect from side views; a slider from one to the other.
 function genitalPanel() {
-  const m = cur(), seen = m.penis_len_lo != null;
+  const m = cur(), p = penis(m), erect = m.penis_erect_len != null;
   return `${metricBlock('penis_len', false)}${metricBlock('penis_girth', false)}
-    ${seen ? `<label>Size seen, smallest to fullest <b>${genitalSize.at == null ? 'usual' : `${fmt('penis_len', penis(m).length)} × ${fmt('penis_girth', penis(m).girth)}`}</b>
-      <input type="range" id="gsize" min="0" max="1" step="0.01" value="${genitalSize.at ?? (m.penis_len - m.penis_len_lo) / (m.penis_len_hi - m.penis_len_lo || 1)}"></label>
-      <p class="muted">At rest, from ${m.penis_n} close views. Erect: not seen by the cameras yet.</p>`
-    : '<p class="muted">Measured at rest once the cameras get a few close front views.</p>'}`;
+    ${erect ? `<label>At rest to erect <b>${fmt('penis_len', p.length)} × ${fmt('penis_girth', p.girth)}</b>
+      <input type="range" id="gsize" min="0" max="1" step="0.01" value="${genitalSize.at}"></label>` : ''}
+    <p class="muted">${m.penis_n ? `At rest from ${m.penis_n} close views (${fmt('penis_len', m.penis_len_lo)} to ${fmt('penis_len', m.penis_len_hi)} long).` : 'Measured at rest once the cameras get a few close front views.'}
+      Erect: ${erect ? `${fmt('penis_len', m.penis_erect_len)} × ${fmt('penis_girth', m.penis_erect_girth)}, ${Math.round(m.penis_erect_angle)}° above level, from ${m.penis_erect_n} side views` : 'not seen by the cameras yet'}.</p>`;
 }
 // Try a size: drag and the avatar shows this part that much bigger or smaller (both sides for a limb), today as the outline.
 function tryControl(k) {
@@ -786,7 +788,7 @@ function renderPanel() {
 }
 function open(v) {
   if (predicted?.label && v?.part !== view?.part) { predicted = null; renderTimeline(); rebuildAvatar(); } // a tried size: back to today
-  if (genitalSize.at != null && v?.part !== 'penis_len') { genitalSize.at = null; rebuildAvatar(); } // back to the usual size
+  if (genitalSize.at && v?.part !== 'penis_len') { genitalSize.at = 0; rebuildAvatar(); } // back to at rest
   if ((view?.tab === 'whatif' || view?.tab === 'goal') && v?.tab !== view.tab) { predicted = null; renderTimeline(); rebuildAvatar(); }
   view = v;
   selectedPart = v?.part && v.part !== 'overall' ? v.part : null;

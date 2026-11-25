@@ -61,6 +61,19 @@ def shaft(img, rec, height_cm):
     return best
 
 
+def person(img):
+    """You in a reference capture, by SAM 2 prompted with your box: the crop's own cut-out has a halo of background."""
+    import torch
+    from PIL import Image
+    proc, model = sam()
+    ys, xs = np.nonzero(np.abs(img.astype(int) - 128).sum(2) > 6)
+    box = [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())]
+    inp = proc(images=Image.fromarray(np.ascontiguousarray(img[..., ::-1])), input_boxes=[[box]], return_tensors='pt')
+    with torch.no_grad():
+        out = model(**inp, multimask_output=False)
+    return proc.post_process_masks(out.pred_masks, inp['original_sizes'])[0][0, 0].numpy().astype(np.uint8)
+
+
 def genitals(ref_dir, height_cm, day):
     """From front captures of the day and the two before (fit.py's window), with bare thighs (shorts look like skin to
     SAM): the median at rest, 'penis_len' and 'penis_girth' (cm), and the range seen, '_lo'/'_hi' (10th, 90th
@@ -160,6 +173,84 @@ def limbs(ref_dir, height_cm, day):
         out |= dict.fromkeys(('thigh_l', 'thigh_r'), round(float(np.pi * np.median(thigh_w)), 1))
     return out
 
+
+def protrusion(you, hip, knee, fwd, cm_px):
+    """What stands out forward of the body at hip height in a profile mask `you` (hip, knee: image points; fwd ±1: the
+    way you face): (length cm, girth cm, angle ° above level), or None. Rows reaching 3+ cm past the line from belly to
+    thigh make bands (a hand in front makes its own, lower); the one at hip height must reach 6+ cm. Along it, each
+    column's middle traces the shaft (its slope: the angle) and its thickness × cos(angle) is the diameter."""
+    h, w = you.shape
+    span = np.linalg.norm(np.subtract(knee, hip))
+
+    def front(y):  # the body's front edge on row y
+        xs = np.flatnonzero(you[int(np.clip(y, 0, h - 1))])
+        return (xs.max() if fwd > 0 else xs.min()) if len(xs) else None
+    yb, yt = hip[1] - .2 * span, hip[1] + .45 * span  # belly and thigh, above and below
+    belly, thigh = front(yb), front(yt)
+    if None in (belly, thigh):
+        return None
+    line = lambda y: belly + (thigh - belly) * (y - yb) / (yt - yb)  # the body's front line
+    rows = [(y, (f - line(y)) * fwd * cm_px) for y in range(int(hip[1] - .1 * span), int(hip[1] + .3 * span)) if (f := front(y)) is not None]
+    bands, run = [], []
+    for r in rows + [(0, 0)]:
+        if r[1] >= 3:
+            run.append(r)
+        elif run:
+            bands, run = bands + [run], []
+    near = [b for b in bands if abs(np.mean([r[0] for r in b]) - hip[1]) * cm_px < 6]
+    if not near:
+        return None
+    band = max(near, key=len)
+    reach, y0, y1 = max(r[1] for r in band), band[0][0], band[-1][0]
+    if reach < 6:
+        return None
+    x0 = line((y0 + y1) / 2)
+    mid, thick = [], []
+    for f in np.linspace(.25, .85, 13):  # columns along it, clear of the root and the tip's rounding
+        x = round(x0 + fwd * f * reach / cm_px)
+        ys = np.flatnonzero(you[y0:y1 + 1, int(np.clip(x, 0, w - 1))])
+        if len(ys):
+            mid.append((f * reach, -(y0 + ys.mean()) * cm_px))  # cm out, cm up
+            thick.append(len(ys) * cm_px)
+    if len(mid) < 5:
+        return None
+    angle = np.degrees(np.arctan(np.polyfit(*np.array(mid).T, 1)[0]))
+    c = np.cos(np.radians(angle))
+    return reach / c, np.pi * np.median(thick) * c, angle
+
+
+def erect_views(ref_dir, height_cm, day):
+    """Every true profile up to the day (any before it: erections are occasional) where an erect penis stands out forward of your outline
+    (protrusion; at ~14 px across, SAM's masks of the shaft itself were less reliable): (length cm from where it leaves
+    the body, girth cm, angle ° above level, capture name)."""
+    import cv2
+    out = []
+    for p in sorted(Path(ref_dir).glob('*.json')):
+        if p.name[:10] > day or not p.with_suffix('.jpg').exists():
+            continue
+        rec = json.loads(p.read_text())
+        if not (75 < abs(rec.get('theta', 0)) < 105 and rec.get('ref') and ((rec.get('skin') or {}).get('thighs') or 0) >= .8):
+            continue
+        img, ref, L = cv2.imread(str(p.with_suffix('.jpg'))), rec['ref'], np.array(rec['sil']['l'])
+        q = (np.array(ref['origin']) + L[[0, 23, 24, 25, 26]] * ref['H'] - np.array(ref['box'][::-1])) * ref['k']  # in the image
+        nose, hip, knee = q[0], q[1:3].mean(0), q[3:].mean(0)
+        fwd = 1 if nose[0] > hip[0] else -1  # the way you face
+        # SAM's outline: the crop's own cut-out has a halo that would thicken it by ~3 cm
+        r = protrusion(person(img) > 0, hip, knee, fwd, height_cm / (ref['H'] * ref['k']))
+        if r and 2.5 < r[1] / np.pi < 6:  # a shaft's thickness, not a hand's
+            out.append((*(round(float(x), 1) for x in r), p.name))
+    return out
+
+
+def erect(ref_dir, height_cm, day):
+    """{'penis_erect_len', 'penis_erect_girth', 'penis_erect_angle', 'penis_erect_n'}: medians over erect_views (2+), or {}."""
+    v = erect_views(ref_dir, height_cm, day)
+    if len(v) < 2:
+        return {}
+    return {'penis_erect_len': round(float(np.median([x[0] for x in v])), 1), 'penis_erect_girth': round(float(np.median([x[1] for x in v])), 1),
+            'penis_erect_angle': round(float(np.median([x[2] for x in v])), 1), 'penis_erect_n': len(v)}
+
+
 if __name__ == '__main__':
     import sys
-    print(genitals(sys.argv[1], float(sys.argv[2]), sys.argv[3]), limbs(sys.argv[1], float(sys.argv[2]), sys.argv[3]))
+    print(*(f(sys.argv[1], float(sys.argv[2]), sys.argv[3]) for f in (genitals, erect, limbs)))

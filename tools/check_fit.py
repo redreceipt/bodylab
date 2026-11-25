@@ -20,23 +20,10 @@ import fit  # noqa: E402
 LEVELS = (-.15, .1, .28, .5, .62, .72, .85, .95)
 
 
-def person(img):
-    """You in a reference capture, by SAM 2 prompted with your box: the crop's own cut-out has a halo of background."""
-    import torch
-    from PIL import Image
-    proc, model = closeups.sam()
-    ys, xs = np.nonzero(np.abs(img.astype(int) - 128).sum(2) > 6)
-    box = [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())]
-    inp = proc(images=Image.fromarray(np.ascontiguousarray(img[..., ::-1])), input_boxes=[[box]], return_tensors='pt')
-    with torch.no_grad():
-        out = model(**inp, multimask_output=False)
-    return proc.post_process_masks(out.pred_masks, inp['original_sizes'])[0][0, 0].numpy().astype(np.uint8)
-
-
 def widths(img, px, tris, L, info, levels):
     """Body ÷ photo silhouette, row by row, at each level where both are whole (not cut off by the crop); and the body's mask."""
     h, w = img.shape[:2]
-    you = person(img)
+    you = closeups.person(img)
     body = np.zeros((h, w), np.uint8)
     for t in px[tris].round().astype(np.int32):
         cv2.fillConvexPoly(body, t, 1)  # one by one: overlapping polygons in one call leave holes

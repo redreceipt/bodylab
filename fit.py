@@ -842,8 +842,9 @@ if __name__ == '__main__':
         np.save(a.save, rest)
     if a.store:
         import anny
-        if prof.get('sex') != 'female':  # from the cameras' close views
-            res['tape'] |= closeups.genitals(Path(a.db).parent / 'reference', prof['height_cm'], day)
+        if prof.get('sex') != 'female':  # from the cameras' close views: at rest, and erect
+            ref = Path(a.db).parent / 'reference'
+            res['tape'] |= closeups.genitals(ref, prof['height_cm'], day) | closeups.erect(ref, prof['height_cm'], day)
         m = anny.Anny(topology='makehuman', rig='makehuman', skinning_method='lbs', local_changes='default')
         store(a.db, day, res, rest, G, (m.vertex_bone_indices.numpy(), m.vertex_bone_weights.numpy()))
         bake_all(a.db, prof)

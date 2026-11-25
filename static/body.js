@@ -296,9 +296,10 @@ export function underwear(name, pos) {
 }
 
 // Genitals: a CC0 community model (modelled erect, ~22 cm) on the fitted body (cm), its shaft sized to length and girth
-// (cm) and bent: up 0 hangs, 1 is erect. The first few cm curve; the rest follows straight. Returns the smoothed mesh's
-// positions and each vertex's place along the shaft (0 base … 1 tip; -1: scrotum).
-export function genitalMesh(pos, { length, girth, up }) {
+// (cm) and bent: up 0 hangs, 1 is erect at `angle` (° above level). The first 1.5 cm curve to where the root points; the
+// rest follows, straight hanging or erect, drooping part-way up. Returns the smoothed mesh's positions and each vertex's
+// place along the shaft (0 base … 1 tip; -1: scrotum).
+export function genitalMesh(pos, { length, girth, up, angle = 0 }) {
   const P0 = fitProxy('genitals', pos), w = T.arr('genitals.shaft'), { tip, rings, base } = T.meta.genitals, n = w.length;
   const v = (P, i) => [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]], dot = (x, y) => x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
   const add = (x, y, k = 1) => [x[0] + k * y[0], x[1] + k * y[1], x[2] + k * y[2]], unit = (x) => add([0, 0, 0], x, 1 / Math.hypot(...x));
@@ -308,14 +309,14 @@ export function genitalMesh(pos, { length, girth, up }) {
   const ptr = T.arr('genitals.ptr'), idx = T.arr('genitals.idx'), mix = T.arr('genitals.mix'), P = new Float32Array(n * 3);
   for (let r = 0; r < n; r++) for (let j = ptr[r]; j < ptr[r + 1]; j++) for (let k = 0; k < 3; k++) P[r * 3 + k] += mix[j] * P0[idx[j] * 3 + k]; // smoothed
   // The model's scrotum is broad and held high (as when erect): drawn in round its middle (86 % across, 90 % otherwise) and
-  // hanging 1.2 cm lower, its seam with the body kept.
+  // hanging 1.2 cm lower, its seam with the body kept; less so as it rises (erect, as modelled).
   const free = T.arr('genitals.free'), sw = (i) => (1 - w[i] / 255) * free[i] / 255;
   let sum = [0, 0, 0], tot = 0;
   for (let i = 0; i < n; i++) { sum = add(sum, v(P, i), sw(i)); tot += sw(i); }
   const mid = sum.map((x) => x / tot);
   for (let i = 0; i < n; i++) {
     const p = add(v(P, i), mid, -1), q = add(add(add(mid, a, 0.9 * dot(p, a)), u, 0.9 * dot(p, u) + 1.2), e, 0.86 * dot(p, e));
-    for (let m = 0; m < 3; m++) P[i * 3 + m] += (q[m] - P[i * 3 + m]) * sw(i);
+    for (let m = 0; m < 3; m++) P[i * 3 + m] += (q[m] - P[i * 3 + m]) * sw(i) * (1 - up);
   }
   const L0 = dot(add(v(P0, tip), B, -1), a), radii = [];
   for (let i = 0; i < n; i++) {
@@ -323,15 +324,19 @@ export function genitalMesh(pos, { length, girth, up }) {
     if (w[i] === 255 && Math.abs(s / L0 - 0.5) < 0.15) radii.push(Math.hypot(...add(p, a, -s)));
   }
   const G0 = 2 * Math.PI * radii.sort((x, y) => x - y)[radii.length >> 1];
-  const kL = length / L0, kG = girth / G0, bend = 1.5, phi = (80 - 105 * up) * Math.PI / 180, k = phi / bend || 1e-6;
+  // Turns down from the modelled axis: aimed at `aim` on average, the root droop / 2 above it and the tip as far below.
+  const rad = Math.PI / 180, aim = -88 + (angle + 88) * up, droop = 120 * up * (1 - up) * rad; // up to 30°, half way up
+  const kL = length / L0, kG = girth / G0, k1 = (Math.asin(a[1]) - aim * rad - droop / 2) / 1.5, k2 = droop / Math.max(length - 1.5, 1);
+  const arc = (t0, k, l) => (Math.abs(k) < 1e-6 ? [Math.cos(t0) * l, Math.sin(t0) * l] // along a and u, turning by k per cm
+    : [(Math.sin(t0 + k * l) - Math.sin(t0)) / k, (Math.cos(t0) - Math.cos(t0 + k * l)) / k]);
   const along = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const p = add(v(P, i), B, -1), s = dot(p, a), f = w[i] / 255;
     along[i] = f > 0.5 ? Math.max(0, s / L0) : -1;
     if (s <= 0 || f === 0) continue; // inside the body, or scrotum: as modelled
-    const S = s * kL, t = Math.min(S, bend) * k, g = 1 + (kG - 1) * Math.min(1, s / 2); // girth eases in over 2 cm: the root meets the body
-    const dir = add([0, 0, 0], a, Math.cos(t)).map((x, m) => x + u[m] * Math.sin(t)), under = add([0, 0, 0], u, Math.cos(t)).map((x, m) => x - a[m] * Math.sin(t));
-    const c = add(add(add([0, 0, 0], a, Math.sin(t) / k), u, (1 - Math.cos(t)) / k), dir, Math.max(0, S - bend)); // centreline
+    const S = s * kL, S1 = Math.min(S, 1.5), S2 = Math.max(0, S - 1.5), t = k1 * S1 + k2 * S2, g = 1 + (kG - 1) * Math.min(1, s / 2); // girth eases in over 2 cm: the root meets the body
+    const under = add([0, 0, 0], u, Math.cos(t)).map((x, m) => x - a[m] * Math.sin(t)), [x1, y1] = arc(0, k1, S1), [x2, y2] = arc(k1 * 1.5, k2, S2);
+    const c = add(add([0, 0, 0], a, x1 + x2), u, y1 + y2); // centreline
     const q = add(add(add(B, c), under, dot(p, u) * g), e, dot(p, e) * g);
     for (let m = 0; m < 3; m++) P[i * 3 + m] += (q[m] - P[i * 3 + m]) * f;
   }

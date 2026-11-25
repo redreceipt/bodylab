@@ -316,3 +316,16 @@ src, uv, tris, _ = bake.assets()
 bary = bake.texels(uv, tris, 512)[3]
 assert np.allclose(bary.sum(1), 1) and bary.min() >= 0  # every texel a point on its triangle
 print('vision-check rules and texel weights ok')
+
+import closeups  # noqa: E402
+# A profile outline facing +x (front edge x=200), 0.25 cm/px: a shaft 10 cm × 4 cm across at 10° above level from hip
+# height, and a hand lower down standing 5 cm out. Only the shaft is measured, at its length, girth and angle.
+you = np.zeros((600, 400), np.uint8)
+you[:, 100:201] = 1
+a = math.radians(10)
+cv2.fillPoly(you, [np.array([[200, 292], [200 + 40 * math.cos(a), 292 - 40 * math.sin(a)], [200 + 40 * math.cos(a) + 16 * math.sin(a), 308 - 40 * math.sin(a)], [200, 308]], np.int32)], 1)
+you[340:360, 200:220] = 1
+L_, G_, A_ = closeups.protrusion(you > 0, (150, 300), (150, 500), 1, .25)
+assert abs(L_ - 10) < .8 and abs(G_ - math.pi * 4) < 1.2 and abs(A_ - 10) < 2, (L_, G_, A_)
+assert closeups.protrusion(you[:, ::-1] > 0, (250, 300), (250, 500), -1, .25) is not None  # facing the other way
+print('erection measure ok')

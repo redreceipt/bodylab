@@ -44,12 +44,18 @@ const centreY = (p) => { let y = 0; for (let i = 1; i < p.length; i += 3) y += p
 const hair = centreY(fitProxy('short02', same.pos));
 assert.ok(hair > t.J.eye_l[1], 'hair sits above the eyes');
 near(centreY(fitProxy('short02', tall.pos)), hair * 1.1, 0.01);
-// Genitals: erect, the shaft comes out at the measured length and girth; at rest it hangs, tip below its base.
+// Genitals: erect, the shaft comes out at the measured length, girth and angle; at rest it hangs, tip below its base;
+// half way up it droops, its tip below the line it leaves the body on.
 {
   const { rings } = A.meta.genitals, P0 = fitProxy('genitals', same.pos);
   const mean = (r, P) => [0, 1, 2].map((k) => r.reduce((s, i) => s + P[i * 3 + k], 0) / r.length);
-  const erect = genitalMesh(same.pos, { length: 15, girth: 13, up: 1 }), rest = genitalMesh(same.pos, { length: 10, girth: 11, up: 0 });
-  assert(erect.pos.every(Number.isFinite) && rest.pos.every(Number.isFinite));
+  const erect = genitalMesh(same.pos, { length: 15, girth: 13, up: 1, angle: 20 }), rest = genitalMesh(same.pos, { length: 10, girth: 11, up: 0 });
+  const half = genitalMesh(same.pos, { length: 12, girth: 12, up: 0.5, angle: 20 });
+  assert([erect, rest, half].every((g) => g.pos.every(Number.isFinite)));
+  const at = (g, lo, hi) => { const c = [0, 0, 0]; let n = 0; g.along.forEach((x, i) => { if (x >= lo && x < hi) { n++; for (let k = 0; k < 3; k++) c[k] += g.pos[i * 3 + k]; } }); return c.map((x) => x / n); };
+  const slope = (g, lo, hi) => { const d = at(g, hi, hi + 0.1).map((x, k) => x - at(g, lo, lo + 0.1)[k]); return Math.atan2(d[1], Math.hypot(d[0], d[2])) * 180 / Math.PI; };
+  near(slope(erect, 0.4, 0.8), 20, 0.15);
+  assert(slope(half, 0.2, 0.5) > slope(half, 0.5, 0.8) + 10, 'half way up, it droops');
   const tipAt = (g) => { let best = 0; g.along.forEach((x, i) => { if (x > g.along[best]) best = i; }); return [g.pos[best * 3], g.pos[best * 3 + 1], g.pos[best * 3 + 2]]; };
   const base = mean(rings[0], P0);
   assert(tipAt(rest)[1] < base[1] - 4 && tipAt(erect)[1] > base[1] - 3, 'hangs at rest, rises erect');
