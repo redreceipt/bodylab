@@ -11,7 +11,8 @@ Requires [uv](https://docs.astral.sh/uv/) and a camera that serves MJPEG or RTSP
 ```sh
 uv run app.py              # http://localhost:8765 (downloads MediaPipe models on first use)
 uv sync --group fit        # optional: fit your real body shape (PyTorch + Anny, ~2.5 GB with Anny's cache)
-tools/autostart.sh         # optional: start at login and keep running (macOS)
+tools/autostart.sh         # optional: start at login, keep running and follow GitHub's main (macOS; see the script
+                           # for running it from a separate worktree, so edits never reach the live app)
 uv run python test_bodylab.py && node test_body.mjs
 ```
 
